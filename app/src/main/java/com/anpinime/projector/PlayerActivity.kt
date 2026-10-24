@@ -636,7 +636,7 @@ class PlayerActivity : AppCompatActivity() {
                     when (currentQualityMode) {
                         0 -> setMaxVideoSize(1920, 1080).setMaxVideoBitrate(8_500_000)
                         1 -> setMaxVideoSize(1280, 720).setMaxVideoBitrate(3_500_000)
-                        else -> clearVideoSizeConstraints().clearVideoBitrateConstraints()
+                        else -> clearVideoSizeConstraints().setMaxVideoBitrate(Int.MAX_VALUE)
                     }
                 }
                 .build()
@@ -784,7 +784,7 @@ class PlayerActivity : AppCompatActivity() {
                     when (currentQualityMode) {
                         0 -> setMaxVideoSize(1920, 1080).setMaxVideoBitrate(8_500_000)
                         1 -> setMaxVideoSize(1280, 720).setMaxVideoBitrate(3_500_000)
-                        else -> clearVideoSizeConstraints().clearVideoBitrateConstraints()
+                        else -> clearVideoSizeConstraints().setMaxVideoBitrate(Int.MAX_VALUE)
                     }
                 }
                 .build()

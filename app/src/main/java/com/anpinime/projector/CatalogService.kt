@@ -760,7 +760,8 @@ object CatalogService {
             val rawHref = hrefRegex.find(block)?.groupValues?.get(1) ?: continue
             val fullUrl = resolveUrl(rawHref, baseUrl) ?: continue
             if (!seen.add(fullUrl)) continue
-            val title = stripHtml(titleRegex.find(block)?.groupValues?.get(1) ?: "").ifBlank { continue }
+            val title = stripHtml(titleRegex.find(block)?.groupValues?.get(1) ?: "")
+            if (title.isBlank()) continue
             val img = imgRegex.find(block)?.groupValues?.get(1)?.let { resolveUrl(it, baseUrl) }
             val ep = stripHtml(epRegex.find(block)?.groupValues?.get(1) ?: "")
             val qual = stripHtml(qualRegex.find(block)?.groupValues?.get(1) ?: "")
