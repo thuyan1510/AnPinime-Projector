@@ -39,7 +39,7 @@ object WebViewHelper {
 
     @Volatile
     var userAgent: String =
-        "Mozilla/5.0 (Linux; Android 11; K670 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "Mozilla/5.0 (Linux; Android 12; Pixel 7 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
         private set
 
     private var activityRef: WeakReference<Activity>? = null
@@ -52,7 +52,7 @@ object WebViewHelper {
         appContext = activity.applicationContext
         try {
             val rawUa = WebSettings.getDefaultUserAgent(activity)
-            if (!rawUa.isNullOrBlank()) {
+            if (!rawUa.isNullOrBlank() && !rawUa.contains("K670", ignoreCase = true)) {
                 // Clean "; wv" and "Version/4.0" so Cloudflare treats WebView & HttpURLConnection identically as Chrome
                 userAgent = rawUa
                     .replace("; wv", "")
@@ -280,9 +280,9 @@ object WebViewHelper {
                                                 }
                                             }
 
-                                            // Show verification dialog if Cloudflare or interactive Turnstile challenge is blocking after 2.0s
-                                            val needsChallengeUi = containsVerification(html) || interactive
-                                            if (needsChallengeUi && verifyDialog == null && activity != null && !activity.isFinishing && elapsed > 2000L) {
+                                            // Only show verification dialog if an interactive challenge checkbox remains unsolved after 8.0s
+                                            val needsChallengeUi = interactive && elapsed > 8000L
+                                            if (needsChallengeUi && verifyDialog == null && activity != null && !activity.isFinishing) {
                                                 wv.settings.loadsImagesAutomatically = true
                                                 (wv.parent as? ViewGroup)?.removeView(wv)
                                                 val dlg = Dialog(activity).apply {

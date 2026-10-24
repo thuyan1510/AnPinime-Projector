@@ -15,13 +15,103 @@ import java.net.CookiePolicy
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.nio.ByteBuffer
 import java.security.MessageDigest
 import java.text.Normalizer
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 import java.util.zip.Inflater
 import javax.crypto.Cipher
+import javax.crypto.Mac
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
+
+object VideoTokenGenerator {
+    private const val HMAC_SECRET_2 = "5e8d1b4f9c2a6e730b1f8d4a92c5e3d1"
+    private const val CDN_GATEWAY = "https://svatv.cryboiz.workers.dev"
+
+    private fun sha256(data: ByteArray): ByteArray =
+        MessageDigest.getInstance("SHA-256").digest(data)
+
+    private fun hmacSha256(key: ByteArray, data: ByteArray): ByteArray {
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(key, "HmacSHA256"))
+        return mac.doFinal(data)
+    }
+
+    private fun deriveDailySecretV2(secret: String, dateUtc: String): String {
+        val keyBytes = sha256(secret.toByteArray(Charsets.UTF_8))
+        val ivSource = sha256("iv:$secret".toByteArray(Charsets.UTF_8))
+        val iv = ivSource.copyOfRange(0, 12)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        val spec = GCMParameterSpec(128, iv)
+        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(keyBytes, "AES"), spec)
+        val plaintext = "$secret:$dateUtc".toByteArray(Charsets.UTF_8)
+        val ciphertext = cipher.doFinal(plaintext)
+        return "$secret:${ciphertext.joinToString("") { "%02x".format(it) }}"
+    }
+
+    private fun otpMask(signingSecret: String): ByteArray {
+        val sigBytes = signingSecret.toByteArray(Charsets.UTF_8)
+        val salt = "otp-ts-mask".toByteArray(Charsets.UTF_8)
+        return hmacSha256(sigBytes, salt).copyOfRange(0, 4)
+    }
+
+    private fun xorIntToHex8(unixSec: Int, mask: ByteArray): String {
+        val raw = ByteBuffer.allocate(4).putInt(unixSec).array()
+        val xored = ByteArray(4) { i -> (raw[i].toInt() xor mask[i].toInt()).toByte() }
+        return xored.joinToString("") { "%02x".format(it) }
+    }
+
+    fun genSignedCdnUrl(filenameOrId: String): String {
+        val cleanId = filenameOrId.substringBefore('?').trim().trimEnd('/')
+            .substringAfterLast('/').substringBeforeLast('.')
+        val sdf = SimpleDateFormat("yyyyMMdd", Locale.US).apply {
+            timeZone = TimeZone.getTimeZone("UTC")
+        }
+        val dateUtc = sdf.format(Date())
+        val signingSecret = deriveDailySecretV2(HMAC_SECRET_2, dateUtc)
+        val nowSec = (System.currentTimeMillis() / 1000L).toInt()
+        val mask = otpMask(signingSecret)
+        val tsHex = xorIntToHex8(nowSec, mask)
+        val msg = "$cleanId:$nowSec"
+        val token = hmacSha256(signingSecret.toByteArray(Charsets.UTF_8), msg.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        return "$CDN_GATEWAY/$cleanId?token=$token&ts=$tsHex"
+    }
+
+    fun resolveSecureStreamUrl(rawUrlOrId: String): String {
+        val trimmed = rawUrlOrId.trim()
+        if (trimmed.contains("sv.p4kzz.workers.dev", ignoreCase = true)) {
+            return trimmed
+        }
+        val signedUrl = genSignedCdnUrl(trimmed)
+        var conn: HttpURLConnection? = null
+        try {
+            conn = (URL(signedUrl).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 10000
+                readTimeout = 12000
+                instanceFollowRedirects = true
+                setRequestProperty("User-Agent", "okhttp/4.9.0")
+                setRequestProperty("Accept", "application/json")
+            }
+            val stream = if (conn.responseCode in 200..399) conn.inputStream else conn.errorStream
+            val body = stream?.use { String(it.readBytes(), Charsets.UTF_8) }.orEmpty()
+            val json = JSONObject(body)
+            val fastUrl = json.optString("url")
+            if (fastUrl.isNotBlank()) {
+                return fastUrl
+            }
+        } catch (_: Throwable) {
+        } finally {
+            conn?.disconnect()
+        }
+        return signedUrl
+    }
+}
 
 object CatalogService {
     val USER_AGENT: String
@@ -179,6 +269,19 @@ object CatalogService {
     suspend fun resolvePlayback(episode: Episode): ResolvedPlayback = withContext(Dispatchers.IO) {
         when (episode.playbackKind) {
             "film4k" -> resolveFilm4kPlayback(episode)
+            "phim4k_vip" -> {
+                val direct = episode.directUrl.ifBlank { episode.url }
+                val resolvedStream = VideoTokenGenerator.resolveSecureStreamUrl(direct)
+                ResolvedPlayback(
+                    url = resolvedStream,
+                    headers = mapOf(
+                        "User-Agent" to "exoplayer"
+                    ),
+                    isWeb = false,
+                    webUrl = episode.url,
+                    isF4kWrapped = false
+                )
+            }
             "direct" -> {
                 val originHost = try {
                     val u = URL(episode.refererUrl.ifBlank { phim4kFree1Mirror })
@@ -551,9 +654,7 @@ object CatalogService {
     private suspend fun loadPhim4kDetail(anime: Anime): AnimeDetail = coroutineScope {
         refreshPhim4kDirectoryIfNeeded()
         val slug = anime.url.substringAfterLast('/')
-        // Put Phim4K (free.cryboiz.workers.dev -> sf.phim4k.space ad-free HLS) first, then VIP Nhanh, then NguonC
         val candidates = listOf(
-            "$phim4kFree1Mirror/phim/$slug" to "Phim4K",
             "$phim4kFree1/phim/$slug" to "VIP Nhanh",
             "$phim4kFree2/api/film/$slug" to "NguonC"
         )
@@ -570,16 +671,13 @@ object CatalogService {
         }
 
         val results = jobs.awaitAll().sortedBy { it.first }.mapNotNull { it.second }
-        if (results.isEmpty()) {
-            throw IllegalStateException("Không tải được chi tiết phim từ Nguồn phim 2.")
-        }
 
         var movieTitle = anime.title
         var poster = anime.imageUrl
         var banner = anime.bannerUrl ?: anime.imageUrl
         var summary = anime.summary
         var info = anime.info
-        val allEpisodes = ArrayList<Episode>()
+        val legacyEpisodes = ArrayList<Episode>()
 
         for ((detailUrl, prefix, json) in results) {
             val movie = json.optJSONObject("movie") ?: continue
@@ -594,21 +692,30 @@ object CatalogService {
             if (info.isBlank()) {
                 info = listOf(year, qual, lang).filter { it.isNotBlank() }.joinToString(" • ")
             }
-            allEpisodes.addAll(extractLegacyDirectEpisodes(json, detailUrl, prefix))
+            legacyEpisodes.addAll(extractLegacyDirectEpisodes(json, detailUrl, prefix))
         }
 
-        // Also query Core API (api.phim4k.online) and map internal phim4k.lol labels to working HLS streams
+        val allEpisodes = ArrayList<Episode>()
+
+        // 1. Core Phim4K VIP servers (direct 1080p/4K CDN streams via VideoTokenGenerator)
         try {
             val coreEpisodes = fetchCorePhim4kServers(
                 slug = slug,
                 title = movieTitle,
                 detailUrl = anime.url,
-                fallbackEpisodes = allEpisodes.filter { it.playbackKind == "direct" }
+                fallbackEpisodes = emptyList()
             )
             if (coreEpisodes.isNotEmpty()) {
                 allEpisodes.addAll(coreEpisodes)
             }
         } catch (_: Throwable) {}
+
+        // 2. VIP Nhanh (phimapi.com) and NguonC
+        allEpisodes.addAll(legacyEpisodes)
+
+        if (allEpisodes.isEmpty() && results.isEmpty()) {
+            throw IllegalStateException("Không tải được chi tiết phim từ Nguồn phim 2.")
+        }
 
         AnimeDetail(
             title = movieTitle,
@@ -667,6 +774,9 @@ object CatalogService {
                 }
 
                 if (chosenDirect.isNotBlank()) {
+                    if (chosenDirect.contains("sf.phim4k.space", ignoreCase = true)) {
+                        continue
+                    }
                     val fallbackWeb = when {
                         chosenEmbed.isNotBlank() -> chosenEmbed
                         chosenDirect.startsWith("http", ignoreCase = true) &&
@@ -711,28 +821,56 @@ object CatalogService {
         slug: String,
         title: String,
         detailUrl: String,
-        fallbackEpisodes: List<Episode>
+        fallbackEpisodes: List<Episode> = emptyList()
     ): List<Episode> {
-        val enc = URLEncoder.encode(title, "UTF-8")
-        val searchUrl = "$phim4kCoreUrl/rest-api/v130/search?q=$enc&page=1&type=movietvserieslive"
-        val searchJson = getJson(searchUrl, extraHeaders = mapOf("API-KEY" to phim4kCoreKey), timeoutMs = 5000)
+        val searchQueries = mutableListOf<String>()
+        if (title.isNotBlank()) {
+            searchQueries.add(title.trim())
+            if (title.contains("(")) {
+                val before = title.substringBefore('(').trim()
+                if (before.isNotBlank() && !searchQueries.contains(before)) searchQueries.add(before)
+            }
+            if (title.contains(")")) {
+                val after = title.substringAfterLast(')').trim()
+                if (after.isNotBlank() && !searchQueries.contains(after)) searchQueries.add(after)
+            }
+        }
+        val slugClean = slug.replace('-', ' ').trim()
+        if (slugClean.isNotBlank() && !searchQueries.contains(slugClean)) {
+            searchQueries.add(slugClean)
+        }
+
         val candidates = ArrayList<Pair<JSONObject, String>>()
-        val movies = searchJson.optJSONArray("movie")
-        if (movies != null) {
-            for (i in 0 until movies.length()) {
-                movies.optJSONObject(i)?.let { candidates.add(it to "movie") }
-            }
+        for (q in searchQueries) {
+            try {
+                val enc = URLEncoder.encode(q, "UTF-8")
+                val searchUrl = "$phim4kCoreUrl/rest-api/v130/search?q=$enc&page=1&type=movietvserieslive"
+                val searchJson = getJson(searchUrl, extraHeaders = mapOf("API-KEY" to phim4kCoreKey), timeoutMs = 4500)
+                val movies = searchJson.optJSONArray("movie")
+                if (movies != null) {
+                    for (i in 0 until movies.length()) {
+                        movies.optJSONObject(i)?.let { candidates.add(it to "movie") }
+                    }
+                }
+                val series = searchJson.optJSONArray("tvseries")
+                if (series != null) {
+                    for (i in 0 until series.length()) {
+                        series.optJSONObject(i)?.let { candidates.add(it to "tvseries") }
+                    }
+                }
+                if (candidates.isNotEmpty()) break
+            } catch (_: Throwable) {}
         }
-        val series = searchJson.optJSONArray("tvseries")
-        if (series != null) {
-            for (i in 0 until series.length()) {
-                series.optJSONObject(i)?.let { candidates.add(it to "tvseries") }
-            }
-        }
+
+        if (candidates.isEmpty()) return emptyList()
+
         val matched = candidates.firstOrNull { (obj, _) ->
-            obj.optString("slug").equals(slug, ignoreCase = true) ||
-                obj.optString("title").contains(title, ignoreCase = true)
-        } ?: candidates.firstOrNull() ?: return emptyList()
+            val objSlug = obj.optString("slug")
+            val objTitle = obj.optString("title")
+            objSlug.equals(slug, ignoreCase = true) ||
+                objTitle.contains(title, ignoreCase = true) ||
+                (title.isNotBlank() && title.contains(objTitle, ignoreCase = true))
+        } ?: candidates.first()
 
         val vid = matched.first.optString("videos_id")
         if (vid.isBlank()) return emptyList()
@@ -745,40 +883,27 @@ object CatalogService {
             for (i in 0 until videos.length()) {
                 val v = videos.optJSONObject(i) ?: continue
                 val fileUrl = v.optString("file_url").trim()
-                val label = v.optString("label").ifBlank { "Server 4K #${i + 1}" }
+                if (fileUrl.isBlank()) continue
+                val label = v.optString("label").ifBlank { "Server VIP #${i + 1}" }
                 val badge = detectQualityBadge("$label $fileUrl")
-                val isInternalCdn = !fileUrl.startsWith("http", ignoreCase = true) ||
-                    fileUrl.contains("phim4k.lol", ignoreCase = true) ||
-                    fileUrl.substringBefore('?').endsWith(".mkv", ignoreCase = true)
+                val isInternalCdn = fileUrl.contains("phim4k.lol", ignoreCase = true) ||
+                    !fileUrl.startsWith("http", ignoreCase = true) ||
+                    (!fileUrl.contains(".m3u8", ignoreCase = true) && !fileUrl.contains("/stream/hls", ignoreCase = true))
 
-                if (!isInternalCdn) {
-                    val isEmbed = v.optString("file_type").contains("embed", ignoreCase = true)
-                    out.add(
-                        Episode(
-                            title = "Xem phim",
-                            url = detailUrl,
-                            number = 1,
-                            season = "Phim4K VIP · $label",
-                            qualityBadge = badge,
-                            source = ContentSource.PHIM4K,
-                            playbackKind = if (isEmbed) "web" else "direct",
-                            directUrl = fileUrl,
-                            refererUrl = phim4kCoreUrl
-                        )
+                val epTitle = if (videos.length() > 1) "Server ${i + 1}" else "Xem phim"
+                out.add(
+                    Episode(
+                        title = epTitle,
+                        url = detailUrl,
+                        number = i + 1,
+                        season = "Phim4K VIP · $label",
+                        qualityBadge = badge,
+                        source = ContentSource.PHIM4K,
+                        playbackKind = if (isInternalCdn) "phim4k_vip" else "direct",
+                        directUrl = fileUrl,
+                        refererUrl = phim4kCoreUrl
                     )
-                } else {
-                    val fb = matchFallbackEpisode(label, 0, fallbackEpisodes)
-                    if (fb != null) {
-                        out.add(
-                            fb.copy(
-                                title = "Xem phim",
-                                number = 1,
-                                season = "Phim4K VIP · $label",
-                                qualityBadge = badge
-                            )
-                        )
-                    }
-                }
+                )
             }
         }
 
@@ -791,58 +916,33 @@ object CatalogService {
                 val eps = sObj.optJSONArray("episodes") ?: continue
                 for (eIdx in 0 until eps.length()) {
                     val epObj = eps.optJSONObject(eIdx) ?: continue
-                    val epTitle = epObj.optString("episodes_name").ifBlank { "Tập ${eIdx + 1}" }
+                    val rawEpName = epObj.optString("episodes_name")
+                    val epMatch = Regex("""(?i)(?:E|Tập\s*)(\d+)""").find(rawEpName)
+                    val epNum = epMatch?.groupValues?.get(1)?.toIntOrNull() ?: (eIdx + 1)
+                    val epTitle = "Tập $epNum"
                     val fileUrl = epObj.optString("file_url").trim()
-                    val isInternalCdn = !fileUrl.startsWith("http", ignoreCase = true) ||
-                        fileUrl.contains("phim4k.lol", ignoreCase = true) ||
-                        fileUrl.substringBefore('?').endsWith(".mkv", ignoreCase = true)
+                    if (fileUrl.isBlank()) continue
+                    val isInternalCdn = fileUrl.contains("phim4k.lol", ignoreCase = true) ||
+                        !fileUrl.startsWith("http", ignoreCase = true) ||
+                        (!fileUrl.contains(".m3u8", ignoreCase = true) && !fileUrl.contains("/stream/hls", ignoreCase = true))
 
-                    if (!isInternalCdn) {
-                        out.add(
-                            Episode(
-                                title = epTitle,
-                                url = detailUrl,
-                                number = eIdx + 1,
-                                season = "Phim4K VIP · $seasonName",
-                                qualityBadge = badge,
-                                source = ContentSource.PHIM4K,
-                                playbackKind = "direct",
-                                directUrl = fileUrl,
-                                refererUrl = phim4kCoreUrl
-                            )
+                    out.add(
+                        Episode(
+                            title = epTitle,
+                            url = detailUrl,
+                            number = epNum,
+                            season = "Phim4K VIP · $seasonName",
+                            qualityBadge = badge,
+                            source = ContentSource.PHIM4K,
+                            playbackKind = if (isInternalCdn) "phim4k_vip" else "direct",
+                            directUrl = fileUrl,
+                            refererUrl = phim4kCoreUrl
                         )
-                    } else {
-                        val fb = matchFallbackEpisode(seasonName, eIdx, fallbackEpisodes)
-                        if (fb != null) {
-                            out.add(
-                                fb.copy(
-                                    title = epTitle,
-                                    number = eIdx + 1,
-                                    season = "Phim4K VIP · $seasonName",
-                                    qualityBadge = badge
-                                )
-                            )
-                        }
-                    }
+                    )
                 }
             }
         }
         return out
-    }
-
-    private fun matchFallbackEpisode(label: String, episodeIndex: Int, fallback: List<Episode>): Episode? {
-        if (fallback.isEmpty()) return null
-        val normLabel = foldVietnamese(label)
-        val wantsDub = normLabel.contains("thuyet minh") || normLabel.contains("long tieng")
-        val candidates = fallback.filter { ep ->
-            val s = foldVietnamese(ep.season)
-            val isDub = s.contains("thuyet minh") || s.contains("long tieng")
-            if (wantsDub) isDub else !isDub
-        }
-        val pool = if (candidates.isNotEmpty()) candidates else fallback
-        return pool.firstOrNull { it.number == episodeIndex + 1 }
-            ?: pool.getOrNull(episodeIndex)
-            ?: pool.firstOrNull()
     }
 
     private fun resolvePhim4kPlayback(episode: Episode): ResolvedPlayback {

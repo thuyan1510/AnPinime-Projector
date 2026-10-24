@@ -45,6 +45,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.DefaultHlsExtractorFactory
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import kotlinx.coroutines.CoroutineScope
@@ -62,6 +63,7 @@ class PlayerActivity : AppCompatActivity() {
     private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var resolveJob: Job? = null
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val attemptedStreamUrls = HashSet<String>()
 
     private var movieTitle: String = ""
     private lateinit var currentEpisode: Episode
@@ -628,6 +630,7 @@ class PlayerActivity : AppCompatActivity() {
     ) {
         currentEpisode = episode
         retryCount = 0
+        attemptedStreamUrls.clear()
         topServerText.text = "${episode.title} • ${episode.season}"
         loadingOverlay.visibility = View.VISIBLE
         loadingText.text = "Đang tải ${episode.title} (${episode.season})…"
@@ -712,32 +715,36 @@ class PlayerActivity : AppCompatActivity() {
         val renderersFactory = DefaultRenderersFactory(this)
             .setEnableDecoderFallback(true)
 
+        attemptedStreamUrls.add(streamUrl)
+
         val mergedHeaders = HashMap(headers)
         WebViewHelper.getCookieHeader(streamUrl)?.let { mergedHeaders["Cookie"] = it }
 
+        val ua = headers["User-Agent"] ?: CatalogService.USER_AGENT
         val httpFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent(CatalogService.USER_AGENT)
-            .setConnectTimeoutMs(12_000)
-            .setReadTimeoutMs(18_000)
+            .setUserAgent(ua)
+            .setConnectTimeoutMs(15_000)
+            .setReadTimeoutMs(20_000)
             .setAllowCrossProtocolRedirects(true)
             .setDefaultRequestProperties(mergedHeaders)
 
-        val cleanPath = streamUrl.substringBefore('?').lowercase()
-        val isDirectContainer = cleanPath.endsWith(".mp4") ||
-            cleanPath.endsWith(".mkv") ||
-            cleanPath.endsWith(".mov") ||
-            cleanPath.endsWith(".webm")
+        val cleanLower = streamUrl.lowercase()
+        val isHls = cleanLower.contains(".m3u8") ||
+            cleanLower.contains("/hls/") ||
+            cleanLower.contains("/stream/hls") ||
+            cleanLower.contains("format=m3u8") ||
+            cleanLower.contains("m3u8")
 
         val mediaItem = MediaItem.Builder()
             .setUri(Uri.parse(streamUrl))
             .apply {
-                if (!isDirectContainer) {
+                if (isHls) {
                     setMimeType(MimeTypes.APPLICATION_M3U8)
                 }
             }
             .build()
 
-        val mediaSource = if (!isDirectContainer) {
+        val mediaSource = if (isHls) {
             val hlsExtractorFactory = DefaultHlsExtractorFactory(
                 DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
                     DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS,
@@ -748,7 +755,7 @@ class PlayerActivity : AppCompatActivity() {
                 .setAllowChunklessPreparation(false)
                 .createMediaSource(mediaItem)
         } else {
-            ProgressiveMediaSource.Factory(httpFactory)
+            ProgressiveMediaSource.Factory(httpFactory, DefaultExtractorsFactory().setConstantBitrateSeekingEnabled(true))
                 .createMediaSource(mediaItem)
         }
 
@@ -872,6 +879,9 @@ class PlayerActivity : AppCompatActivity() {
             fun onVideoFound(streamUrl: String, refUrl: String) {
                 mainHandler.post {
                     if (streamUrl.startsWith("http", ignoreCase = true) && exoPlayer == null) {
+                        if (attemptedStreamUrls.contains(streamUrl)) {
+                            return@post
+                        }
                         val origin = try {
                             val u = java.net.URL(refUrl.ifBlank { webUrl })
                             "${u.protocol}://${u.host}"
