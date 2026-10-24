@@ -158,5 +158,7 @@ data class AnimeDetail(
 data class ResolvedPlayback(
     val url: String,
     val headers: Map<String, String> = emptyMap(),
-    val isF4kWrapped: Boolean = false
+    val isF4kWrapped: Boolean = false,
+    val isWeb: Boolean = false,
+    val webUrl: String = ""
 )

@@ -1,5 +1,6 @@
 package com.anpinime.projector
 
+import android.annotation.SuppressLint
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -15,16 +16,24 @@ import android.view.SurfaceView
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
+import android.webkit.JsResult
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
-import android.widget.ProgressBar
 import android.widget.SeekBar
 import android.widget.TextView
 import androidx.annotation.OptIn
 import androidx.appcompat.app.AppCompatActivity
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
@@ -57,6 +66,8 @@ class PlayerActivity : AppCompatActivity() {
     private var exoPlayer: ExoPlayer? = null
     private var trackSelector: DefaultTrackSelector? = null
     private var filmRelay: FilmMediaRelay? = null
+    private var fallbackWebView: WebView? = null
+    private var lastWebUrl: String = ""
     private var retryCount = 0
     private var currentQualityMode = 0 // 0 = Auto 1080p, 1 = 720p (Siêu mượt), 2 = 4K Gốc
 
@@ -80,7 +91,7 @@ class PlayerActivity : AppCompatActivity() {
     private var osdVisible = true
 
     private val hideOsdRunnable = Runnable {
-        if (exoPlayer?.isPlaying == true) {
+        if (exoPlayer?.isPlaying == true || fallbackWebView != null) {
             hideOsd()
         }
     }
@@ -94,6 +105,7 @@ class PlayerActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WebViewHelper.registerActivity(this)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         ImageLoader.trimMemory()
 
@@ -112,9 +124,15 @@ class PlayerActivity : AppCompatActivity() {
         mainHandler.post(progressRunnable)
     }
 
+    override fun onResume() {
+        super.onResume()
+        WebViewHelper.registerActivity(this)
+    }
+
     override fun onStop() {
         super.onStop()
         exoPlayer?.pause()
+        fallbackWebView?.onPause()
     }
 
     override fun onDestroy() {
@@ -123,6 +141,7 @@ class PlayerActivity : AppCompatActivity() {
         resolveJob?.cancel()
         uiScope.cancel()
         releasePlayer()
+        destroyWebPlayer()
     }
 
     private fun releasePlayer() {
@@ -130,12 +149,27 @@ class PlayerActivity : AppCompatActivity() {
             filmRelay?.stop()
         } catch (_: Throwable) {}
         filmRelay = null
-        try {
-            exoPlayer?.clearVideoSurfaceView(surfaceView)
-            exoPlayer?.release()
-        } catch (_: Throwable) {}
+        val oldPlayer = exoPlayer
         exoPlayer = null
         trackSelector = null
+        if (oldPlayer != null) {
+            try {
+                oldPlayer.clearVideoSurfaceView(surfaceView)
+            } catch (_: Throwable) {}
+            try {
+                oldPlayer.release()
+            } catch (_: Throwable) {}
+        }
+    }
+
+    private fun destroyWebPlayer() {
+        val wv = fallbackWebView ?: return
+        fallbackWebView = null
+        try {
+            wv.stopLoading()
+            (wv.parent as? ViewGroup)?.removeView(wv)
+            wv.destroy()
+        } catch (_: Throwable) {}
     }
 
     // =========================================================================
@@ -223,7 +257,7 @@ class PlayerActivity : AppCompatActivity() {
                 }
             } else {
                 if (keyCode == KeyEvent.KEYCODE_BACK || keyCode == KeyEvent.KEYCODE_ESCAPE) {
-                    if (exoPlayer?.isPlaying == true) {
+                    if (exoPlayer?.isPlaying == true || fallbackWebView != null) {
                         hideOsd()
                     } else {
                         finish()
@@ -236,7 +270,7 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     // =========================================================================
-    // UI CONSTRUCTION (Pure Hardware SurfaceView + Lightweight OSD)
+    // UI CONSTRUCTION (Pure Hardware SurfaceView + Animated GIF Loader + OSD)
     // =========================================================================
 
     private fun buildUi() {
@@ -271,19 +305,19 @@ class PlayerActivity : AppCompatActivity() {
         videoFrame.addView(surfaceView)
         root.addView(videoFrame)
 
-        // Loading / Status Overlay
+        // Loading / Status Overlay with iOS Animated Loading GIF
         loadingOverlay = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setPadding(UiHelper.dp(context, 24), UiHelper.dp(context, 18), UiHelper.dp(context, 24), UiHelper.dp(context, 18))
-            background = UiHelper.roundedBg(Color.parseColor("#CC10121C"), 14, context)
+            background = UiHelper.roundedBg(Color.parseColor("#D908090E"), 16, context, Color.parseColor("#26FFFFFF"), 1)
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 Gravity.CENTER
             )
         }
-        loadingOverlay.addView(ProgressBar(this))
+        loadingOverlay.addView(UiHelper.createGifView(this, currentEpisode.source.isMovie, sizeDp = 92))
         loadingText = TextView(this).apply {
             text = "Đang kết nối luồng phát…"
             setTextColor(Color.WHITE)
@@ -580,7 +614,7 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     // =========================================================================
-    // EXOPLAYER INITIALIZATION & STREAM PLAYBACK (Low-RAM Projector Tuned)
+    // EXOPLAYER & WEB FALLBACK INITIALIZATION (Low-RAM Projector Tuned)
     // =========================================================================
 
     private fun startEpisodePlayback(
@@ -593,11 +627,18 @@ class PlayerActivity : AppCompatActivity() {
         topServerText.text = "${episode.title} • ${episode.season}"
         loadingOverlay.visibility = View.VISIBLE
         loadingText.text = "Đang tải ${episode.title} (${episode.season})…"
+        destroyWebPlayer()
+        surfaceView.visibility = View.VISIBLE
 
         resolveJob?.cancel()
         resolveJob = uiScope.launch {
             try {
                 val resolved = CatalogService.resolvePlayback(episode)
+                lastWebUrl = resolved.webUrl.ifBlank { episode.url }
+                if (resolved.isWeb) {
+                    startWebFallback(resolved.url, resolved.headers["Referer"] ?: episode.url)
+                    return@launch
+                }
                 val playUrl = if (resolved.isF4kWrapped) {
                     filmRelay?.stop()
                     val relay = FilmMediaRelay(resolved.headers)
@@ -615,9 +656,13 @@ class PlayerActivity : AppCompatActivity() {
                 )
             } catch (t: Throwable) {
                 if (!trySwitchToBackupServer(0L)) {
-                    loadingOverlay.visibility = View.VISIBLE
-                    loadingText.text = "Lỗi tải luồng: ${t.message}\nBấm phím Lên/Xuống -> Đổi Server khác."
-                    showOsd(focusPlayButton = true)
+                    if (episode.url.startsWith("http", ignoreCase = true) && !episode.source.isMovie) {
+                        startWebFallback(episode.url, CatalogService.animeBaseUrl)
+                    } else {
+                        loadingOverlay.visibility = View.VISIBLE
+                        loadingText.text = "Lỗi tải luồng: ${t.message}\nBấm phím Lên/Xuống -> Đổi Server khác."
+                        showOsd(focusPlayButton = true)
+                    }
                 }
             }
         }
@@ -628,7 +673,9 @@ class PlayerActivity : AppCompatActivity() {
         headers: Map<String, String>,
         seekMs: Long
     ) {
-        exoPlayer?.release()
+        releasePlayer()
+        destroyWebPlayer()
+        surfaceView.visibility = View.VISIBLE
 
         val selector = DefaultTrackSelector(this).apply {
             parameters = buildUponParameters()
@@ -658,12 +705,15 @@ class PlayerActivity : AppCompatActivity() {
         val renderersFactory = DefaultRenderersFactory(this)
             .setEnableDecoderFallback(true)
 
+        val mergedHeaders = HashMap(headers)
+        WebViewHelper.getCookieHeader(streamUrl)?.let { mergedHeaders["Cookie"] = it }
+
         val httpFactory = DefaultHttpDataSource.Factory()
             .setUserAgent(CatalogService.USER_AGENT)
-            .setConnectTimeoutMs(10_000)
-            .setReadTimeoutMs(15_000)
+            .setConnectTimeoutMs(12_000)
+            .setReadTimeoutMs(18_000)
             .setAllowCrossProtocolRedirects(true)
-            .setDefaultRequestProperties(headers)
+            .setDefaultRequestProperties(mergedHeaders)
 
         val player = ExoPlayer.Builder(this, renderersFactory)
             .setTrackSelector(selector)
@@ -715,21 +765,206 @@ class PlayerActivity : AppCompatActivity() {
                     player.prepare()
                     if (lastPos > 0L) player.seekTo(lastPos)
                     player.play()
-                } else if (!trySwitchToBackupServer(lastPos)) {
-                    loadingOverlay.visibility = View.VISIBLE
-                    loadingText.text = "Máy chủ hiện tại bị gián đoạn.\nHãy chọn [Đổi Server] ở thanh bên dưới."
-                    showOsd(focusPlayButton = true)
+                } else {
+                    // Always post server switch to mainHandler so we never release ExoPlayer inside its own listener
+                    mainHandler.post {
+                        if (!trySwitchToBackupServer(lastPos)) {
+                            if (lastWebUrl.startsWith("http", ignoreCase = true) &&
+                                (lastWebUrl.contains("embed", ignoreCase = true) ||
+                                    lastWebUrl.contains("player", ignoreCase = true) ||
+                                    !currentEpisode.source.isMovie)
+                            ) {
+                                startWebFallback(lastWebUrl, currentEpisode.url)
+                            } else {
+                                loadingOverlay.visibility = View.VISIBLE
+                                loadingText.text = "Máy chủ hiện tại bị gián đoạn.\nHãy chọn [Đổi Server] ở thanh bên dưới."
+                                showOsd(focusPlayButton = true)
+                            }
+                        }
+                    }
                 }
             }
         })
 
         exoPlayer = player
-        player.setMediaItem(MediaItem.fromUri(Uri.parse(streamUrl)))
+
+        // Explicitly set MimeTypes.APPLICATION_M3U8 for all HLS streams (including /api/content/stream/hls)
+        val cleanPath = streamUrl.substringBefore('?').lowercase()
+        val isDirectContainer = cleanPath.endsWith(".mp4") ||
+            cleanPath.endsWith(".mkv") ||
+            cleanPath.endsWith(".mov") ||
+            cleanPath.endsWith(".webm")
+
+        val mediaItem = MediaItem.Builder()
+            .setUri(Uri.parse(streamUrl))
+            .apply {
+                if (!isDirectContainer) {
+                    setMimeType(MimeTypes.APPLICATION_M3U8)
+                }
+            }
+            .build()
+
+        player.setMediaItem(mediaItem)
         player.prepare()
         if (seekMs > 0L) {
             player.seekTo(seekMs)
         }
         player.playWhenReady = true
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun startWebFallback(webUrl: String, referer: String) {
+        releasePlayer()
+        destroyWebPlayer()
+        surfaceView.visibility = View.GONE
+        loadingOverlay.visibility = View.VISIBLE
+        loadingText.text = "Đang mở trình phát dự phòng…"
+
+        val wv = WebView(this).apply {
+            setBackgroundColor(Color.BLACK)
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                Gravity.CENTER
+            )
+            isFocusable = false
+            isFocusableInTouchMode = false
+        }
+        val cm = CookieManager.getInstance()
+        cm.setAcceptCookie(true)
+        cm.setAcceptThirdPartyCookies(wv, true)
+
+        wv.settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            databaseEnabled = true
+            mediaPlaybackRequiresUserGesture = false
+            mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+            userAgentString = CatalogService.USER_AGENT
+        }
+
+        wv.addJavascriptInterface(object {
+            @JavascriptInterface
+            fun onVideoFound(streamUrl: String, refUrl: String) {
+                mainHandler.post {
+                    if (streamUrl.startsWith("http", ignoreCase = true) && exoPlayer == null) {
+                        val origin = try {
+                            val u = java.net.URL(refUrl.ifBlank { webUrl })
+                            "${u.protocol}://${u.host}"
+                        } catch (_: Throwable) {
+                            ""
+                        }
+                        val hdrs = HashMap<String, String>()
+                        hdrs["User-Agent"] = CatalogService.USER_AGENT
+                        if (origin.isNotBlank()) {
+                            hdrs["Referer"] = "$origin/"
+                            hdrs["Origin"] = origin
+                        }
+                        prepareExoPlayer(streamUrl, hdrs, 0L)
+                    }
+                }
+            }
+
+            @JavascriptInterface
+            fun onPlayerReady() {
+                mainHandler.post {
+                    loadingOverlay.visibility = View.GONE
+                    scheduleHideOsd()
+                }
+            }
+        }, "AnPinimeWebBridge")
+
+        val fallbackIsolateScript = """
+            (function(){
+              if(window.__anpinimeInstalled) return;
+              window.__anpinimeInstalled = true;
+              var reported = {};
+              function observe(u) {
+                try {
+                  var full = new URL(String(u), location.href).href;
+                  if (/\.m3u8(?:[?#]|$)/i.test(full) && !/(?:doubleclick|popads|\/ads?\/)/i.test(full) && !reported[full]) {
+                    reported[full] = true;
+                    AnPinimeWebBridge.onVideoFound(full, location.href);
+                  }
+                } catch(e){}
+              }
+              var origFetch = window.fetch;
+              if (origFetch) window.fetch = function() {
+                var a = arguments[0]; observe(a && a.url || a);
+                return origFetch.apply(this, arguments);
+              };
+              var origOpen = XMLHttpRequest.prototype.open;
+              XMLHttpRequest.prototype.open = function(m, u) {
+                observe(u);
+                return origOpen.apply(this, arguments);
+              };
+              function imp(el, k, v) { if(el) el.style.setProperty(k, v, 'important'); }
+              function isolate(el) {
+                if (!el) return;
+                var n = el;
+                while (n && n !== document.body) {
+                  var p = n.parentElement; if (!p) break;
+                  Array.prototype.forEach.call(p.children, function(s){ if (s !== n) imp(s, 'display', 'none'); });
+                  imp(p, 'display', 'block'); imp(p, 'width', '100%'); imp(p, 'height', '100%');
+                  imp(p, 'margin', '0'); imp(p, 'padding', '0');
+                  n = p;
+                }
+                imp(document.documentElement, 'background', '#000'); imp(document.documentElement, 'overflow', 'hidden');
+                imp(document.body, 'background', '#000'); imp(document.body, 'margin', '0'); imp(document.body, 'overflow', 'hidden');
+                imp(el, 'position', 'fixed'); imp(el, 'inset', '0'); imp(el, 'width', '100vw'); imp(el, 'height', '100vh');
+                imp(el, 'z-index', '2147483647'); imp(el, 'background', '#000');
+                AnPinimeWebBridge.onPlayerReady();
+              }
+              function scan() {
+                var v = document.querySelector('video');
+                if (v) {
+                  var s = v.currentSrc || v.src || '';
+                  if (/^https?:/i.test(s)) observe(s);
+                  isolate(v);
+                  if (v.paused && !v.__userPaused) { var p = v.play(); if (p && p.catch) p.catch(function(){}); }
+                  return;
+                }
+                var sel = ['#media-player','.player-container','.watching_player','#player','.jwplayer','iframe[src]'];
+                for (var i=0; i<sel.length; i++) {
+                  var el = document.querySelector(sel[i]);
+                  if (el) { isolate(el); break; }
+                }
+              }
+              setInterval(scan, 700);
+              scan();
+            })();
+        """.trimIndent()
+
+        wv.webChromeClient = object : WebChromeClient() {
+            override fun onJsAlert(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean {
+                result?.confirm()
+                return true
+            }
+        }
+
+        wv.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                view?.evaluateJavascript(fallbackIsolateScript, null)
+                mainHandler.postDelayed({
+                    if (fallbackWebView === view) {
+                        loadingOverlay.visibility = View.GONE
+                    }
+                }, 2500L)
+            }
+
+            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                val u = request?.url?.toString().orEmpty()
+                if (u.contains("doubleclick") || u.contains("popads") || u.contains("googlesyndication")) {
+                    return true
+                }
+                return false
+            }
+        }
+
+        fallbackWebView = wv
+        videoFrame.addView(wv, 0)
+        wv.loadUrl(webUrl, mapOf("Referer" to referer, "User-Agent" to CatalogService.USER_AGENT))
     }
 
     private fun trySwitchToBackupServer(resumePosMs: Long): Boolean {
@@ -792,20 +1027,35 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun togglePlayPause() {
-        val player = exoPlayer ?: return
-        if (player.isPlaying) {
-            player.pause()
-        } else {
-            player.play()
+        val player = exoPlayer
+        if (player != null) {
+            if (player.isPlaying) {
+                player.pause()
+            } else {
+                player.play()
+            }
+            return
         }
+        fallbackWebView?.evaluateJavascript(
+            "(function(){var v=document.querySelector('video');if(v){if(v.paused){v.__userPaused=false;v.play();}else{v.__userPaused=true;v.pause();}}})();",
+            null
+        )
     }
 
     private fun seekRelative(deltaMs: Long) {
-        val player = exoPlayer ?: return
-        val dur = player.duration.takeIf { it > 0 } ?: return
-        val target = (player.currentPosition + deltaMs).coerceIn(0L, dur)
-        player.seekTo(target)
-        updateProgressUi()
+        val player = exoPlayer
+        if (player != null) {
+            val dur = player.duration.takeIf { it > 0 } ?: return
+            val target = (player.currentPosition + deltaMs).coerceIn(0L, dur)
+            player.seekTo(target)
+            updateProgressUi()
+            return
+        }
+        val deltaSec = deltaMs / 1000.0
+        fallbackWebView?.evaluateJavascript(
+            "(function(){var v=document.querySelector('video');if(v&&isFinite(v.duration)){v.currentTime=Math.max(0,Math.min(v.duration,v.currentTime+($deltaSec)));}})();",
+            null
+        )
     }
 
     private fun playNextEpisode() {

@@ -35,6 +35,7 @@ class DetailActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WebViewHelper.registerActivity(this)
 
         val rawJson = intent.getStringExtra("anime_json")
         if (rawJson.isNullOrBlank()) {
@@ -55,6 +56,11 @@ class DetailActivity : AppCompatActivity() {
         loadDetail()
     }
 
+    override fun onResume() {
+        super.onResume()
+        WebViewHelper.registerActivity(this)
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         uiScope.cancel()
@@ -62,25 +68,13 @@ class DetailActivity : AppCompatActivity() {
 
     private fun loadDetail() {
         rootContainer.removeAllViews()
-        val loadingBox = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
+        rootContainer.addView(
+            UiHelper.createLoadingBox(
+                this,
+                anime.source.isMovie,
+                "Đang tải thông tin phim & danh sách máy chủ…"
             )
-        }
-        loadingBox.addView(ProgressBar(this))
-        loadingBox.addView(
-            TextView(this).apply {
-                text = "Đang tải thông tin phim & danh sách máy chủ…"
-                setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                typeface = Typeface.DEFAULT_BOLD
-                setPadding(0, UiHelper.dp(context, 14), 0, 0)
-            }
         )
-        rootContainer.addView(loadingBox)
 
         uiScope.launch {
             try {

@@ -84,11 +84,13 @@ object ImageLoader {
                 readTimeout = 9000
                 instanceFollowRedirects = true
                 setRequestProperty("User-Agent", CatalogService.USER_AGENT)
-                if (!referer.isNullOrBlank()) {
-                    setRequestProperty("Referer", referer)
+                val defaultRef = if (urlString.contains("animevietsub", ignoreCase = true)) {
+                    "${CatalogService.animeBaseUrl}/"
                 } else {
-                    setRequestProperty("Referer", "${u.protocol}://${u.host}/")
+                    "${u.protocol}://${u.host}/"
                 }
+                setRequestProperty("Referer", if (!referer.isNullOrBlank()) referer else defaultRef)
+                WebViewHelper.getCookieHeader(urlString)?.let { setRequestProperty("Cookie", it) }
             }
             val bytes = conn.inputStream.use { it.readBytes() }
             if (bytes.isEmpty()) return null

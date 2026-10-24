@@ -19,7 +19,6 @@ import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
@@ -32,6 +31,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import org.json.JSONArray
+import java.lang.ref.WeakReference
 
 class MainActivity : AppCompatActivity() {
 
@@ -49,16 +50,21 @@ class MainActivity : AppCompatActivity() {
     private lateinit var logoImage: ImageView
     private lateinit var sourceSubtitleText: TextView
     private lateinit var contentContainer: FrameLayout
+    private lateinit var sidebarOverlay: FrameLayout
+    private lateinit var sidebarPanel: LinearLayout
+    private lateinit var topMenuBadgeText: TextView
     private val sidebarButtons = HashMap<String, TextView>()
+    private var isSidebarOpen = false
+    private var lastContentFocusRef: WeakReference<View>? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WebViewHelper.registerActivity(this)
 
         val prefs = getSharedPreferences("anpinime_projector", Context.MODE_PRIVATE)
         currentSource = ContentSource.fromId(prefs.getString("source", ContentSource.FILM4K.id))
 
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
+        val root = FrameLayout(this).apply {
             setBackgroundColor(UiHelper.COLOR_BG)
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -66,17 +72,73 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
-        val sidebar = buildSidebar()
-        contentContainer = FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
+        // Main full-screen column (Top quick status bar + Full-width Content Container)
+        val fullScreenCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
         }
 
-        root.addView(sidebar)
-        root.addView(contentContainer)
+        val topHeaderBar = buildTopHeaderBar()
+        contentContainer = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        }
+
+        fullScreenCol.addView(topHeaderBar)
+        fullScreenCol.addView(contentContainer)
+        root.addView(fullScreenCol)
+
+        // Left Edge Thin Hint Strip (4dp) so user visually knows left edge opens Sidebar
+        val leftEdgeHint = View(this).apply {
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(
+                    Color.TRANSPARENT,
+                    Color.parseColor("#66A855F7"),
+                    Color.TRANSPARENT
+                )
+            )
+            layoutParams = FrameLayout.LayoutParams(
+                UiHelper.dp(this@MainActivity, 3),
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                Gravity.START
+            )
+            setOnClickListener { openSidebar() }
+        }
+        root.addView(leftEdgeHint)
+
+        // Auto-hiding Collapsible Sidebar Overlay (Hidden by default so movies use 100% width)
+        sidebarOverlay = FrameLayout(this).apply {
+            setBackgroundColor(Color.parseColor("#B3000000"))
+            visibility = View.GONE
+            isClickable = true
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            setOnClickListener {
+                closeSidebar(restoreFocus = true)
+            }
+        }
+        sidebarPanel = buildSidebarPanel()
+        sidebarOverlay.addView(sidebarPanel)
+        root.addView(sidebarOverlay)
+
         setContentView(root)
 
         updateSidebarState()
         loadHomeData()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        WebViewHelper.registerActivity(this)
     }
 
     override fun onTrimMemory(level: Int) {
@@ -96,19 +158,166 @@ class MainActivity : AppCompatActivity() {
         uiScope.cancel()
     }
 
-    private fun buildSidebar(): View {
+    // =========================================================================
+    // REMOTE D-PAD LEFT-EDGE SIDEBAR TRIGGER
+    // =========================================================================
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN) {
+            val keyCode = event.keyCode
+
+            if (keyCode == KeyEvent.KEYCODE_MENU) {
+                if (isSidebarOpen) closeSidebar(restoreFocus = true) else openSidebar()
+                return true
+            }
+
+            if (isSidebarOpen) {
+                if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT ||
+                    keyCode == KeyEvent.KEYCODE_BACK ||
+                    keyCode == KeyEvent.KEYCODE_ESCAPE
+                ) {
+                    closeSidebar(restoreFocus = true)
+                    return true
+                }
+            } else {
+                if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
+                    val focused = currentFocus
+                    // If focused on an EditText with cursor not at start, let cursor move left naturally
+                    if (focused is EditText && focused.selectionStart > 0) {
+                        return super.dispatchKeyEvent(event)
+                    }
+                    val nextLeft = focused?.focusSearch(View.FOCUS_LEFT)
+                    if (focused == null || nextLeft == null || isDescendantOf(nextLeft, sidebarOverlay)) {
+                        openSidebar()
+                        return true
+                    }
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    private fun isDescendantOf(view: View?, container: ViewGroup): Boolean {
+        var cur: View? = view
+        while (cur != null) {
+            if (cur === container) return true
+            cur = cur.parent as? View
+        }
+        return false
+    }
+
+    private fun openSidebar() {
+        if (isSidebarOpen) return
+        val focused = currentFocus
+        if (focused != null && !isDescendantOf(focused, sidebarOverlay)) {
+            lastContentFocusRef = WeakReference(focused)
+        }
+        isSidebarOpen = true
+        updateSidebarState()
+        sidebarOverlay.visibility = View.VISIBLE
+        val targetKey = when (currentTab) {
+            "search" -> "tab_search"
+            "browse" -> "tab_browse"
+            else -> "tab_home"
+        }
+        (sidebarButtons[targetKey] ?: sidebarButtons["src_film4k"])?.requestFocus()
+    }
+
+    private fun closeSidebar(restoreFocus: Boolean) {
+        if (!isSidebarOpen) return
+        isSidebarOpen = false
+        sidebarOverlay.visibility = View.GONE
+        if (restoreFocus) {
+            val prev = lastContentFocusRef?.get()
+            if (prev != null && prev.isShown && prev.isFocusable) {
+                prev.requestFocus()
+            } else {
+                contentContainer.requestFocus()
+            }
+        }
+    }
+
+    private fun buildTopHeaderBar(): View {
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(UiHelper.dp(context, 18), UiHelper.dp(context, 10), UiHelper.dp(context, 18), UiHelper.dp(context, 4))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        val menuTriggerBtn = TextView(this).apply {
+            text = "☰  Menu & Nguồn"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(UiHelper.dp(context, 14), UiHelper.dp(context, 6), UiHelper.dp(context, 14), UiHelper.dp(context, 6))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { rightMargin = UiHelper.dp(context, 12) }
+        }
+        UiHelper.makeFocusableButton(
+            view = menuTriggerBtn,
+            normalBgColor = UiHelper.COLOR_CARD,
+            focusedBgColor = UiHelper.COLOR_ACCENT,
+            focusedStrokeColor = Color.WHITE,
+            radiusDp = 999
+        ) {
+            openSidebar()
+        }
+        bar.addView(menuTriggerBtn)
+
+        topMenuBadgeText = TextView(this).apply {
+            text = "${currentSource.title}  •  Ấn ◀ sang trái hết cỡ để mở thanh bên"
+            setTextColor(UiHelper.COLOR_TEXT_SECONDARY)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setSingleLine(true)
+            ellipsize = TextUtils.TruncateAt.END
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        bar.addView(topMenuBadgeText)
+
+        val quickSearchBtn = TextView(this).apply {
+            text = "🔍 Tìm nhanh"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(UiHelper.dp(context, 12), UiHelper.dp(context, 6), UiHelper.dp(context, 12), UiHelper.dp(context, 6))
+        }
+        UiHelper.makeFocusableButton(
+            view = quickSearchBtn,
+            normalBgColor = UiHelper.COLOR_CARD,
+            focusedBgColor = UiHelper.COLOR_ACCENT,
+            focusedStrokeColor = Color.WHITE,
+            radiusDp = 999
+        ) {
+            currentTab = "search"
+            updateSidebarState()
+            renderSearch()
+        }
+        bar.addView(quickSearchBtn)
+
+        return bar
+    }
+
+    private fun buildSidebarPanel(): LinearLayout {
         val sidebar = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(UiHelper.COLOR_SIDEBAR)
+            isClickable = true
             setPadding(
-                UiHelper.dp(context, 14),
+                UiHelper.dp(context, 16),
                 UiHelper.dp(context, 18),
-                UiHelper.dp(context, 14),
+                UiHelper.dp(context, 16),
                 UiHelper.dp(context, 14)
             )
-            layoutParams = LinearLayout.LayoutParams(
-                UiHelper.dp(context, 215),
-                ViewGroup.LayoutParams.MATCH_PARENT
+            layoutParams = FrameLayout.LayoutParams(
+                UiHelper.dp(context, 240),
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                Gravity.START
             )
         }
 
@@ -128,6 +337,7 @@ class MainActivity : AppCompatActivity() {
 
         val brandTextCol = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
 
         val appTitle = TextView(this).apply {
@@ -178,9 +388,11 @@ class MainActivity : AppCompatActivity() {
                 focusedBgColor = Color.parseColor("#352256"),
                 focusedStrokeColor = Color.WHITE,
                 radiusDp = 10,
-                scaleOnFocus = 1.03f,
-                onClick = onClick
-            )
+                scaleOnFocus = 1.03f
+            ) {
+                closeSidebar(restoreFocus = false)
+                onClick()
+            }
             sidebar.addView(btn)
         }
 
@@ -228,6 +440,14 @@ class MainActivity : AppCompatActivity() {
             loadHomeData()
         }
 
+        val hintTv = TextView(this).apply {
+            text = "Mẹo: Ấn ▶ sang phải hoặc nút Quay lại để đóng thanh bên."
+            setTextColor(UiHelper.COLOR_TEXT_SECONDARY)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setPadding(UiHelper.dp(context, 4), UiHelper.dp(context, 8), UiHelper.dp(context, 4), 0)
+        }
+        sidebar.addView(hintTv)
+
         return sidebar
     }
 
@@ -248,6 +468,12 @@ class MainActivity : AppCompatActivity() {
     private fun updateSidebarState() {
         logoImage.setImageResource(if (currentSource.isMovie) R.drawable.logo_movie else R.drawable.logo_anime)
         sourceSubtitleText.text = currentSource.title
+        val tabName = when (currentTab) {
+            "search" -> "Tìm kiếm"
+            "browse" -> "Thể loại"
+            else -> "Trang chủ"
+        }
+        topMenuBadgeText.text = "${currentSource.title} • $tabName  (Ấn ◀ sang trái hết cỡ để mở Menu)"
 
         fun styleBtn(key: String, active: Boolean) {
             val btn = sidebarButtons[key] ?: return
@@ -274,25 +500,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun showLoading(message: String) {
         contentContainer.removeAllViews()
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-        }
-        val spinner = ProgressBar(this)
-        val label = TextView(this).apply {
-            text = message
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(0, UiHelper.dp(context, 14), 0, 0)
-        }
-        box.addView(spinner)
-        box.addView(label)
-        contentContainer.addView(box)
+        contentContainer.addView(UiHelper.createLoadingBox(this, currentSource.isMovie, message))
     }
 
     private fun showError(message: String, onRetry: () -> Unit) {
@@ -363,7 +571,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     // =========================================================================
-    // HOME SCREEN (Phim4K Hero Banner + Horizontal Section Rows)
+    // HOME SCREEN (Phim4K Hero Banner + Full-Width Horizontal Section Rows)
     // =========================================================================
 
     private fun renderHome() {
@@ -377,7 +585,7 @@ class MainActivity : AppCompatActivity() {
         }
         val mainCol = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(UiHelper.dp(context, 18), UiHelper.dp(context, 14), UiHelper.dp(context, 18), UiHelper.dp(context, 28))
+            setPadding(UiHelper.dp(context, 18), UiHelper.dp(context, 8), UiHelper.dp(context, 18), UiHelper.dp(context, 28))
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -403,9 +611,9 @@ class MainActivity : AppCompatActivity() {
         val heroFrame = FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                UiHelper.dp(context, 245)
+                UiHelper.dp(context, 240)
             ).apply {
-                bottomMargin = UiHelper.dp(context, 20)
+                bottomMargin = UiHelper.dp(context, 18)
             }
             background = UiHelper.roundedBg(UiHelper.COLOR_CARD, 16, context, Color.parseColor("#2AFFFFFF"), 1)
             clipChildren = true
@@ -444,7 +652,7 @@ class MainActivity : AppCompatActivity() {
         val contentRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(UiHelper.dp(context, 22), UiHelper.dp(context, 16), UiHelper.dp(context, 22), UiHelper.dp(context, 16))
+            setPadding(UiHelper.dp(context, 22), UiHelper.dp(context, 14), UiHelper.dp(context, 22), UiHelper.dp(context, 14))
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -455,8 +663,8 @@ class MainActivity : AppCompatActivity() {
             scaleType = ImageView.ScaleType.CENTER_CROP
             background = UiHelper.roundedBg(UiHelper.COLOR_SIDEBAR, 10, context, Color.parseColor("#40FFFFFF"), 1)
             layoutParams = LinearLayout.LayoutParams(
-                UiHelper.dp(context, 136),
-                UiHelper.dp(context, 198)
+                UiHelper.dp(context, 134),
+                UiHelper.dp(context, 194)
             ).apply {
                 rightMargin = UiHelper.dp(context, 22)
             }
@@ -542,7 +750,7 @@ class MainActivity : AppCompatActivity() {
         badgeRow.addView(qualBadge)
         centerStack.addView(badgeRow)
 
-        // Action Buttons: White Capsule [Xem chi tiết] + [Đổi phim đề cử ❯]
+        // Action Buttons: White Capsule [Xem chi tiết] + [Đề cử tiếp ❯]
         val actionRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -666,7 +874,7 @@ class MainActivity : AppCompatActivity() {
             layoutManager = LinearLayoutManager(context, LinearLayoutManager.HORIZONTAL, false)
             clipToPadding = false
             setHasFixedSize(true)
-            setItemViewCacheSize(4)
+            setItemViewCacheSize(5)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 UiHelper.dp(context, 262)
@@ -682,14 +890,52 @@ class MainActivity : AppCompatActivity() {
     }
 
     // =========================================================================
-    // SEARCH SCREEN (With Remote D-Pad Quick Input + Keyboard)
+    // SEARCH SCREEN (With Persistent Search History + Remote D-Pad Quick Input)
     // =========================================================================
+
+    private fun loadSearchHistory(): List<String> {
+        val prefs = getSharedPreferences("anpinime_projector", Context.MODE_PRIVATE)
+        val raw = prefs.getString("search_history_json", null) ?: return emptyList()
+        return try {
+            val arr = JSONArray(raw)
+            val list = ArrayList<String>(arr.length())
+            for (i in 0 until arr.length()) {
+                val item = arr.optString(i).trim()
+                if (item.isNotEmpty()) list.add(item)
+            }
+            list
+        } catch (_: Throwable) {
+            emptyList()
+        }
+    }
+
+    private fun saveSearchQuery(query: String) {
+        val clean = query.trim()
+        if (clean.isEmpty()) return
+        val current = loadSearchHistory().toMutableList()
+        current.removeAll { it.equals(clean, ignoreCase = true) }
+        current.add(0, clean)
+        val trimmed = current.take(15)
+        val arr = JSONArray()
+        trimmed.forEach { arr.put(it) }
+        getSharedPreferences("anpinime_projector", Context.MODE_PRIVATE)
+            .edit()
+            .putString("search_history_json", arr.toString())
+            .apply()
+    }
+
+    private fun clearSearchHistory() {
+        getSharedPreferences("anpinime_projector", Context.MODE_PRIVATE)
+            .edit()
+            .remove("search_history_json")
+            .apply()
+    }
 
     private fun renderSearch() {
         contentContainer.removeAllViews()
         val mainCol = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(UiHelper.dp(context, 18), UiHelper.dp(context, 16), UiHelper.dp(context, 18), UiHelper.dp(context, 16))
+            setPadding(UiHelper.dp(context, 18), UiHelper.dp(context, 10), UiHelper.dp(context, 18), UiHelper.dp(context, 16))
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -702,7 +948,7 @@ class MainActivity : AppCompatActivity() {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { bottomMargin = UiHelper.dp(context, 10) }
+            ).apply { bottomMargin = UiHelper.dp(context, 8) }
         }
 
         val input = EditText(this).apply {
@@ -712,7 +958,7 @@ class MainActivity : AppCompatActivity() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
             setSingleLine(true)
             imeOptions = EditorInfo.IME_ACTION_SEARCH
-            setPadding(UiHelper.dp(context, 16), UiHelper.dp(context, 12), UiHelper.dp(context, 16), UiHelper.dp(context, 12))
+            setPadding(UiHelper.dp(context, 16), UiHelper.dp(context, 10), UiHelper.dp(context, 16), UiHelper.dp(context, 10))
             background = UiHelper.roundedBg(UiHelper.COLOR_CARD, 10, context, Color.parseColor("#40FFFFFF"), 1)
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
                 rightMargin = UiHelper.dp(context, 10)
@@ -724,7 +970,7 @@ class MainActivity : AppCompatActivity() {
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             typeface = Typeface.DEFAULT_BOLD
-            setPadding(UiHelper.dp(context, 22), UiHelper.dp(context, 12), UiHelper.dp(context, 22), UiHelper.dp(context, 12))
+            setPadding(UiHelper.dp(context, 22), UiHelper.dp(context, 11), UiHelper.dp(context, 22), UiHelper.dp(context, 11))
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -732,11 +978,19 @@ class MainActivity : AppCompatActivity() {
         }
 
         val clearBtn = TextView(this).apply {
-            text = "Xoá"
+            text = "Xoá ô nhập"
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             typeface = Typeface.DEFAULT_BOLD
-            setPadding(UiHelper.dp(context, 16), UiHelper.dp(context, 12), UiHelper.dp(context, 16), UiHelper.dp(context, 12))
+            setPadding(UiHelper.dp(context, 16), UiHelper.dp(context, 11), UiHelper.dp(context, 16), UiHelper.dp(context, 11))
+        }
+
+        val historyContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
         }
 
         val resultsFrame = FrameLayout(this).apply {
@@ -747,21 +1001,112 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
+        fun refreshHistoryBar(onSelectHistory: (String) -> Unit) {
+            historyContainer.removeAllViews()
+            val history = loadSearchHistory()
+            if (history.isEmpty()) return
+
+            val rowWrap = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = UiHelper.dp(context, 10) }
+            }
+
+            val label = TextView(this).apply {
+                text = "Lịch sử:"
+                setTextColor(UiHelper.COLOR_TEXT_SECONDARY)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                typeface = Typeface.DEFAULT_BOLD
+                setPadding(0, 0, UiHelper.dp(context, 8), 0)
+            }
+            rowWrap.addView(label)
+
+            val hScroll = HorizontalScrollView(this).apply {
+                isHorizontalScrollBarEnabled = false
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            val chipRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+
+            for (term in history) {
+                val chip = TextView(this).apply {
+                    text = "🕒 $term"
+                    setTextColor(Color.WHITE)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                    typeface = Typeface.DEFAULT_BOLD
+                    setSingleLine(true)
+                    setPadding(UiHelper.dp(context, 12), UiHelper.dp(context, 6), UiHelper.dp(context, 12), UiHelper.dp(context, 6))
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply { rightMargin = UiHelper.dp(context, 7) }
+                }
+                UiHelper.makeFocusableButton(
+                    view = chip,
+                    normalBgColor = Color.parseColor("#222638"),
+                    focusedBgColor = UiHelper.COLOR_ACCENT,
+                    focusedStrokeColor = Color.WHITE,
+                    radiusDp = 16
+                ) {
+                    onSelectHistory(term)
+                }
+                chipRow.addView(chip)
+            }
+            hScroll.addView(chipRow)
+            rowWrap.addView(hScroll)
+
+            val clearHistoryBtn = TextView(this).apply {
+                text = "🗑 Xoá lịch sử"
+                setTextColor(Color.parseColor("#FFB4B4"))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                typeface = Typeface.DEFAULT_BOLD
+                setPadding(UiHelper.dp(context, 10), UiHelper.dp(context, 6), UiHelper.dp(context, 10), UiHelper.dp(context, 6))
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { leftMargin = UiHelper.dp(context, 6) }
+            }
+            UiHelper.makeFocusableButton(
+                view = clearHistoryBtn,
+                normalBgColor = Color.parseColor("#381E24"),
+                focusedBgColor = UiHelper.COLOR_RED,
+                focusedStrokeColor = Color.WHITE,
+                radiusDp = 14
+            ) {
+                clearSearchHistory()
+                refreshHistoryBar(onSelectHistory)
+            }
+            rowWrap.addView(clearHistoryBtn)
+            historyContainer.addView(rowWrap)
+        }
+
         fun runSearch(query: String) {
             val clean = query.trim()
             if (clean.isEmpty()) return
+            saveSearchQuery(clean)
+            refreshHistoryBar { selectedTerm ->
+                input.setText(selectedTerm)
+                input.setSelection(selectedTerm.length)
+                runSearch(selectedTerm)
+            }
+
             val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
             imm?.hideSoftInputFromWindow(input.windowToken, 0)
 
             resultsFrame.removeAllViews()
-            val loading = ProgressBar(this).apply {
-                layoutParams = FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    Gravity.CENTER
+            resultsFrame.addView(
+                UiHelper.createLoadingBox(
+                    this,
+                    currentSource.isMovie,
+                    "Đang tìm \"$clean\" trong ${currentSource.title}…",
+                    sizeDp = 100
                 )
-            }
-            resultsFrame.addView(loading)
+            )
 
             loadJob?.cancel()
             loadJob = uiScope.launch {
@@ -782,7 +1127,7 @@ class MainActivity : AppCompatActivity() {
                         resultsFrame.addView(emptyText)
                     } else {
                         val grid = RecyclerView(this@MainActivity).apply {
-                            layoutManager = GridLayoutManager(context, 5)
+                            layoutManager = GridLayoutManager(context, 6)
                             clipToPadding = false
                             setHasFixedSize(true)
                             layoutParams = FrameLayout.LayoutParams(
@@ -849,7 +1194,7 @@ class MainActivity : AppCompatActivity() {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { bottomMargin = UiHelper.dp(context, 12) }
+            ).apply { bottomMargin = UiHelper.dp(context, 8) }
         }
         val quickRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -892,13 +1237,19 @@ class MainActivity : AppCompatActivity() {
         quickRowScroll.addView(quickRow)
         mainCol.addView(quickRowScroll)
 
+        refreshHistoryBar { selectedTerm ->
+            input.setText(selectedTerm)
+            input.setSelection(selectedTerm.length)
+            runSearch(selectedTerm)
+        }
+        mainCol.addView(historyContainer)
         mainCol.addView(resultsFrame)
         contentContainer.addView(mainCol)
         searchBtn.requestFocus()
     }
 
     // =========================================================================
-    // CATEGORY BROWSE SCREEN (With Pagination)
+    // CATEGORY BROWSE SCREEN (Full-Width 6-Column Grid + Pagination)
     // =========================================================================
 
     private fun openCategoryBrowse(selectedCategory: AnimeCategory?) {
@@ -911,7 +1262,7 @@ class MainActivity : AppCompatActivity() {
         contentContainer.removeAllViews()
         val mainCol = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(UiHelper.dp(context, 18), UiHelper.dp(context, 14), UiHelper.dp(context, 18), UiHelper.dp(context, 14))
+            setPadding(UiHelper.dp(context, 18), UiHelper.dp(context, 10), UiHelper.dp(context, 18), UiHelper.dp(context, 14))
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -924,7 +1275,7 @@ class MainActivity : AppCompatActivity() {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { bottomMargin = UiHelper.dp(context, 12) }
+            ).apply { bottomMargin = UiHelper.dp(context, 10) }
         }
         val catRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -997,13 +1348,12 @@ class MainActivity : AppCompatActivity() {
             if (pageToLoad == 1) {
                 gridContainer.removeAllViews()
                 gridContainer.addView(
-                    ProgressBar(this).apply {
-                        layoutParams = FrameLayout.LayoutParams(
-                            ViewGroup.LayoutParams.WRAP_CONTENT,
-                            ViewGroup.LayoutParams.WRAP_CONTENT,
-                            Gravity.CENTER
-                        )
-                    }
+                    UiHelper.createLoadingBox(
+                        this,
+                        currentSource.isMovie,
+                        "Đang tải danh mục ${active.title}…",
+                        sizeDp = 100
+                    )
                 )
             }
             loadJob?.cancel()
@@ -1018,7 +1368,7 @@ class MainActivity : AppCompatActivity() {
 
                     gridContainer.removeAllViews()
                     val grid = RecyclerView(this@MainActivity).apply {
-                        layoutManager = GridLayoutManager(context, 5)
+                        layoutManager = GridLayoutManager(context, 6)
                         clipToPadding = false
                         setHasFixedSize(true)
                         layoutParams = FrameLayout.LayoutParams(
