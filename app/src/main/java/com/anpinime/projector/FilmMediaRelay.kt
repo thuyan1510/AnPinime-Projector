@@ -53,7 +53,8 @@ class FilmMediaRelay(
 
     private fun proxyUrlFor(remoteUrl: String): String {
         val encoded = URLEncoder.encode(remoteUrl, "UTF-8")
-        val ext = if (remoteUrl.substringBefore('?').endsWith(".m3u8", ignoreCase = true)) ".m3u8" else ""
+        val clean = remoteUrl.substringBefore('?').lowercase()
+        val ext = if (clean.endsWith(".m3u8") || clean.contains("/stream/hls") || clean.contains("hls")) ".m3u8" else ""
         return "http://127.0.0.1:$port/proxy$ext?u=$encoded"
     }
 
@@ -90,7 +91,9 @@ class FilmMediaRelay(
                 }
                 val rawBytes = conn.inputStream.use { it.readBytes() }
                 val contentType = conn.contentType ?: ""
-                val isPlaylist = targetUrl.substringBefore('?').endsWith(".m3u8", ignoreCase = true) ||
+                val cleanTarget = targetUrl.substringBefore('?').lowercase()
+                val isPlaylist = cleanTarget.endsWith(".m3u8") ||
+                    cleanTarget.contains("/stream/hls") ||
                     contentType.contains("mpegurl", ignoreCase = true) ||
                     (rawBytes.size >= 7 && String(rawBytes, 0, 7, Charsets.UTF_8) == "#EXTM3U")
 
@@ -107,11 +110,16 @@ class FilmMediaRelay(
                     out.write(body)
                 } else {
                     val unwrapped = unwrapPng(rawBytes)
+                    val isTs = cleanTarget.endsWith(".ts") ||
+                        contentType.contains("mp2t", ignoreCase = true) ||
+                        (unwrapped.isNotEmpty() && unwrapped[0] == 0x47.toByte())
+                    val mime = if (isTs) "video/mp2t" else "video/mp4"
+
                     val slice = parseRange(rangeHeader, unwrapped.size)
                     if (slice != null) {
                         val len = slice.last - slice.first + 1
                         val header = "HTTP/1.1 206 Partial Content\r\n" +
-                            "Content-Type: video/mp4\r\n" +
+                            "Content-Type: $mime\r\n" +
                             "Accept-Ranges: bytes\r\n" +
                             "Content-Range: bytes ${slice.first}-${slice.last}/${unwrapped.size}\r\n" +
                             "Content-Length: $len\r\n" +
@@ -120,7 +128,7 @@ class FilmMediaRelay(
                         out.write(unwrapped, slice.first, len)
                     } else {
                         val header = "HTTP/1.1 200 OK\r\n" +
-                            "Content-Type: video/mp4\r\n" +
+                            "Content-Type: $mime\r\n" +
                             "Accept-Ranges: bytes\r\n" +
                             "Content-Length: ${unwrapped.size}\r\n" +
                             "Connection: close\r\n\r\n"

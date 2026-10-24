@@ -42,7 +42,10 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.hls.DefaultHlsExtractorFactory
+import androidx.media3.exoplayer.hls.HlsMediaSource
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -51,6 +54,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import java.net.URLEncoder
 
 @OptIn(UnstableApi::class)
 class PlayerActivity : AppCompatActivity() {
@@ -639,7 +643,10 @@ class PlayerActivity : AppCompatActivity() {
                     startWebFallback(resolved.url, resolved.headers["Referer"] ?: episode.url)
                     return@launch
                 }
-                val playUrl = if (resolved.isF4kWrapped) {
+                val needsRelay = resolved.isF4kWrapped ||
+                    resolved.url.contains("/stream/hls", ignoreCase = true) ||
+                    (resolved.url.substringBefore('?').lowercase().endsWith(".m3u8") && resolved.url.contains("film4k", ignoreCase = true))
+                val playUrl = if (needsRelay) {
                     filmRelay?.stop()
                     val relay = FilmMediaRelay(resolved.headers)
                     filmRelay = relay
@@ -651,7 +658,7 @@ class PlayerActivity : AppCompatActivity() {
                 }
                 prepareExoPlayer(
                     streamUrl = playUrl,
-                    headers = if (resolved.isF4kWrapped) emptyMap() else resolved.headers,
+                    headers = if (needsRelay) emptyMap() else resolved.headers,
                     seekMs = if (resetPosition) 0L else initialPositionMs
                 )
             } catch (t: Throwable) {
@@ -715,10 +722,39 @@ class PlayerActivity : AppCompatActivity() {
             .setAllowCrossProtocolRedirects(true)
             .setDefaultRequestProperties(mergedHeaders)
 
+        val cleanPath = streamUrl.substringBefore('?').lowercase()
+        val isDirectContainer = cleanPath.endsWith(".mp4") ||
+            cleanPath.endsWith(".mkv") ||
+            cleanPath.endsWith(".mov") ||
+            cleanPath.endsWith(".webm")
+
+        val mediaItem = MediaItem.Builder()
+            .setUri(Uri.parse(streamUrl))
+            .apply {
+                if (!isDirectContainer) {
+                    setMimeType(MimeTypes.APPLICATION_M3U8)
+                }
+            }
+            .build()
+
+        val mediaSource = if (!isDirectContainer) {
+            val hlsExtractorFactory = DefaultHlsExtractorFactory(
+                DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
+                    DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS,
+                true
+            )
+            HlsMediaSource.Factory(httpFactory)
+                .setExtractorFactory(hlsExtractorFactory)
+                .setAllowChunklessPreparation(false)
+                .createMediaSource(mediaItem)
+        } else {
+            ProgressiveMediaSource.Factory(httpFactory)
+                .createMediaSource(mediaItem)
+        }
+
         val player = ExoPlayer.Builder(this, renderersFactory)
             .setTrackSelector(selector)
             .setLoadControl(loadControl)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(httpFactory))
             .build()
 
         player.videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
@@ -766,20 +802,25 @@ class PlayerActivity : AppCompatActivity() {
                     if (lastPos > 0L) player.seekTo(lastPos)
                     player.play()
                 } else {
-                    // Always post server switch to mainHandler so we never release ExoPlayer inside its own listener
                     mainHandler.post {
-                        if (!trySwitchToBackupServer(lastPos)) {
-                            if (lastWebUrl.startsWith("http", ignoreCase = true) &&
+                        val fallbackUrl = when {
+                            lastWebUrl.startsWith("http", ignoreCase = true) &&
                                 (lastWebUrl.contains("embed", ignoreCase = true) ||
                                     lastWebUrl.contains("player", ignoreCase = true) ||
-                                    !currentEpisode.source.isMovie)
-                            ) {
-                                startWebFallback(lastWebUrl, currentEpisode.url)
-                            } else {
-                                loadingOverlay.visibility = View.VISIBLE
-                                loadingText.text = "Máy chủ hiện tại bị gián đoạn.\nHãy chọn [Đổi Server] ở thanh bên dưới."
-                                showOsd(focusPlayButton = true)
-                            }
+                                    !currentEpisode.source.isMovie) -> lastWebUrl
+                            currentEpisode.url.contains("embed", ignoreCase = true) ||
+                                currentEpisode.url.contains("player", ignoreCase = true) -> currentEpisode.url
+                            currentEpisode.source == ContentSource.PHIM4K && streamUrl.startsWith("http", ignoreCase = true) ->
+                                try { "https://player.phimapi.com/player/?url=" + URLEncoder.encode(streamUrl, "UTF-8") } catch (_: Throwable) { "" }
+                            else -> ""
+                        }
+
+                        if (fallbackUrl.isNotBlank()) {
+                            startWebFallback(fallbackUrl, currentEpisode.url)
+                        } else if (!trySwitchToBackupServer(lastPos)) {
+                            loadingOverlay.visibility = View.VISIBLE
+                            loadingText.text = "Máy chủ hiện tại bị gián đoạn.\nHãy chọn [Đổi Server] ở thanh bên dưới."
+                            showOsd(focusPlayButton = true)
                         }
                     }
                 }
@@ -787,24 +828,7 @@ class PlayerActivity : AppCompatActivity() {
         })
 
         exoPlayer = player
-
-        // Explicitly set MimeTypes.APPLICATION_M3U8 for all HLS streams (including /api/content/stream/hls)
-        val cleanPath = streamUrl.substringBefore('?').lowercase()
-        val isDirectContainer = cleanPath.endsWith(".mp4") ||
-            cleanPath.endsWith(".mkv") ||
-            cleanPath.endsWith(".mov") ||
-            cleanPath.endsWith(".webm")
-
-        val mediaItem = MediaItem.Builder()
-            .setUri(Uri.parse(streamUrl))
-            .apply {
-                if (!isDirectContainer) {
-                    setMimeType(MimeTypes.APPLICATION_M3U8)
-                }
-            }
-            .build()
-
-        player.setMediaItem(mediaItem)
+        player.setMediaSource(mediaSource)
         player.prepare()
         if (seekMs > 0L) {
             player.seekTo(seekMs)

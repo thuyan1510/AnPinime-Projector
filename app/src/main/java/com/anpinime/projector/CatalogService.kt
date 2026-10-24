@@ -186,6 +186,8 @@ object CatalogService {
                 } catch (_: Throwable) {
                     phim4kFree1Mirror
                 }
+                val isWrapped = episode.directUrl.contains("/stream/hls", ignoreCase = true) ||
+                    episode.directUrl.contains("film4k", ignoreCase = true)
                 ResolvedPlayback(
                     url = episode.directUrl,
                     headers = mapOf(
@@ -194,7 +196,8 @@ object CatalogService {
                         "User-Agent" to USER_AGENT
                     ),
                     isWeb = false,
-                    webUrl = episode.url
+                    webUrl = episode.url,
+                    isF4kWrapped = isWrapped
                 )
             }
             "web" -> {
@@ -664,10 +667,17 @@ object CatalogService {
                 }
 
                 if (chosenDirect.isNotBlank()) {
+                    val fallbackWeb = when {
+                        chosenEmbed.isNotBlank() -> chosenEmbed
+                        chosenDirect.startsWith("http", ignoreCase = true) &&
+                            (chosenDirect.contains(".m3u8", ignoreCase = true) || chosenDirect.contains("/stream/hls", ignoreCase = true)) ->
+                            try { "https://player.phimapi.com/player/?url=" + URLEncoder.encode(chosenDirect, "UTF-8") } catch (_: Throwable) { detailUrl }
+                        else -> detailUrl
+                    }
                     out.add(
                         Episode(
                             title = epTitle,
-                            url = chosenEmbed.ifBlank { detailUrl },
+                            url = fallbackWeb,
                             number = eIdx + 1,
                             season = groupName,
                             qualityBadge = badge,
@@ -882,24 +892,25 @@ object CatalogService {
     private fun ensureAnimeDomain(force: Boolean = false) {
         val now = System.currentTimeMillis()
         if (!force && now - animeDomainResolvedAt < 300_000L) return
+        val fallbacks = listOf(
+            "https://animevietsub.sale",
+            "https://animevietsub.vip",
+            "https://animevietsub.xyz",
+            "https://animevietsub.link"
+        )
         try {
             var current = "https://bit.ly/animevietsubtv"
             for (hop in 0 until 6) {
                 val conn = (URL(current).openConnection() as HttpURLConnection).apply {
                     instanceFollowRedirects = false
-                    connectTimeout = 5000
-                    readTimeout = 5000
+                    connectTimeout = 4500
+                    readTimeout = 4500
                     setRequestProperty("User-Agent", USER_AGENT)
                 }
                 try {
                     val code = conn.responseCode
-                    val u = conn.url
-                    if (u != null && u.host.contains("animevietsub", ignoreCase = true)) {
-                        animeBaseUrl = "${u.protocol}://${u.host}"
-                        animeDomainResolvedAt = now
-                    }
-                    if (code in 300..399) {
-                        val loc = conn.getHeaderField("Location") ?: break
+                    val loc = conn.getHeaderField("Location")
+                    if (code in 300..399 && !loc.isNullOrBlank()) {
                         val nextUrl = URL(URL(current), loc)
                         if (nextUrl.host.contains("animevietsub", ignoreCase = true)) {
                             animeBaseUrl = "${nextUrl.protocol}://${nextUrl.host}"
@@ -907,13 +918,22 @@ object CatalogService {
                         }
                         current = nextUrl.toString()
                     } else {
+                        val u = conn.url
+                        if (u != null && u.host.contains("animevietsub", ignoreCase = true)) {
+                            animeBaseUrl = "${u.protocol}://${u.host}"
+                            animeDomainResolvedAt = now
+                        }
                         break
                     }
                 } finally {
                     conn.disconnect()
                 }
             }
-        } catch (_: Throwable) {}
+        } catch (_: Throwable) {
+            if (animeBaseUrl.isBlank()) {
+                animeBaseUrl = fallbacks.first()
+            }
+        }
     }
 
     private suspend fun fetchAnimeHtml(url: String, referer: String? = null): String {

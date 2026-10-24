@@ -167,7 +167,7 @@ object WebViewHelper {
                         javaScriptEnabled = true
                         domStorageEnabled = true
                         databaseEnabled = true
-                        loadsImagesAutomatically = false
+                        loadsImagesAutomatically = true
                         mediaPlaybackRequiresUserGesture = false
                         mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                         userAgentString = userAgent
@@ -280,8 +280,9 @@ object WebViewHelper {
                                                 }
                                             }
 
-                                            // Show verification dialog only if interactive Turnstile is blocking after 2.8s
-                                            if (interactive && verifyDialog == null && activity != null && !activity.isFinishing && elapsed > 2800L) {
+                                            // Show verification dialog if Cloudflare or interactive Turnstile challenge is blocking after 2.0s
+                                            val needsChallengeUi = containsVerification(html) || interactive
+                                            if (needsChallengeUi && verifyDialog == null && activity != null && !activity.isFinishing && elapsed > 2000L) {
                                                 wv.settings.loadsImagesAutomatically = true
                                                 (wv.parent as? ViewGroup)?.removeView(wv)
                                                 val dlg = Dialog(activity).apply {
@@ -341,6 +342,7 @@ object WebViewHelper {
                                                 dlg.setContentView(box)
                                                 dlg.show()
                                                 verifyDialog = dlg
+                                                wv.requestFocus()
                                             }
                                         }
                                     }
