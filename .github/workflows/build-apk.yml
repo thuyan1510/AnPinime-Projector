@@ -35,18 +35,35 @@ jobs:
           cp "$APK_FILE" AnPinime-K670Pro.apk
           ls -lh AnPinime-K670Pro.apk
 
+          VERSION_CODE=$(grep "versionCode" app/build.gradle.kts | head -n 1 | awk '{print $3}')
+          VERSION_NAME=$(grep "versionName" app/build.gradle.kts | head -n 1 | awk -F'"' '{print $2}')
+          echo "Building OTA metadata: Code $VERSION_CODE, Name $VERSION_NAME"
+          cat <<EOF > version.json
+          {
+            "versionCode": $VERSION_CODE,
+            "versionName": "$VERSION_NAME",
+            "apkUrl": "https://github.com/thuyan1510/anpinime-dl/releases/download/latest/AnPinime-K670Pro.apk",
+            "changelog": "Bản cập nhật tự động v$VERSION_NAME: Tối ưu siêu nhẹ 9.7MB, hỗ trợ D-Pad remote và âm thanh FFmpeg."
+          }
+          EOF
+          cat version.json
+
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: AnPinime-K670Pro-APK
-          path: AnPinime-K670Pro.apk
+          path: |
+            AnPinime-K670Pro.apk
+            version.json
           if-no-files-found: error
 
       - name: Publish Release Asset
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.0
+          tag_name: latest
           name: "AnPinime TV Projector (Onikuma K670 Pro)"
-          files: AnPinime-K670Pro.apk
+          files: |
+            AnPinime-K670Pro.apk
+            version.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

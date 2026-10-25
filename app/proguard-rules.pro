@@ -12,3 +12,7 @@
 -keepclasseswithmembernames,includedescriptorclasses class * {
     native <methods>;
 }
+
+# Keep OTA update manager and FileProvider
+-keep class com.anpinime.projector.AppUpdateManager { *; }
+-keep class androidx.core.content.FileProvider { *; }

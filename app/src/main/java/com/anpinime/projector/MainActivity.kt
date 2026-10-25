@@ -136,6 +136,14 @@ class MainActivity : AppCompatActivity() {
 
         updateSidebarState()
         loadHomeData()
+
+        uiScope.launch {
+            AppUpdateManager.checkUpdate(this@MainActivity) { info ->
+                if (!isFinishing && !isDestroyed) {
+                    AppUpdateManager.showUpdateDialog(this@MainActivity, info)
+                }
+            }
+        }
     }
 
     override fun onResume() {
