@@ -79,7 +79,7 @@ class PlayerActivity : AppCompatActivity() {
     private var allEpisodes: List<Episode> = emptyList()
 
     private var exoPlayer: ExoPlayer? = null
-    private var compatibilityPlayer: CompatibilityPlayer? = null
+    private var preferSoftwareAudio = false
     private var lastNativeUrl = ""
     private var lastNativeHeaders: Map<String, String> = emptyMap()
     private var trackSelector: DefaultTrackSelector? = null
@@ -116,10 +116,11 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var episodeDrawerRow: LinearLayout
 
     private var osdVisible = true
+    private var selectionDialog: AlertDialog? = null
 
     private val hideOsdRunnable = Runnable {
-        if (!scrubbing && serverDrawer.visibility != View.VISIBLE && episodeDrawer.visibility != View.VISIBLE &&
-            (exoPlayer?.isPlaying == true || compatibilityPlayer?.playing == true || fallbackWebView != null)) {
+        if (selectionDialog == null && !scrubbing && serverDrawer.visibility != View.VISIBLE && episodeDrawer.visibility != View.VISIBLE &&
+            (exoPlayer?.isPlaying == true || fallbackWebView != null)) {
             hideOsd()
         }
     }
@@ -145,7 +146,8 @@ class PlayerActivity : AppCompatActivity() {
             return
         }
         currentEpisode = Episode.fromJsonObject(JSONObject(epRaw))
-        allEpisodes = Episode.fromJsonArray(allRaw).ifEmpty { listOf(currentEpisode) }
+        allEpisodes = Episode.fromJsonArray(allRaw)
+            .filter { it.source == currentEpisode.source }.ifEmpty { listOf(currentEpisode) }
 
         buildUi()
         startEpisodePlayback(currentEpisode, resetPosition = true)
@@ -161,7 +163,6 @@ class PlayerActivity : AppCompatActivity() {
     override fun onStop() {
         super.onStop()
         exoPlayer?.pause()
-        compatibilityPlayer?.pause()
         sendWebCommand("pause")
         fallbackWebView?.onPause()
     }
@@ -171,13 +172,12 @@ class PlayerActivity : AppCompatActivity() {
         mainHandler.removeCallbacksAndMessages(null)
         resolveJob?.cancel()
         uiScope.cancel()
+        selectionDialog?.dismiss()
         releasePlayer()
         destroyWebPlayer()
     }
 
     private fun releasePlayer(stopRelay: Boolean = true) {
-        compatibilityPlayer?.release()
-        compatibilityPlayer = null
         try {
             if (stopRelay) filmRelay?.stop()
         } catch (_: Throwable) {}
@@ -253,14 +253,12 @@ class PlayerActivity : AppCompatActivity() {
                 }
                 KeyEvent.KEYCODE_MEDIA_PLAY -> {
                     exoPlayer?.play()
-                    compatibilityPlayer?.play()
                     sendWebCommand("play")
                     showOsd()
                     return true
                 }
                 KeyEvent.KEYCODE_MEDIA_PAUSE -> {
                     exoPlayer?.pause()
-                    compatibilityPlayer?.pause()
                     sendWebCommand("pause")
                     showOsd()
                     return true
@@ -311,7 +309,7 @@ class PlayerActivity : AppCompatActivity() {
                 }
             } else {
                 if (keyCode == KeyEvent.KEYCODE_BACK || keyCode == KeyEvent.KEYCODE_ESCAPE) {
-                    if (exoPlayer?.isPlaying == true || compatibilityPlayer?.playing == true || fallbackWebView != null) {
+                    if (exoPlayer?.isPlaying == true || fallbackWebView != null) {
                         hideOsd()
                     } else {
                         finish()
@@ -378,7 +376,7 @@ class PlayerActivity : AppCompatActivity() {
                 Gravity.CENTER
             )
         }
-        loadingOverlay.addView(UiHelper.createGifView(this, currentEpisode.source.isMovie, sizeDp = 92))
+        loadingOverlay.addView(UiHelper.createLoadingIndicator(this, sizeDp = 92))
         loadingText = TextView(this).apply {
             text = "Đang kết nối luồng phát…"
             setTextColor(Color.WHITE)
@@ -505,10 +503,9 @@ class PlayerActivity : AppCompatActivity() {
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
                     if (fromUser) {
-                        val dur = exoPlayer?.duration ?: compatibilityPlayer?.duration ?: webDurationMs
+                        val dur = exoPlayer?.duration ?: webDurationMs
                         if (dur > 0) {
                             exoPlayer?.seekTo(dur * progress / 1000L)
-                            compatibilityPlayer?.seekTo(dur * progress / 1000L)
                             if (fallbackWebView != null) sendWebCommand("seek", dur * progress / 1_000_000.0)
                         }
                     }
@@ -612,14 +609,20 @@ class PlayerActivity : AppCompatActivity() {
             }
         })
 
-        qualityBtn = makeOsdBtn("⚙ Chất lượng: 1080p") {
-            cycleQualityMode()
+        qualityBtn = makeOsdBtn("⚙ Tối đa 1080p") {
+            showQualityPicker()
         }
         btnRow.addView(qualityBtn)
         btnRow.addView(makeOsdBtn("Âm thanh") { showTrackPicker(C.TRACK_TYPE_AUDIO) })
         btnRow.addView(makeOsdBtn("Phụ đề") { showTrackPicker(C.TRACK_TYPE_TEXT) })
         btnRow.addView(makeOsdBtn("Sửa mất tiếng") {
-            if (exoPlayer != null) startCompatibilityPlayback(exoPlayer?.currentPosition ?: 0L)
+            showSelection("Bộ giải mã âm thanh", listOf("Thiết bị (mặc định)", "FFmpeg (thử khi mất tiếng)"),
+                if (preferSoftwareAudio) 1 else 0) { index ->
+                val player = exoPlayer ?: return@showSelection
+                val position = player.currentPosition
+                preferSoftwareAudio = index == 1
+                prepareExoPlayer(lastNativeUrl, lastNativeHeaders, position)
+            }
         })
 
         btnRow.addView(makeOsdBtn("✕ Thoát", Color.parseColor("#381E24")) {
@@ -668,7 +671,7 @@ class PlayerActivity : AppCompatActivity() {
                 radiusDp = 16
             ) {
                 serverDrawer.visibility = View.GONE
-                val resumePos = exoPlayer?.currentPosition ?: compatibilityPlayer?.position ?: webPositionMs
+                val resumePos = exoPlayer?.currentPosition ?: webPositionMs
                 startEpisodePlayback(matchedEp, resetPosition = matchedEp.number != currentEpisode.number, initialPositionMs = resumePos)
                 playPauseBtn.requestFocus()
             }
@@ -717,6 +720,7 @@ class PlayerActivity : AppCompatActivity() {
     ) {
         val generation = ++playbackGeneration
         releasePlayer()
+        preferSoftwareAudio = false
         currentEpisode = episode
         visitedFrames.clear()
         webPositionMs = 0L
@@ -735,6 +739,7 @@ class PlayerActivity : AppCompatActivity() {
                 val resolved = CatalogService.resolvePlayback(episode)
                 if (generation != playbackGeneration) return@launch
                 lastWebUrl = resolved.webUrl.ifBlank { episode.url }
+                attemptedStreamUrls.add(resolved.url)
                 if (resolved.isWeb) {
                     startWebFallback(resolved.url, resolved.headers["Referer"] ?: episode.url)
                     return@launch
@@ -803,7 +808,7 @@ class PlayerActivity : AppCompatActivity() {
         }
         trackSelector = selector
 
-        // Strict 12MB RAM buffer ceiling so 1GB/2GB projector never swaps or hangs
+        // Target 12MB of media buffering; total process memory is higher.
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
                 10_000, // minBufferMs
@@ -815,8 +820,12 @@ class PlayerActivity : AppCompatActivity() {
             .setPrioritizeTimeOverSizeThresholds(false)
             .build()
 
-        val renderersFactory = DefaultRenderersFactory(this)
+        val renderersFactory = ProjectorRenderersFactory(this)
             .setEnableDecoderFallback(true)
+            .setExtensionRendererMode(
+                if (preferSoftwareAudio) DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
+                else DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
+            )
 
         attemptedStreamUrls.add(streamUrl)
 
@@ -924,8 +933,19 @@ class PlayerActivity : AppCompatActivity() {
             override fun onPlayerError(error: PlaybackException) {
                 if (exoPlayer !== player) return
                 val lastPos = player.currentPosition.coerceAtLeast(0L)
-                if (error.errorCode in 4000..4999 || error.errorCode in 5000..5999) {
+                if (error.errorCode in 5000..5999) {
                     mainHandler.post { if (exoPlayer === player) startCompatibilityPlayback(lastPos) }
+                    return
+                }
+                if (error.errorCode in 4000..4999) {
+                    mainHandler.post {
+                        if (exoPlayer !== player) return@post
+                        if (!trySwitchToBackupServer(lastPos)) {
+                            loadingText.text = "Máy không giải mã được luồng này. Hãy chọn server khác."
+                            loadingOverlay.visibility = View.VISIBLE
+                            showOsd(true)
+                        }
+                    }
                     return
                 }
                 if (retryCount < 1) {
@@ -1364,12 +1384,51 @@ class PlayerActivity : AppCompatActivity() {
         surfaceView.layoutParams = lp
     }
 
-    private fun cycleQualityMode() {
-        currentQualityMode = (currentQualityMode + 1) % 3
+    private fun showSelection(title: String, labels: List<String>, selected: Int, choose: (Int) -> Unit) {
+        selectionDialog?.dismiss()
+        mainHandler.removeCallbacks(hideOsdRunnable)
+        selectionDialog = AlertDialog.Builder(this)
+            .setTitle(title)
+            .setSingleChoiceItems(labels.toTypedArray(), selected) { dialog, index ->
+                choose(index)
+                dialog.dismiss()
+            }
+            .setNegativeButton("Đóng", null)
+            .setOnDismissListener { selectionDialog = null; scheduleHideOsd() }
+            .create()
+        selectionDialog?.show()
+        selectionDialog?.listView?.apply {
+            setSelection(selected.coerceAtLeast(0))
+            requestFocus()
+        }
+    }
+
+    private fun showPlayerMessage(title: String, message: String) {
+        selectionDialog?.dismiss()
+        mainHandler.removeCallbacks(hideOsdRunnable)
+        selectionDialog = AlertDialog.Builder(this).setTitle(title).setMessage(message)
+            .setPositiveButton("Đóng", null)
+            .setOnDismissListener { selectionDialog = null; scheduleHideOsd() }.create()
+        selectionDialog?.show()
+    }
+
+    private fun showQualityPicker() {
+        if (exoPlayer == null) {
+            showPlayerMessage("Chất lượng", "Chưa có luồng native. Trình phát web hiện chưa hỗ trợ chọn chất lượng bằng app.")
+            return
+        }
+        showSelection("Giới hạn chất lượng (không chuyển mã)",
+            listOf("Tối đa 1080p", "Tối đa 720p (nhẹ)", "Tự động — không giới hạn"), currentQualityMode) { index ->
+            currentQualityMode = index
+            applyQualityMode()
+        }
+    }
+
+    private fun applyQualityMode() {
         val label = when (currentQualityMode) {
-            0 -> "⚙ Chất lượng: 1080p"
-            1 -> "⚙ Chất lượng: 720p (Mượt)"
-            else -> "⚙ Chất lượng: 4K Gốc"
+            0 -> "⚙ Tối đa 1080p"
+            1 -> "⚙ Tối đa 720p"
+            else -> "⚙ Chất lượng: Tự động"
         }
         qualityBtn.text = label
         trackSelector?.let { selector ->
@@ -1386,75 +1445,45 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun startCompatibilityPlayback(position: Long) {
-        if (lastNativeUrl.isBlank() || compatibilityPlayer != null) return
-        releasePlayer(stopRelay = false)
-        destroyWebPlayer()
-        surfaceView.visibility = View.GONE
-        loadingText.text = "Đang chuyển bộ giải mã âm thanh/video…"
-        loadingOverlay.visibility = View.VISIBLE
-        try {
-            // LibVLC accepts UA/Referer options, but HLS tickets, Origin and cookies
-            // must also reach every segment/key/subtitle request.
-            var compatibilityUrl = lastNativeUrl
-            if (!compatibilityUrl.startsWith("http://127.0.0.1:") &&
-                (compatibilityUrl.contains(".m3u8", true) || compatibilityUrl.contains("/stream/hls", true))) {
-                filmRelay?.stop()
-                val relay = FilmMediaRelay(lastNativeHeaders)
-                filmRelay = relay
-                compatibilityUrl = relay.start(compatibilityUrl)
-            }
-            val compat = CompatibilityPlayer(this, videoFrame)
-            compatibilityPlayer = compat
-            compat.start(compatibilityUrl, lastNativeHeaders, position,
-                onReady = {
-                    if (compatibilityPlayer === compat) {
-                        loadingOverlay.visibility = View.GONE
-                        scheduleHideOsd()
-                    }
-                }, onEnd = {
-                    mainHandler.post { if (compatibilityPlayer === compat) playNextEpisode() }
-                }, onError = {
-                    if (compatibilityPlayer === compat) {
-                        loadingText.text = "Luồng phát không tương thích hoặc bị gián đoạn. Hãy đổi server."
-                        loadingOverlay.visibility = View.VISIBLE
-                        showOsd(true)
-                    }
-                })
-        } catch (error: Exception) {
-            compatibilityPlayer?.release()
-            compatibilityPlayer = null
-            loadingText.text = "Không mở được bộ giải mã. Hãy đổi server."
+        if (lastNativeUrl.isBlank()) return
+        if (preferSoftwareAudio) {
+            loadingText.text = "Không giải mã được luồng phát. Hãy chọn server khác."
+            loadingOverlay.visibility = View.VISIBLE
             showOsd(true)
+            return
         }
+        preferSoftwareAudio = true
+        prepareExoPlayer(lastNativeUrl, lastNativeHeaders, position)
     }
 
     private fun showTrackPicker(type: Int) {
-        compatibilityPlayer?.let { compat ->
-            val subtitles = type == C.TRACK_TYPE_TEXT
-            val tracks = compat.tracks(subtitles)
-            mainHandler.removeCallbacks(hideOsdRunnable)
-            AlertDialog.Builder(this).setTitle(if (subtitles) "Phụ đề" else "Âm thanh")
-                .setItems(tracks.map { it.second }.toTypedArray()) { _, index -> compat.selectTrack(subtitles, tracks[index].first) }
-                .setOnDismissListener { scheduleHideOsd() }.show()
+        val title = if (type == C.TRACK_TYPE_TEXT) "Phụ đề" else "Âm thanh"
+        val player = exoPlayer
+        if (player == null) {
+            showPlayerMessage(title, "Chưa có danh sách track. Hãy chờ video phát bằng trình phát native.")
             return
         }
-        val player = exoPlayer ?: return
         val options = mutableListOf<Pair<androidx.media3.common.TrackGroup, Int>>()
         val labels = mutableListOf(if (type == C.TRACK_TYPE_TEXT) "Tắt phụ đề" else "Tự động")
+        var selected = 0
         for (group in player.currentTracks.groups.filter { it.type == type }) {
             for (index in 0 until group.length) {
                 if (!group.isTrackSupported(index)) continue
                 val format = group.getTrackFormat(index)
                 options.add(group.mediaTrackGroup to index)
+                if (group.isTrackSelected(index)) selected = options.size
                 labels.add(listOfNotNull(format.label, format.language, format.sampleMimeType,
                     format.channelCount.takeIf { it > 0 }?.let { "$it kênh" }).joinToString(" • ")
                     .ifBlank { "Track ${options.size}" })
             }
         }
-        mainHandler.removeCallbacks(hideOsdRunnable)
-        AlertDialog.Builder(this)
-            .setTitle(if (type == C.TRACK_TYPE_TEXT) "Phụ đề" else "Âm thanh")
-            .setItems(labels.toTypedArray()) { _, index ->
+        if (options.isEmpty()) {
+            showPlayerMessage(title, if (type == C.TRACK_TYPE_TEXT)
+                "Nguồn chưa cung cấp phụ đề rời được hỗ trợ. Phụ đề ghi sẵn trong hình không thể đổi hoặc tắt."
+                else "Chưa tìm thấy track âm thanh được hỗ trợ. Hãy chờ tải xong hoặc thử bộ giải mã FFmpeg.")
+            return
+        }
+        showSelection(title, labels, selected) { index ->
                 val builder = player.trackSelectionParameters.buildUpon().clearOverridesOfType(type)
                     .setTrackTypeDisabled(type, type == C.TRACK_TYPE_TEXT && index == 0)
                 if (index > 0) {
@@ -1462,16 +1491,10 @@ class PlayerActivity : AppCompatActivity() {
                     builder.setOverrideForType(TrackSelectionOverride(group, track))
                 }
                 player.trackSelectionParameters = builder.build()
-            }
-            .setOnDismissListener { scheduleHideOsd() }
-            .show()
+        }
     }
 
     private fun togglePlayPause() {
-        compatibilityPlayer?.let {
-            if (it.playing) it.pause() else it.play()
-            return
-        }
         val player = exoPlayer
         if (player != null) {
             if (player.isPlaying) {
@@ -1485,11 +1508,6 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun seekRelative(deltaMs: Long) {
-        compatibilityPlayer?.let {
-            it.seekTo(it.position + deltaMs)
-            updateProgressUi()
-            return
-        }
         val player = exoPlayer
         if (player != null) {
             val dur = player.duration.takeIf { it > 0 } ?: return
@@ -1532,16 +1550,15 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun scheduleHideOsd() {
         mainHandler.removeCallbacks(hideOsdRunnable)
-        if (!scrubbing && serverDrawer.visibility != View.VISIBLE && episodeDrawer.visibility != View.VISIBLE) {
+        if (selectionDialog == null && !scrubbing && serverDrawer.visibility != View.VISIBLE && episodeDrawer.visibility != View.VISIBLE) {
             mainHandler.postDelayed(hideOsdRunnable, 6000L)
         }
     }
 
     private fun updateProgressUi() {
         val player = exoPlayer
-        val pos = player?.currentPosition?.coerceAtLeast(0L) ?: compatibilityPlayer?.position ?: webPositionMs
-        val dur = player?.duration?.takeIf { it > 0 } ?: compatibilityPlayer?.duration ?: webDurationMs
-        compatibilityPlayer?.let { playPauseBtn.text = if (it.playing) "⏸ Tạm dừng" else "▶ Phát tiếp" }
+        val pos = player?.currentPosition?.coerceAtLeast(0L) ?: webPositionMs
+        val dur = player?.duration?.takeIf { it > 0 } ?: webDurationMs
         timeCurrentText.text = formatTime(pos)
         timeTotalText.text = formatTime(dur)
         if (dur > 0L && !scrubbing) {

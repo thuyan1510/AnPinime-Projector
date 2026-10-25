@@ -21,8 +21,12 @@ class FilmMediaRelay(
 ) {
     private var serverSocket: ServerSocket? = null
     private val executor = Executors.newFixedThreadPool(4)
-    private val clients = java.util.concurrent.ConcurrentHashMap.newKeySet<Socket>()
-    private val connections = java.util.concurrent.ConcurrentHashMap.newKeySet<HttpURLConnection>()
+    private val clients = java.util.Collections.newSetFromMap(
+        java.util.concurrent.ConcurrentHashMap<Socket, Boolean>()
+    )
+    private val connections = java.util.Collections.newSetFromMap(
+        java.util.concurrent.ConcurrentHashMap<HttpURLConnection, Boolean>()
+    )
     @Volatile private var running = false
     private var port = 0
 

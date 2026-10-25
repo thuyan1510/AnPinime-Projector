@@ -330,7 +330,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         logoImage = ImageView(this).apply {
-            setImageResource(if (currentSource.isMovie) R.drawable.logo_movie else R.drawable.logo_anime)
+            UiHelper.setSourceLogo(this, currentSource.isMovie)
             scaleType = ImageView.ScaleType.FIT_CENTER
             layoutParams = LinearLayout.LayoutParams(UiHelper.dp(context, 44), UiHelper.dp(context, 44)).apply {
                 rightMargin = UiHelper.dp(context, 10)
@@ -456,6 +456,10 @@ class MainActivity : AppCompatActivity() {
     private fun switchSource(newSource: ContentSource) {
         if (currentSource == newSource && homeSections.isNotEmpty() && currentTab == "home") return
         currentSource = newSource
+        loadJob?.cancel()
+        browseItems.clear()
+        browsePage = 1
+        activeCategory = null
         currentTab = "home"
         featuredIndex = 0
         homeSections = emptyList()
@@ -468,7 +472,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateSidebarState() {
-        logoImage.setImageResource(if (currentSource.isMovie) R.drawable.logo_movie else R.drawable.logo_anime)
+        UiHelper.setSourceLogo(logoImage, currentSource.isMovie)
         sourceSubtitleText.text = currentSource.title
         val tabName = when (currentTab) {
             "search" -> "Tìm kiếm"
@@ -561,7 +565,7 @@ class MainActivity : AppCompatActivity() {
                 val sections = CatalogService.loadHome(targetSource)
                 ensureActive()
                 if (targetSource != currentSource || currentTab != "home") return@launch
-                homeSections = sections
+                homeSections = SourceIsolation.sections(targetSource, sections)
                 featuredIndex = 0
                 renderHome()
             } catch (t: Throwable) {
@@ -899,7 +903,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadSearchHistory(): List<String> {
         val prefs = getSharedPreferences("anpinime_projector", Context.MODE_PRIVATE)
-        val raw = prefs.getString("search_history_json", null) ?: return emptyList()
+        val raw = prefs.getString(SourceIsolation.historyKey(currentSource), null) ?: return emptyList()
         return try {
             val arr = JSONArray(raw)
             val list = ArrayList<String>(arr.length())
@@ -924,18 +928,20 @@ class MainActivity : AppCompatActivity() {
         trimmed.forEach { arr.put(it) }
         getSharedPreferences("anpinime_projector", Context.MODE_PRIVATE)
             .edit()
-            .putString("search_history_json", arr.toString())
+            .putString(SourceIsolation.historyKey(currentSource), arr.toString())
             .apply()
     }
 
     private fun clearSearchHistory() {
         getSharedPreferences("anpinime_projector", Context.MODE_PRIVATE)
             .edit()
-            .remove("search_history_json")
+            .remove(SourceIsolation.historyKey(currentSource))
             .apply()
     }
 
     private fun renderSearch() {
+        loadJob?.cancel()
+        val screenSource = currentSource
         contentContainer.removeAllViews()
         val mainCol = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1115,8 +1121,9 @@ class MainActivity : AppCompatActivity() {
             loadJob?.cancel()
             loadJob = uiScope.launch {
                 try {
-                    val items = CatalogService.search(currentSource, clean)
+                    val items = SourceIsolation.items(screenSource, CatalogService.search(screenSource, clean))
                     ensureActive()
+                    if (currentSource != screenSource || currentTab != "search") return@launch
                     resultsFrame.removeAllViews()
                     if (items.isEmpty()) {
                         val emptyText = TextView(this@MainActivity).apply {
@@ -1145,6 +1152,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 } catch (t: Throwable) {
                     if (t is CancellationException) throw t
+                    if (currentSource != screenSource || currentTab != "search") return@launch
                     resultsFrame.removeAllViews()
                     val errText = TextView(this@MainActivity).apply {
                         text = "Lỗi tìm kiếm: ${t.message}"
@@ -1259,6 +1267,8 @@ class MainActivity : AppCompatActivity() {
     // =========================================================================
 
     private fun openCategoryBrowse(selectedCategory: AnimeCategory?) {
+        loadJob?.cancel()
+        val screenSource = currentSource
         val categories = CatalogService.categoriesFor(currentSource)
         val active = selectedCategory ?: categories.firstOrNull() ?: AnimeCategory("Mới cập nhật", "")
         activeCategory = active
@@ -1365,8 +1375,10 @@ class MainActivity : AppCompatActivity() {
             loadJob?.cancel()
             loadJob = uiScope.launch {
                 try {
-                    val nextItems = CatalogService.loadList(currentSource, active.path, pageToLoad)
+                    val nextItems = SourceIsolation.items(screenSource,
+                        CatalogService.loadList(screenSource, active.path, pageToLoad))
                     ensureActive()
+                    if (currentSource != screenSource || currentTab != "browse" || activeCategory != active) return@launch
                     val existingUrls = browseItems.map { it.url }.toHashSet()
                     val unique = nextItems.filter { existingUrls.add(it.url) }
                     browseItems.addAll(unique)
@@ -1387,6 +1399,7 @@ class MainActivity : AppCompatActivity() {
                     gridContainer.addView(grid)
                 } catch (t: Throwable) {
                     if (t is CancellationException) throw t
+                    if (currentSource != screenSource || currentTab != "browse" || activeCategory != active) return@launch
                     if (pageToLoad == 1) {
                         gridContainer.removeAllViews()
                         gridContainer.addView(
@@ -1419,6 +1432,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openDetail(anime: Anime) {
+        if (anime.source != currentSource) return
         val intent = Intent(this, DetailActivity::class.java).apply {
             putExtra("anime_json", anime.toJson())
         }

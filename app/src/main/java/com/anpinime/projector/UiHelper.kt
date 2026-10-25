@@ -1,15 +1,9 @@
 package com.anpinime.projector
 
 import android.content.Context
-import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.ImageDecoder
-import android.graphics.Movie
 import android.graphics.Typeface
-import android.graphics.drawable.AnimatedImageDrawable
 import android.graphics.drawable.GradientDrawable
-import android.os.Build
-import android.os.SystemClock
 import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
@@ -39,6 +33,22 @@ object UiHelper {
             context.resources.displayMetrics
         ).toInt()
 
+    fun setSourceLogo(view: ImageView, isMovie: Boolean) {
+        val resource = if (isMovie) R.drawable.logo_movie else R.drawable.logo_anime
+        val options = android.graphics.BitmapFactory.Options().apply {
+            inJustDecodeBounds = true
+            inScaled = false
+        }
+        android.graphics.BitmapFactory.decodeResource(view.resources, resource, options)
+        val target = dp(view.context, 44).coerceAtLeast(1)
+        options.inSampleSize = 1
+        while (maxOf(options.outWidth, options.outHeight) / options.inSampleSize > target * 2) {
+            options.inSampleSize *= 2
+        }
+        options.inJustDecodeBounds = false
+        view.setImageBitmap(android.graphics.BitmapFactory.decodeResource(view.resources, resource, options))
+    }
+
     fun roundedBg(
         fillColor: Int,
         radiusDp: Int,
@@ -54,105 +64,19 @@ object UiHelper {
         }
     }
 
-    /**
-     * Renders the iOS animated loading GIFs (movie_loading.gif for Movie sources,
-     * anime_loading.gif for AnimeVietsub) on a pure black rounded card, stopping
-     * animation automatically when detached to save CPU & RAM on the projector.
-     */
-    fun createGifView(context: Context, isMovie: Boolean, sizeDp: Int = 118): View {
-        val assetName = if (isMovie) "movie_loading.gif" else "anime_loading.gif"
-        val sizePx = dp(context, sizeDp)
-        val container = FrameLayout(context).apply {
-            background = roundedBg(Color.BLACK, 18, context, Color.parseColor("#2AFFFFFF"), 1)
-            clipChildren = true
-            layoutParams = LinearLayout.LayoutParams(sizePx, sizePx).apply {
+    /** Small platform spinner; no GIF decoding while buffering video. */
+    fun createLoadingIndicator(context: Context, sizeDp: Int = 118): View =
+        FrameLayout(context).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(context, sizeDp), dp(context, sizeDp)).apply {
                 gravity = Gravity.CENTER_HORIZONTAL
             }
+            addView(ProgressBar(context).apply {
+                isIndeterminate = true
+                indeterminateTintList = android.content.res.ColorStateList.valueOf(COLOR_ACCENT)
+                layoutParams = FrameLayout.LayoutParams(dp(context, 40), dp(context, 40), Gravity.CENTER)
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            })
         }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            try {
-                val source = ImageDecoder.createSource(context.assets, assetName)
-                val drawable = ImageDecoder.decodeDrawable(source) { decoder, _, _ ->
-                    decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-                }
-                val iv = ImageView(context).apply {
-                    scaleType = ImageView.ScaleType.FIT_CENTER
-                    setImageDrawable(drawable)
-                    layoutParams = FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        Gravity.CENTER
-                    )
-                }
-                if (drawable is AnimatedImageDrawable) {
-                    drawable.repeatCount = AnimatedImageDrawable.REPEAT_INFINITE
-                    iv.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
-                        override fun onViewAttachedToWindow(v: View) {
-                            drawable.start()
-                        }
-                        override fun onViewDetachedFromWindow(v: View) {
-                            drawable.stop()
-                        }
-                    })
-                    drawable.start()
-                }
-                container.addView(iv)
-                return container
-            } catch (_: Throwable) {}
-        }
-
-        // Fallback for API 23..27 using android.graphics.Movie
-        try {
-            @Suppress("DEPRECATION")
-            val movie = context.assets.open(assetName).use { Movie.decodeStream(it) }
-            if (movie != null && movie.width() > 0 && movie.height() > 0) {
-                val movieView = object : View(context) {
-                    private var startTime = 0L
-                    @Suppress("DEPRECATION")
-                    override fun onDraw(canvas: Canvas) {
-                        super.onDraw(canvas)
-                        val now = SystemClock.uptimeMillis()
-                        if (startTime == 0L) startTime = now
-                        val dur = movie.duration().let { if (it <= 0) 1000 else it }
-                        movie.setTime(((now - startTime) % dur).toInt())
-                        val sx = width.toFloat() / movie.width().toFloat()
-                        val sy = height.toFloat() / movie.height().toFloat()
-                        val scale = minOf(sx, sy)
-                        val dx = (width - movie.width() * scale) / 2f
-                        val dy = (height - movie.height() * scale) / 2f
-                        canvas.save()
-                        canvas.translate(dx, dy)
-                        canvas.scale(scale, scale)
-                        movie.draw(canvas, 0f, 0f)
-                        canvas.restore()
-                        if (isAttachedToWindow && visibility == VISIBLE) {
-                            postInvalidateOnAnimation()
-                        }
-                    }
-                }.apply {
-                    layoutParams = FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        Gravity.CENTER
-                    )
-                }
-                container.addView(movieView)
-                return container
-            }
-        } catch (_: Throwable) {}
-
-        container.addView(
-            ProgressBar(context).apply {
-                layoutParams = FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    Gravity.CENTER
-                )
-            }
-        )
-        return container
-    }
 
     fun createLoadingBox(
         context: Context,
@@ -168,7 +92,7 @@ object UiHelper {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 Gravity.CENTER
             )
-            addView(createGifView(context, isMovie, sizeDp))
+            addView(createLoadingIndicator(context, sizeDp))
             addView(
                 TextView(context).apply {
                     text = message
@@ -272,7 +196,7 @@ object UiHelper {
             }
 
             val imageView = ImageView(context).apply {
-                id = 1001
+                id = R.id.poster_image
                 scaleType = ImageView.ScaleType.CENTER_CROP
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -282,7 +206,7 @@ object UiHelper {
             posterFrame.addView(imageView)
 
             val badgeText = TextView(context).apply {
-                id = 1002
+                id = R.id.poster_badge
                 setTextColor(Color.WHITE)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
                 typeface = Typeface.DEFAULT_BOLD
@@ -302,7 +226,7 @@ object UiHelper {
             posterFrame.addView(badgeText)
 
             val scoreText = TextView(context).apply {
-                id = 1003
+                id = R.id.poster_score
                 setTextColor(Color.BLACK)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
                 typeface = Typeface.DEFAULT_BOLD
@@ -321,7 +245,7 @@ object UiHelper {
             posterFrame.addView(scoreText)
 
             val titleView = TextView(context).apply {
-                id = 1004
+                id = R.id.poster_title
                 setTextColor(Color.WHITE)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                 typeface = Typeface.DEFAULT_BOLD
@@ -341,10 +265,10 @@ object UiHelper {
     }
 
     fun bindPosterCard(card: FrameLayout, anime: Anime, onClick: (Anime) -> Unit) {
-        val imageView = card.findViewById<ImageView>(1001)
-        val badgeView = card.findViewById<TextView>(1002)
-        val scoreView = card.findViewById<TextView>(1003)
-        val titleView = card.findViewById<TextView>(1004)
+        val imageView = card.findViewById<ImageView>(R.id.poster_image)
+        val badgeView = card.findViewById<TextView>(R.id.poster_badge)
+        val scoreView = card.findViewById<TextView>(R.id.poster_score)
+        val titleView = card.findViewById<TextView>(R.id.poster_title)
 
         titleView.text = anime.title
         val badgeStr = listOf(anime.episodeText, anime.quality).filter { it.isNotBlank() }.joinToString(" · ")
