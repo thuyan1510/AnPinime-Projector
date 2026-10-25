@@ -8,9 +8,11 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Base64
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
@@ -37,6 +39,8 @@ import kotlin.coroutines.resume
 
 object WebViewHelper {
 
+    private const val PREFS_COOKIES = "anpinime_cookies"
+
     @Volatile
     var userAgent: String =
         "Mozilla/5.0 (Linux; Android 12; Pixel 7 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
@@ -47,9 +51,38 @@ object WebViewHelper {
     private val mutex = Mutex()
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    fun initCookies(context: Context) {
+        try {
+            val cm = CookieManager.getInstance()
+            cm.setAcceptCookie(true)
+            val prefs = context.getSharedPreferences(PREFS_COOKIES, Context.MODE_PRIVATE)
+            val allCookies = prefs.all
+            for ((url, cookieValue) in allCookies) {
+                if (cookieValue is String && cookieValue.isNotBlank()) {
+                    for (token in cookieValue.split(";")) {
+                        val trimmed = token.trim()
+                        if (trimmed.isNotBlank()) {
+                            cm.setCookie(url, trimmed)
+                        }
+                    }
+                }
+            }
+            cm.flush()
+        } catch (_: Throwable) {}
+    }
+
+    fun persistCookie(url: String, cookieHeader: String) {
+        val ctx = appContext ?: activityRef?.get()?.applicationContext ?: return
+        try {
+            val prefs = ctx.getSharedPreferences(PREFS_COOKIES, Context.MODE_PRIVATE)
+            prefs.edit().putString(url, cookieHeader).apply()
+        } catch (_: Throwable) {}
+    }
+
     fun registerActivity(activity: Activity) {
         activityRef = WeakReference(activity)
         appContext = activity.applicationContext
+        initCookies(activity.applicationContext)
         try {
             val rawUa = WebSettings.getDefaultUserAgent(activity)
             if (!rawUa.isNullOrBlank() && !rawUa.contains("K670", ignoreCase = true)) {
@@ -64,7 +97,18 @@ object WebViewHelper {
 
     fun getCookieHeader(url: String): String? {
         return try {
-            CookieManager.getInstance().getCookie(url)?.takeIf { it.isNotBlank() }
+            val cm = CookieManager.getInstance()
+            var cookie = cm.getCookie(url)?.takeIf { it.isNotBlank() }
+            if (cookie.isNullOrBlank()) {
+                val ctx = appContext ?: activityRef?.get()?.applicationContext
+                val prefs = ctx?.getSharedPreferences(PREFS_COOKIES, Context.MODE_PRIVATE)
+                cookie = prefs?.getString(url, null)?.takeIf { it.isNotBlank() }
+                if (cookie != null) {
+                    cm.setCookie(url, cookie)
+                    cm.flush()
+                }
+            }
+            cookie
         } catch (_: Throwable) {
             null
         }
@@ -74,14 +118,22 @@ object WebViewHelper {
         try {
             val cm = CookieManager.getInstance()
             cm.setAcceptCookie(true)
+            var hasNew = false
             for ((k, values) in headers) {
                 if (k != null && k.equals("Set-Cookie", ignoreCase = true)) {
                     for (v in values) {
                         cm.setCookie(url, v)
+                        hasNew = true
                     }
                 }
             }
-            cm.flush()
+            if (hasNew) {
+                cm.flush()
+                val current = cm.getCookie(url)
+                if (!current.isNullOrBlank()) {
+                    persistCookie(url, current)
+                }
+            }
         } catch (_: Throwable) {}
     }
 
@@ -125,6 +177,7 @@ object WebViewHelper {
                 }
 
                 var finished = false
+                var hasDispatchedTouch = false
                 var webView: WebView? = null
                 var hiddenHolder: FrameLayout? = null
                 var verifyDialog: Dialog? = null
@@ -135,7 +188,16 @@ object WebViewHelper {
                     finished = true
                     mainHandler.removeCallbacksAndMessages(cont)
                     try {
-                        CookieManager.getInstance().flush()
+                        val cm = CookieManager.getInstance()
+                        cm.flush()
+                        val cookie = cm.getCookie(finalUrl)
+                        if (!cookie.isNullOrBlank()) {
+                            persistCookie(finalUrl, cookie)
+                            try {
+                                val u = URL(finalUrl)
+                                persistCookie("${u.protocol}://${u.host}/", cookie)
+                            } catch (_: Throwable) {}
+                        }
                     } catch (_: Throwable) {}
                     try {
                         verifyDialog?.dismiss()
@@ -173,26 +235,30 @@ object WebViewHelper {
                         userAgentString = userAgent
                     }
 
-                    // Attach invisibly to Activity decorView with 390x720 internal layout size so
-                    // Cloudflare Turnstile getBoundingClientRect() sees a valid viewport
+                    // Attach invisibly BEHIND the activity's opaque black UI with MATCH_PARENT size so
+                    // Chromium renders at full 1080p/720p without throttling and Turnstile gets a valid visible viewport
                     if (activity != null) {
                         val decor = activity.window?.decorView as? ViewGroup
                         if (decor != null) {
                             val holder = FrameLayout(activity).apply {
-                                alpha = 0.01f
+                                alpha = 1.0f
+                                visibility = View.VISIBLE
                                 isFocusable = false
                                 isClickable = false
-                                clipChildren = true
-                                layoutParams = FrameLayout.LayoutParams(1, 1, Gravity.BOTTOM or Gravity.END)
+                                layoutParams = FrameLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    ViewGroup.LayoutParams.MATCH_PARENT
+                                )
                             }
                             holder.addView(
                                 wv,
                                 FrameLayout.LayoutParams(
-                                    UiHelper.dp(activity, 390),
-                                    UiHelper.dp(activity, 720)
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    ViewGroup.LayoutParams.MATCH_PARENT
                                 )
                             )
-                            decor.addView(holder)
+                            // Add at index 0 so it stays underneath all existing activity layouts
+                            decor.addView(holder, 0)
                             hiddenHolder = holder
                         }
                     }
@@ -214,12 +280,17 @@ object WebViewHelper {
                             view: WebView?,
                             request: WebResourceRequest?
                         ): Boolean {
+                            // CRITICAL: Always allow sub-frames (Cloudflare Turnstile iframe, captchas, worker scripts)
+                            if (request != null && !request.isForMainFrame) {
+                                return false
+                            }
                             val reqUrl = request?.url?.toString().orEmpty()
                             if (reqUrl.isBlank()) return false
                             val host = request?.url?.host?.lowercase().orEmpty()
                             val allowed = host.contains("animevietsub") ||
                                 host.contains("bit.ly") ||
-                                host.contains("cloudflare")
+                                host.contains("cloudflare") ||
+                                host.contains("challenges.cloudflare.com")
                             return !allowed
                         }
                     }
@@ -232,6 +303,15 @@ object WebViewHelper {
                               var s = window.getComputedStyle(e);
                               return r.width > 10 && r.height > 10 && s.display !== 'none' && s.visibility !== 'hidden';
                             };
+                            var tf = document.querySelector('iframe[src*="challenges.cloudflare.com"],iframe[src*="turnstile"]');
+                            var touchBox = null;
+                            if (tf && visible(tf)) {
+                              var r = tf.getBoundingClientRect();
+                              touchBox = {
+                                x: Math.round(r.left + Math.min(35, r.width / 2)),
+                                y: Math.round(r.top + (r.height / 2))
+                              };
+                            }
                             var sel = 'iframe[src*="challenges.cloudflare.com"],iframe[src*="recaptcha"],iframe[src*="hcaptcha"],.cf-turnstile,.g-recaptcha,.h-captcha,#challenge-stage input[type="checkbox"]';
                             var interactive = Array.prototype.some.call(document.querySelectorAll(sel), visible);
                             var html = document.documentElement ? document.documentElement.outerHTML : '';
@@ -239,6 +319,7 @@ object WebViewHelper {
                               href: window.location.href || '',
                               title: document.title || '',
                               interactive: interactive,
+                              touchBox: touchBox,
                               html: html
                             });
                           } catch(e) {
@@ -270,6 +351,23 @@ object WebViewHelper {
                                             val interactive = obj.optBoolean("interactive", false)
                                             val isBitly = href.contains("bit.ly", ignoreCase = true)
 
+                                            // Auto-dispatch touch event to Cloudflare Turnstile checkbox after 1.2s
+                                            val touchObj = obj.optJSONObject("touchBox")
+                                            if (touchObj != null && !hasDispatchedTouch && elapsed > 1200L) {
+                                                val tx = touchObj.optDouble("x", -1.0).toFloat()
+                                                val ty = touchObj.optDouble("y", -1.0).toFloat()
+                                                if (tx > 0f && ty > 0f) {
+                                                    hasDispatchedTouch = true
+                                                    val nowTime = SystemClock.uptimeMillis()
+                                                    val downEv = MotionEvent.obtain(nowTime, nowTime, MotionEvent.ACTION_DOWN, tx, ty, 0)
+                                                    val upEv = MotionEvent.obtain(nowTime, nowTime + 60L, MotionEvent.ACTION_UP, tx, ty, 0)
+                                                    wv.dispatchTouchEvent(downEv)
+                                                    wv.dispatchTouchEvent(upEv)
+                                                    downEv.recycle()
+                                                    upEv.recycle()
+                                                }
+                                            }
+
                                             if (!isBitly && html.length > 400 && !containsVerification(html)) {
                                                 val hasMarkers = Regex(
                                                     """(?is)(?:TPost|ml-item|film-item|movie-item|btn-episode|filmInfo\.filmID|Description|MovieList)"""
@@ -280,8 +378,8 @@ object WebViewHelper {
                                                 }
                                             }
 
-                                            // Only show verification dialog if an interactive challenge checkbox remains unsolved after 8.0s
-                                            val needsChallengeUi = interactive && elapsed > 8000L
+                                            // Only show verification dialog if an interactive challenge checkbox remains unsolved after 9.0s
+                                            val needsChallengeUi = interactive && elapsed > 9000L
                                             if (needsChallengeUi && verifyDialog == null && activity != null && !activity.isFinishing) {
                                                 wv.settings.loadsImagesAutomatically = true
                                                 (wv.parent as? ViewGroup)?.removeView(wv)

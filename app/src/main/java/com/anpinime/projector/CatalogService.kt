@@ -1049,7 +1049,11 @@ object CatalogService {
                 setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
                 setRequestProperty("Accept-Language", "vi-VN,vi;q=0.9,en;q=0.8")
                 setRequestProperty("Referer", referer ?: "$animeBaseUrl/")
-                WebViewHelper.getCookieHeader(targetUrl)?.let { setRequestProperty("Cookie", it) }
+                val cookie = WebViewHelper.getCookieHeader(targetUrl)
+                    ?: WebViewHelper.getCookieHeader(animeBaseUrl)
+                if (!cookie.isNullOrBlank()) {
+                    setRequestProperty("Cookie", cookie)
+                }
             }
             val code = conn.responseCode
             val finalUrl = conn.url?.toString() ?: targetUrl

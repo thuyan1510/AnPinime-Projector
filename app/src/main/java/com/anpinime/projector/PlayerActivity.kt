@@ -912,60 +912,193 @@ class PlayerActivity : AppCompatActivity() {
             (function(){
               if(window.__anpinimeInstalled) return;
               window.__anpinimeInstalled = true;
-              var reported = {};
-              function observe(u) {
+              var hidden = [
+                '.Adv', '.ad-center', '.ads', '.advertisement', '[class*="ads"]', '[class*="banner"]', '[id*="ads"]',
+                'iframe[src*="ads"]', '.popup', '.modal-backdrop', '.header-ads-pc', '.Adv.ad-center-header',
+                'header', 'footer', '.footer', '.header', '.sidebar', '.breadcrumb', '.comments', '.film-info',
+                '.heading-film', '.list-episode-box', '.server-list', '.film-thumb', '.film-desc', '.film-buttons',
+                '.category-heading', '.block-film', 'nav', '.navbar', '.menu'
+              ];
+              var reportedFrames = {};
+              var activeVideo = null;
+              var detectedStreams = [], reportedSources = {};
+              function sendVideo(url, ref) {
+                try { AnPinimeWebBridge.onVideoFound(url, ref); } catch(e){}
+              }
+              function sendReady() {
+                try { AnPinimeWebBridge.onPlayerReady(); } catch(e){}
+              }
+              function observeStream(url){
                 try {
-                  var full = new URL(String(u), location.href).href;
-                  if (/\.m3u8(?:[?#]|$)/i.test(full) && !/(?:doubleclick|popads|\/ads?\/)/i.test(full) && !reported[full]) {
-                    reported[full] = true;
-                    AnPinimeWebBridge.onVideoFound(full, location.href);
+                  url = new URL(String(url), location.href).href;
+                  if (/\.(?:m3u8|mp4)(?:[?#]|$)/i.test(url) && !/(?:doubleclick|popads|\/ads?\/)/i.test(url) && detectedStreams.indexOf(url) < 0) {
+                    detectedStreams.push(url);
                   }
                 } catch(e){}
               }
-              var origFetch = window.fetch;
-              if (origFetch) window.fetch = function() {
-                var a = arguments[0]; observe(a && a.url || a);
-                return origFetch.apply(this, arguments);
+              var originalFetch = window.fetch;
+              if (originalFetch) window.fetch = function(){
+                var input = arguments[0];
+                observeStream(input && input.url || input);
+                return originalFetch.apply(this, arguments);
               };
-              var origOpen = XMLHttpRequest.prototype.open;
-              XMLHttpRequest.prototype.open = function(m, u) {
-                observe(u);
-                return origOpen.apply(this, arguments);
+              var originalOpen = XMLHttpRequest.prototype.open;
+              XMLHttpRequest.prototype.open = function(method, url){
+                observeStream(url);
+                return originalOpen.apply(this, arguments);
               };
-              function imp(el, k, v) { if(el) el.style.setProperty(k, v, 'important'); }
-              function isolate(el) {
-                if (!el) return;
-                var n = el;
-                while (n && n !== document.body) {
-                  var p = n.parentElement; if (!p) break;
-                  Array.prototype.forEach.call(p.children, function(s){ if (s !== n) imp(s, 'display', 'none'); });
-                  imp(p, 'display', 'block'); imp(p, 'width', '100%'); imp(p, 'height', '100%');
-                  imp(p, 'margin', '0'); imp(p, 'padding', '0');
-                  n = p;
-                }
-                imp(document.documentElement, 'background', '#000'); imp(document.documentElement, 'overflow', 'hidden');
-                imp(document.body, 'background', '#000'); imp(document.body, 'margin', '0'); imp(document.body, 'overflow', 'hidden');
-                imp(el, 'position', 'fixed'); imp(el, 'inset', '0'); imp(el, 'width', '100vw'); imp(el, 'height', '100vh');
-                imp(el, 'z-index', '2147483647'); imp(el, 'background', '#000');
-                AnPinimeWebBridge.onPlayerReady();
+              function mediaURL(v){
+                var s = v.currentSrc || v.getAttribute('src') || '';
+                if (!s) { var src = v.querySelector('source[src]'); if (src) s = src.getAttribute('src') || ''; }
+                try { return s ? new URL(s, location.href).href : ''; } catch(e) { return ''; }
               }
-              function scan() {
-                var v = document.querySelector('video');
+              function reportSource(v){
+                var s = mediaURL(v);
+                if (!/^https?:/i.test(s)) s = detectedStreams[detectedStreams.length - 1] || '';
+                if (/^https?:/i.test(s) && !reportedSources[s]){
+                  reportedSources[s] = true;
+                  sendVideo(s, location.href);
+                }
+              }
+              function tryPlay(v){
+                if (!v || v.__aaUserPaused || !v.paused) return;
+                var p = v.play(); if (p && p.catch) p.catch(function(){});
+              }
+              function important(el, key, value){
+                if (el && (el.style.getPropertyValue(key) !== value || el.style.getPropertyPriority(key) !== 'important')) {
+                  el.style.setProperty(key, value, 'important');
+                }
+              }
+              function hideAccessNotices(){
+                var candidates = document.querySelectorAll('p,span,small,a,.alert,.notice,.message,.warning,[class*="notice"],[class*="warning"],[class*="notify"]');
+                candidates.forEach(function(el){
+                  var text = String(el.innerText || el.textContent || '').toLowerCase();
+                  var notice = text.indexOf('nếu bạn không thể truy cập animevietsub') >= 0 || text.indexOf('neu ban khong the truy cap animevietsub') >= 0;
+                  if (notice && text.length < 500) important(el, 'display', 'none');
+                });
+              }
+              function challenge(){
+                return /just a moment|xác minh an toàn|xác minh bảo mật|verify you are human|checking your browser/i.test(document.title) || !!document.querySelector('#challenge-form');
+              }
+              window.addEventListener('message', function(event){
+                var c = event.data; if (!c || c.type !== 'AnPinimeCommand') return;
+                var v = activeVideo || document.querySelector('video');
                 if (v) {
-                  var s = v.currentSrc || v.src || '';
-                  if (/^https?:/i.test(s)) observe(s);
-                  isolate(v);
-                  if (v.paused && !v.__userPaused) { var p = v.play(); if (p && p.catch) p.catch(function(){}); }
-                  return;
+                  try {
+                    switch(c.name){
+                      case 'play': v.__aaUserPaused = false; tryPlay(v); break;
+                      case 'pause': v.__aaUserPaused = true; v.pause(); break;
+                      case 'seek': if (isFinite(v.duration)) v.currentTime = Math.max(0, Math.min(Number(c.value)||0, v.duration)); break;
+                      case 'rate': v.playbackRate = Math.max(0.5, Math.min(Number(c.value)||1, 2)); break;
+                      case 'volume': v.volume = Math.max(0, Math.min(Number(c.value)||0, 1)); break;
+                      case 'fit': important(v, 'object-fit', c.value === 1 ? 'cover' : 'contain'); break;
+                    }
+                  } catch(e){}
                 }
-                var sel = ['#media-player','.player-container','.watching_player','#player','.jwplayer','iframe[src]'];
-                for (var i=0; i<sel.length; i++) {
-                  var el = document.querySelector(sel[i]);
-                  if (el) { isolate(el); break; }
-                }
+                document.querySelectorAll('iframe').forEach(function(f){
+                  try { f.contentWindow.postMessage(c, '*'); } catch(e){}
+                });
+              });
+              function hideChrome(){
+                hidden.forEach(function(s){
+                  try { document.querySelectorAll(s).forEach(function(e){ important(e, 'display', 'none'); }); } catch(e){}
+                });
+                hideAccessNotices();
+                important(document.documentElement, 'margin', '0'); important(document.documentElement, 'padding', '0');
+                important(document.documentElement, 'background', '#000'); important(document.documentElement, 'overflow', 'hidden');
+                important(document.body, 'margin', '0'); important(document.body, 'padding', '0');
+                important(document.body, 'background', '#000'); important(document.body, 'overflow', 'hidden');
               }
-              setInterval(scan, 700);
-              scan();
+              function isolate(el){
+                if (!el) return false;
+                hideChrome();
+                var node = el;
+                while(node && node !== document.body){
+                  var parent = node.parentElement;
+                  if (!parent) break;
+                  Array.prototype.forEach.call(parent.children, function(sibling){
+                    if (sibling !== node) important(sibling, 'display', 'none');
+                  });
+                  important(parent, 'display', 'block'); important(parent, 'visibility', 'visible'); important(parent, 'opacity', '1');
+                  important(parent, 'position', 'static'); important(parent, 'width', '100%'); important(parent, 'height', '100%');
+                  important(parent, 'margin', '0'); important(parent, 'padding', '0'); important(parent, 'transform', 'none');
+                  node = parent;
+                }
+                important(el, 'display', 'block'); important(el, 'visibility', 'visible'); important(el, 'opacity', '1');
+                important(el, 'position', 'fixed'); important(el, 'inset', '0'); important(el, 'width', '100vw');
+                important(el, 'height', '100vh'); important(el, 'max-width', 'none'); important(el, 'max-height', 'none');
+                important(el, 'margin', '0'); important(el, 'padding', '0'); important(el, 'z-index', '2147483647');
+                important(el, 'background', '#000');
+                sendReady();
+                return true;
+              }
+              function watch(v){
+                if (!v) return false;
+                activeVideo = v;
+                isolate(v);
+                important(v, 'object-fit', 'contain');
+                v.setAttribute('playsinline', '');
+                v.controls = false;
+                reportSource(v);
+                if (!v.__aa){
+                  v.__aa = true;
+                  ['loadedmetadata', 'canplay'].forEach(function(name){ v.addEventListener(name, function(){ tryPlay(v); }); });
+                  v.addEventListener('playing', function(){ reportSource(v); });
+                  tryPlay(v);
+                }
+                return true;
+              }
+              function usefulFrame(frame){
+                var src = frame.getAttribute('src') || '';
+                if (!src || /^(?:about:blank|javascript:)/i.test(src) || /(?:doubleclick|googlesyndication|facebook|popads|adservice|\/ads?[\/.?])/i.test(src)) return false;
+                var rect = frame.getBoundingClientRect();
+                return rect.width >= 240 && rect.height >= 120;
+              }
+              function focus(){
+                if (!window.document || !document.documentElement) return false;
+                if (challenge()) return false;
+                hideChrome();
+                var videos = document.querySelectorAll('video');
+                if (videos.length) return watch(videos[0]);
+                var selectors = ['#media-player', '.player-container', '.watching_player', '#player', '.jwplayer', '[class*="video-player"]', '[class*="player-wrap"]'];
+                var player = null;
+                for (var i = 0; i < selectors.length && !player; i++) {
+                  try { player = document.querySelector(selectors[i]); } catch(e){}
+                }
+                var frames = Array.prototype.filter.call(document.querySelectorAll('iframe[src]'), usefulFrame);
+                frames.sort(function(a, b){
+                  var ar = a.getBoundingClientRect(), br = b.getBoundingClientRect();
+                  return (br.width * br.height) - (ar.width * ar.height);
+                });
+                var frame = frames[0];
+                if (frame) {
+                  isolate(frame);
+                  if (window === window.top) {
+                    try {
+                      var url = new URL(frame.getAttribute('src'), location.href).href;
+                      if (!reportedFrames[url]) {
+                        reportedFrames[url] = true;
+                      }
+                    } catch(e){}
+                  }
+                  return true;
+                }
+                return player ? isolate(player) : false;
+              }
+              function install(){
+                if (!document.documentElement) { setTimeout(install, 20); return; }
+                focus();
+                new MutationObserver(function(){ focus(); }).observe(document.documentElement, {childList: true, subtree: true});
+                var tries = 0, timer = setInterval(function(){ focus(); if (++tries > 120) clearInterval(timer); }, 500);
+                setTimeout(function(){
+                  if (activeVideo || challenge()) return;
+                  var b = document.querySelector('.jw-icon-playback,.play-btn,[class*="play-button"],button[aria-label*="Play"],button[title*="Play"]');
+                  if (b) b.click();
+                  focus();
+                }, 1800);
+              }
+              if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', install, {once: true});
+              else install();
             })();
         """.trimIndent()
 
@@ -988,6 +1121,9 @@ class PlayerActivity : AppCompatActivity() {
             }
 
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                if (request != null && !request.isForMainFrame) {
+                    return false
+                }
                 val u = request?.url?.toString().orEmpty()
                 if (u.contains("doubleclick") || u.contains("popads") || u.contains("googlesyndication")) {
                     return true
@@ -1071,7 +1207,21 @@ class PlayerActivity : AppCompatActivity() {
             return
         }
         fallbackWebView?.evaluateJavascript(
-            "(function(){var v=document.querySelector('video');if(v){if(v.paused){v.__userPaused=false;v.play();}else{v.__userPaused=true;v.pause();}}})();",
+            """
+            (function(){
+                var v = document.querySelector('video');
+                var isPaused = v ? v.paused : true;
+                if (v) {
+                    if (v.paused) { v.__aaUserPaused = false; v.play(); }
+                    else { v.__aaUserPaused = true; v.pause(); }
+                }
+                var cmd = {type: 'AnPinimeCommand', name: isPaused ? 'play' : 'pause'};
+                window.postMessage(cmd, '*');
+                document.querySelectorAll('iframe').forEach(function(f){
+                    try { f.contentWindow.postMessage(cmd, '*'); } catch(e){}
+                });
+            })();
+            """.trimIndent(),
             null
         )
     }
@@ -1087,7 +1237,20 @@ class PlayerActivity : AppCompatActivity() {
         }
         val deltaSec = deltaMs / 1000.0
         fallbackWebView?.evaluateJavascript(
-            "(function(){var v=document.querySelector('video');if(v&&isFinite(v.duration)){v.currentTime=Math.max(0,Math.min(v.duration,v.currentTime+($deltaSec)));}})();",
+            """
+            (function(){
+                var v = document.querySelector('video');
+                if (v && isFinite(v.duration)) {
+                    var target = Math.max(0, Math.min(v.duration, v.currentTime + ($deltaSec)));
+                    v.currentTime = target;
+                    var cmd = {type: 'AnPinimeCommand', name: 'seek', value: target};
+                    window.postMessage(cmd, '*');
+                    document.querySelectorAll('iframe').forEach(function(f){
+                        try { f.contentWindow.postMessage(cmd, '*'); } catch(e){}
+                    });
+                }
+            })();
+            """.trimIndent(),
             null
         )
     }
