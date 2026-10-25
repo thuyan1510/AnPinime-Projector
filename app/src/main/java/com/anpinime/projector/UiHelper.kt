@@ -215,12 +215,10 @@ object UiHelper {
 
         view.setOnClickListener { onClick() }
         view.setOnKeyListener { _, keyCode, event ->
-            if (event.action == KeyEvent.ACTION_DOWN &&
-                (keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
+            if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
                     keyCode == KeyEvent.KEYCODE_ENTER ||
-                    keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER)
-            ) {
-                onClick()
+                    keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER) {
+                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) view.performClick()
                 true
             } else {
                 false

@@ -50,8 +50,11 @@ object WebViewHelper {
     private var appContext: Context? = null
     private val mutex = Mutex()
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var cookiesInitialized = false
 
     fun initCookies(context: Context) {
+        if (cookiesInitialized) return
+        cookiesInitialized = true
         try {
             val cm = CookieManager.getInstance()
             cm.setAcceptCookie(true)
@@ -85,7 +88,7 @@ object WebViewHelper {
         initCookies(activity.applicationContext)
         try {
             val rawUa = WebSettings.getDefaultUserAgent(activity)
-            if (!rawUa.isNullOrBlank() && !rawUa.contains("K670", ignoreCase = true)) {
+            if (!rawUa.isNullOrBlank()) {
                 // Clean "; wv" and "Version/4.0" so Cloudflare treats WebView & HttpURLConnection identically as Chrome
                 userAgent = rawUa
                     .replace("; wv", "")
@@ -287,7 +290,7 @@ object WebViewHelper {
                             val reqUrl = request?.url?.toString().orEmpty()
                             if (reqUrl.isBlank()) return false
                             val host = request?.url?.host?.lowercase().orEmpty()
-                            val allowed = host.contains("animevietsub") ||
+                            val allowed = host == URL(targetUrl).host || host.contains("animevietsub") ||
                                 host.contains("bit.ly") ||
                                 host.contains("cloudflare") ||
                                 host.contains("challenges.cloudflare.com")
@@ -406,7 +409,7 @@ object WebViewHelper {
                                                     setPadding(0, 0, 0, UiHelper.dp(activity, 10))
                                                 }
                                                 val titleTv = TextView(activity).apply {
-                                                    text = "Đang xác minh kết nối AnimeVietsub…"
+                                                    text = "Đang xác minh kết nối ${URL(targetUrl).host}…"
                                                     setTextColor(Color.WHITE)
                                                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
                                                     typeface = Typeface.DEFAULT_BOLD
@@ -464,9 +467,8 @@ object WebViewHelper {
     }
 
     /**
-     * Executes the exact iOS PlayerView.swift directPlayerHTML inside a hidden WebView
-     * on the AnimeVietsub origin so fetch('/ajax/player', {credentials:'include'})
-     * uses the browser's exact Cloudflare cookies & TLS session.
+     * Fetches on the AnimeVietsub origin using browser cookies, then sends the payload
+     * to the native AES/DEFLATE decoder. No WebCrypto or remote pako script is needed.
      */
     @SuppressLint("SetJavaScriptEnabled")
     suspend fun resolveAnimeAjaxInWebView(
@@ -524,25 +526,13 @@ object WebViewHelper {
 
                     wv.addJavascriptInterface(object {
                         @JavascriptInterface
-                        fun onResolved(kind: String, resolvedUrl: String) {
-                            mainHandler.post {
-                                if (resolvedUrl.startsWith("http", ignoreCase = true)) {
-                                    cleanup(
-                                        ResolvedPlayback(
-                                            url = resolvedUrl,
-                                            headers = mapOf(
-                                                "Referer" to "$origin/",
-                                                "Origin" to origin,
-                                                "User-Agent" to userAgent
-                                            ),
-                                            isWeb = kind == "iframe",
-                                            webUrl = episodeUrl
-                                        )
-                                    )
-                                } else {
-                                    cleanup(null)
-                                }
-                            }
+                        fun onPayload(payload: String) {
+                            // JavascriptInterface callbacks run off the UI thread. Decode with
+                            // Android crypto so older WebViews need neither WebCrypto nor pako.
+                            val result = try {
+                                CatalogService.decryptAnimePlayerPayload(payload, origin, episodeUrl)
+                            } catch (_: Exception) { null }
+                            mainHandler.post { cleanup(result) }
                         }
 
                         @JavascriptInterface
@@ -553,57 +543,17 @@ object WebViewHelper {
 
                     val hash64 = Base64.encodeToString(hash.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
                     val film64 = Base64.encodeToString(filmId.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-                    val key64 = Base64.encodeToString(
-                        "dm_thang_suc_vat_get_link_an_dbt".toByteArray(Charsets.UTF_8),
-                        Base64.NO_WRAP
-                    )
 
                     val html = """
                         <!doctype html><html><head><meta name="viewport" content="width=device-width">
-                        <script src="/js/pako.min.js"></script></head><body><script>
-                        function bytes(s){return Uint8Array.from(atob(s),c=>c.charCodeAt(0));}
-                        function source(data){
-                          function item(v){return typeof v==='string'?v:(v&&(v.file||v.src||v.url));}
-                          try {
-                            var j=JSON.parse(data), first=j.sources&&j.sources[0], nested=j.player&&j.player.sources&&j.player.sources[0];
-                            var direct=item(first)||item(nested)||item(j.data)||item(j.link)||item(j.file)||item(j.url);
-                            if(direct)return {kind:/\.(?:m3u8|mp4)(?:$|[?#])/i.test(direct)?'video':'iframe',url:direct};
-                          } catch(e) {}
-                          var normalized=data.replace(/\\\//g,'/');
-                          var m=normalized.match(/https?:\/\/[^\s"'<>]+\.(?:m3u8|mp4)(?:[^\s"'<>]*)?/i);
-                          if(m)return {kind:'video',url:m[0]};
-                          var u=normalized.match(/https?:\/\/[^\s"'<>]+/i);
-                          return u&&{kind:'iframe',url:u[0]};
-                        }
-                        async function start(){
-                          try {
-                            if(typeof pako==='undefined'){
-                              await new Promise((ok,no)=>{
-                                var s=document.createElement('script');
-                                s.src='https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js';
-                                s.onload=ok; s.onerror=no; document.head.appendChild(s);
-                              });
-                            }
-                            var hash=atob('$hash64'), id=atob('$film64'), keyText=atob('$key64');
-                            var digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(keyText));
-                            var key=await crypto.subtle.importKey('raw',digest,{name:'AES-CBC'},false,['decrypt']);
-                            var form=new FormData(); form.append('link',hash); form.append('id',id);
-                            var response=await fetch('/ajax/player',{method:'POST',headers:{'X-Requested-With':'XMLHttpRequest'},body:form,credentials:'include'});
-                            if(!response.ok) throw Error('HTTP '+response.status);
-                            var value=await response.text(), encrypted=value;
-                            try { var json=JSON.parse(value); encrypted=json.data||json.link||json.html||value; } catch(e) {}
-                            encrypted=encrypted.replace(/-/g,'+').replace(/_/g,'/'); while(encrypted.length%4)encrypted+='=';
-                            var raw=bytes(encrypted);
-                            var clear=await crypto.subtle.decrypt({name:'AES-CBC',iv:raw.slice(0,16)},key,raw.slice(16));
-                            var text; try{text=pako.inflateRaw(new Uint8Array(clear),{to:'string'});}catch(e){text=new TextDecoder().decode(clear);}
-                            var found=source(text); if(!found||!found.url) throw Error('No video');
-                            var absolute=new URL(found.url,location.href).href;
-                            AnPinimeBridge.onResolved(found.kind, absolute);
-                          } catch(e) {
-                            AnPinimeBridge.onError(String(e));
-                          }
-                        }
-                        start();
+                        </head><body><script>
+                        var form = new FormData();
+                        form.append('link', atob('$hash64')); form.append('id', atob('$film64'));
+                        fetch('/ajax/player', {method:'POST', headers:{'X-Requested-With':'XMLHttpRequest'},
+                          body:form, credentials:'include'})
+                          .then(function(response){ if(!response.ok) throw Error('HTTP '+response.status); return response.text(); })
+                          .then(function(payload){ AnPinimeBridge.onPayload(payload); })
+                          .catch(function(error){ AnPinimeBridge.onError(String(error)); });
                         </script></body></html>
                     """.trimIndent()
 

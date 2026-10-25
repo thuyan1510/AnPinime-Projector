@@ -29,7 +29,10 @@ jobs:
       - name: Build Signed Release APK
         run: |
           gradle assembleRelease --no-daemon --stacktrace
-          cp app/build/outputs/apk/release/app-release.apk AnPinime-K670Pro.apk
+          APK_FILE=$(find app/build/outputs/apk/release/ -name "*universal*.apk" | head -n 1)
+          if [ -z "$APK_FILE" ]; then APK_FILE=$(find app/build/outputs/apk/release/ -name "*.apk" | head -n 1); fi
+          echo "Found APK: $APK_FILE"
+          cp "$APK_FILE" AnPinime-K670Pro.apk
           ls -lh AnPinime-K670Pro.apk
 
       - name: Upload APK Artifact

@@ -10,6 +10,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.WeakHashMap
@@ -21,6 +23,7 @@ import java.util.WeakHashMap
 object ImageLoader {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val jobs = WeakHashMap<ImageView, Job>()
+    private val downloads = Semaphore(4)
 
     // Cap cache strictly at 10MB so video playback always has plenty of free RAM
     private val maxCacheBytes = minOf(
@@ -40,6 +43,7 @@ object ImageLoader {
         maxHeight: Int = 320
     ) {
         jobs.remove(imageView)?.cancel()
+        imageView.tag = null
         if (url.isNullOrBlank()) {
             imageView.setImageBitmap(null)
             return
@@ -56,7 +60,7 @@ object ImageLoader {
         imageView.setImageBitmap(null)
         imageView.tag = cacheKey
         val job = scope.launch {
-            val bmp = fetchBitmap(url, referer, maxWidth, maxHeight) ?: return@launch
+            val bmp = downloads.withPermit { fetchBitmap(url, referer, maxWidth, maxHeight) } ?: return@launch
             synchronized(cache) {
                 cache.put(cacheKey, bmp)
             }

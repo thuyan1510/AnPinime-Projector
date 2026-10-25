@@ -6,9 +6,12 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
 import java.net.CookieHandler
 import java.net.CookieManager
 import java.net.CookiePolicy
@@ -22,7 +25,6 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
-import java.util.zip.Inflater
 import javax.crypto.Cipher
 import javax.crypto.Mac
 import javax.crypto.spec.GCMParameterSpec
@@ -114,6 +116,8 @@ object VideoTokenGenerator {
 }
 
 object CatalogService {
+    private val homeCache = java.util.concurrent.ConcurrentHashMap<ContentSource, Pair<Long, List<AnimeSection>>>()
+    private val homeLocks = ContentSource.entries.associateWith { Mutex() }
     val USER_AGENT: String
         get() = WebViewHelper.userAgent
 
@@ -191,10 +195,17 @@ object CatalogService {
     }
 
     suspend fun loadHome(source: ContentSource): List<AnimeSection> = withContext(Dispatchers.IO) {
-        when (source) {
-            ContentSource.FILM4K -> loadFilm4kHome()
-            ContentSource.PHIM4K -> loadPhim4kHome()
-            ContentSource.ANIME -> loadAnimeHome()
+        homeLocks.getValue(source).withLock {
+            homeCache[source]?.takeIf { android.os.SystemClock.elapsedRealtime() - it.first < 120_000L }
+                ?.let { return@withLock it.second }
+            val sections = when (source) {
+                ContentSource.FILM4K -> loadFilm4kHome()
+                ContentSource.PHIM4K -> loadPhim4kHome()
+                ContentSource.ANIME -> loadAnimeHome()
+            }
+            ensureActive()
+            if (sections.isNotEmpty()) homeCache[source] = android.os.SystemClock.elapsedRealtime() to sections
+            sections
         }
     }
 
@@ -202,7 +213,7 @@ object CatalogService {
         when (source) {
             ContentSource.FILM4K -> {
                 val query = if (path.isBlank()) "page=$page" else "$path&page=$page"
-                val json = getJson("$FILM4K_BASE/api/home?$query")
+                val json = getFilmJson("$FILM4K_BASE/api/home?$query")
                 parseFilm4kItems(json.optJSONArray("list"))
             }
             ContentSource.PHIM4K -> {
@@ -232,7 +243,7 @@ object CatalogService {
         val enc = URLEncoder.encode(cleanQuery, "UTF-8")
         when (source) {
             ContentSource.FILM4K -> {
-                val json = getJson("$FILM4K_BASE/api/search/suggest?q=$enc")
+                val json = getFilmJson("$FILM4K_BASE/api/search/suggest?q=$enc")
                 parseFilm4kItems(json.optJSONArray("list"))
             }
             ContentSource.PHIM4K -> {
@@ -331,8 +342,19 @@ object CatalogService {
     // NGUỒN PHIM 1 (Film4k.net)
     // =========================================================================
 
-    private fun loadFilm4kHome(): List<AnimeSection> {
-        val json = getJson("$FILM4K_BASE/api/home")
+    private suspend fun getFilmJson(url: String): JSONObject {
+        try {
+            return getJson(url)
+        } catch (e: HttpStatusException) {
+            if (e.code != 403 && e.code != 503) throw e
+            val (html, _) = WebViewHelper.fetchHtml(FILM4K_BASE)
+            if (html.isBlank() || WebViewHelper.containsVerification(html)) throw e
+            return getJson(url)
+        }
+    }
+
+    private suspend fun loadFilm4kHome(): List<AnimeSection> {
+        val json = getFilmJson("$FILM4K_BASE/api/home")
         val genres = json.optJSONArray("genres")
         if (genres != null && genres.length() > 0) {
             val cats = ArrayList<AnimeCategory>()
@@ -401,9 +423,9 @@ object CatalogService {
         return out
     }
 
-    private fun loadFilm4kDetail(anime: Anime): AnimeDetail {
+    private suspend fun loadFilm4kDetail(anime: Anime): AnimeDetail {
         val slug = anime.url.substringAfterLast('/')
-        val json = getJson("$FILM4K_BASE/api/title/$slug")
+        val json = getFilmJson("$FILM4K_BASE/api/title/$slug")
         val movie = json.optJSONObject("movie") ?: JSONObject()
         val maxRes = movie.optString("maxRes").ifBlank { anime.quality }
         val rows = json.optJSONArray("episodes")
@@ -472,7 +494,7 @@ object CatalogService {
         )
     }
 
-    private fun resolveFilm4kPlayback(episode: Episode): ResolvedPlayback {
+    private suspend fun resolveFilm4kPlayback(episode: Episode): ResolvedPlayback {
         val now = System.currentTimeMillis()
         if (f4kTicket == null || now > f4kTicketExpiry - 30_000L) {
             try {
@@ -482,7 +504,7 @@ object CatalogService {
                 f4kTicketExpiry = if (exp > 0L) exp else (now + 120_000L)
             } catch (_: Throwable) {}
         }
-        val watchJson = getJson("$FILM4K_BASE/api/watch/${episode.slug}")
+        val watchJson = getFilmJson("$FILM4K_BASE/api/watch/${episode.slug}")
         val sourcesArray: JSONArray? = if (episode.seasonNum > 0 && episode.episodeNum > 0) {
             val eps = watchJson.optJSONArray("episodes")
             var matched: JSONArray? = null
@@ -509,7 +531,7 @@ object CatalogService {
             allCandidates.add(obj)
             val u = obj.optString("url")
             val clean = u.substringBefore('?').lowercase()
-            if (obj.opt("drm") == null && (clean.endsWith(".m3u8") || clean.endsWith(".mp4") || clean.endsWith(".mov"))) {
+            if (obj.isNull("drm") && (clean.endsWith(".m3u8") || clean.endsWith(".mp4") || clean.endsWith(".mov") || clean.contains("/stream/hls"))) {
                 nativeCandidates.add(obj)
             }
         }
@@ -585,7 +607,7 @@ object CatalogService {
             async(Dispatchers.IO) {
                 for (host in listOf(phim4kFree1Mirror, phim4kFree1)) {
                     try {
-                        val json = getJson("$host/$path?page=1")
+                        val json = getJson("$host/$path?page=1", timeoutMs = 5000)
                         val items = parsePhim4kItems(json, host)
                         if (items.isNotEmpty()) {
                             return@async idx to AnimeSection(title, items, path)
@@ -654,7 +676,13 @@ object CatalogService {
     private suspend fun loadPhim4kDetail(anime: Anime): AnimeDetail = coroutineScope {
         refreshPhim4kDirectoryIfNeeded()
         val slug = anime.url.substringAfterLast('/')
+        val coreJob = async(Dispatchers.IO) {
+            try { fetchCorePhim4kServers(slug, anime.title, anime.url) }
+            catch (e: CancellationException) { throw e }
+            catch (_: Exception) { emptyList() }
+        }
         val candidates = listOf(
+            "$phim4kFree1Mirror/phim/$slug" to "Phim4K",
             "$phim4kFree1/phim/$slug" to "VIP Nhanh",
             "$phim4kFree2/api/film/$slug" to "NguonC"
         )
@@ -662,7 +690,7 @@ object CatalogService {
         val jobs = candidates.mapIndexed { idx, (url, prefix) ->
             async(Dispatchers.IO) {
                 try {
-                    val json = getJson(url, timeoutMs = 8000)
+                    val json = getJson(url, timeoutMs = 5000)
                     idx to Triple(url, prefix, json)
                 } catch (_: Throwable) {
                     idx to null
@@ -699,16 +727,12 @@ object CatalogService {
 
         // 1. Core Phim4K VIP servers (direct 1080p/4K CDN streams via VideoTokenGenerator)
         try {
-            val coreEpisodes = fetchCorePhim4kServers(
-                slug = slug,
-                title = movieTitle,
-                detailUrl = anime.url,
-                fallbackEpisodes = emptyList()
-            )
+            val coreEpisodes = coreJob.await()
             if (coreEpisodes.isNotEmpty()) {
                 allEpisodes.addAll(coreEpisodes)
             }
-        } catch (_: Throwable) {}
+        } catch (e: CancellationException) { throw e }
+          catch (_: Exception) {}
 
         // 2. VIP Nhanh (phimapi.com) and NguonC
         allEpisodes.addAll(legacyEpisodes)
@@ -774,9 +798,6 @@ object CatalogService {
                 }
 
                 if (chosenDirect.isNotBlank()) {
-                    if (chosenDirect.contains("sf.phim4k.space", ignoreCase = true)) {
-                        continue
-                    }
                     val fallbackWeb = when {
                         chosenEmbed.isNotBlank() -> chosenEmbed
                         chosenDirect.startsWith("http", ignoreCase = true) &&
@@ -820,8 +841,7 @@ object CatalogService {
     private fun fetchCorePhim4kServers(
         slug: String,
         title: String,
-        detailUrl: String,
-        fallbackEpisodes: List<Episode> = emptyList()
+        detailUrl: String
     ): List<Episode> {
         val searchQueries = mutableListOf<String>()
         if (title.isNotBlank()) {
@@ -868,9 +888,8 @@ object CatalogService {
             val objSlug = obj.optString("slug")
             val objTitle = obj.optString("title")
             objSlug.equals(slug, ignoreCase = true) ||
-                objTitle.contains(title, ignoreCase = true) ||
-                (title.isNotBlank() && title.contains(objTitle, ignoreCase = true))
-        } ?: candidates.first()
+                (title.isNotBlank() && foldVietnamese(objTitle) == foldVietnamese(title))
+        } ?: return emptyList()
 
         val vid = matched.first.optString("videos_id")
         if (vid.isBlank()) return emptyList()
@@ -887,15 +906,14 @@ object CatalogService {
                 val label = v.optString("label").ifBlank { "Server VIP #${i + 1}" }
                 val badge = detectQualityBadge("$label $fileUrl")
                 val isInternalCdn = fileUrl.contains("phim4k.lol", ignoreCase = true) ||
-                    !fileUrl.startsWith("http", ignoreCase = true) ||
-                    (!fileUrl.contains(".m3u8", ignoreCase = true) && !fileUrl.contains("/stream/hls", ignoreCase = true))
+                    !fileUrl.startsWith("http", ignoreCase = true)
 
                 val epTitle = if (videos.length() > 1) "Server ${i + 1}" else "Xem phim"
                 out.add(
                     Episode(
                         title = epTitle,
                         url = detailUrl,
-                        number = i + 1,
+                        number = 1,
                         season = "Phim4K VIP · $label",
                         qualityBadge = badge,
                         source = ContentSource.PHIM4K,
@@ -923,8 +941,7 @@ object CatalogService {
                     val fileUrl = epObj.optString("file_url").trim()
                     if (fileUrl.isBlank()) continue
                     val isInternalCdn = fileUrl.contains("phim4k.lol", ignoreCase = true) ||
-                        !fileUrl.startsWith("http", ignoreCase = true) ||
-                        (!fileUrl.contains(".m3u8", ignoreCase = true) && !fileUrl.contains("/stream/hls", ignoreCase = true))
+                        !fileUrl.startsWith("http", ignoreCase = true)
 
                     out.add(
                         Episode(
@@ -1413,7 +1430,7 @@ object CatalogService {
                 if (decoded != null) return decoded
             } catch (_: Throwable) {}
 
-            // 2. Fallback: execute fetch('/ajax/player') + WebCrypto AES-CBC inside WebView on origin
+            // 2. Keep browser cookies/origin for AJAX; decode using the same native parser.
             val wvResolved = WebViewHelper.resolveAnimeAjaxInWebView(
                 episodeUrl = epPageUrl,
                 filmId = filmId,
@@ -1435,11 +1452,16 @@ object CatalogService {
         )
     }
 
-    private fun decryptAnimePlayerPayload(
+    internal fun decryptAnimePlayerPayload(
         responseText: String,
         origin: String,
         epPageUrl: String
     ): ResolvedPlayback? {
+        fun resolved(text: String): ResolvedPlayback? = PlaybackSourceParser.parse(text, epPageUrl)?.let {
+            ResolvedPlayback(it.url, mapOf("Referer" to epPageUrl, "Origin" to origin, "User-Agent" to USER_AGENT),
+                isWeb = it.isWeb, webUrl = epPageUrl)
+        }
+        resolved(responseText)?.let { return it }
         var encrypted = responseText.trim()
         try {
             val j = JSONObject(encrypted)
@@ -1448,58 +1470,9 @@ object CatalogService {
 
         val raw = decodeBase64Url(encrypted)
         if (raw.size <= 16) return null
-        val iv = raw.copyOfRange(0, 16)
-        val cipherBytes = raw.copyOfRange(16, raw.size)
-        val keyDigest = MessageDigest.getInstance("SHA-256")
-            .digest("dm_thang_suc_vat_get_link_an_dbt".toByteArray(Charsets.UTF_8))
-        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keyDigest, "AES"), IvParameterSpec(iv))
-        val decrypted = cipher.doFinal(cipherBytes)
+        val clearText = AnimePayloadDecoder.decode(raw, "dm_thang_suc_vat_get_link_an_dbt")
 
-        val clearText = try {
-            val inflater = Inflater(true)
-            inflater.setInput(decrypted)
-            val bos = ByteArrayOutputStream()
-            val buf = ByteArray(4096)
-            while (!inflater.finished() && !inflater.needsInput()) {
-                val count = inflater.inflate(buf)
-                if (count <= 0) break
-                bos.write(buf, 0, count)
-            }
-            inflater.end()
-            String(bos.toByteArray(), Charsets.UTF_8)
-        } catch (_: Throwable) {
-            String(decrypted, Charsets.UTF_8)
-        }
-
-        val normalized = clearText.replace("\\/", "/")
-        val m3u8Match = Regex("""https?://[^\s"'<>]+\.(?:m3u8|mp4)[^\s"'<>]*""", RegexOption.IGNORE_CASE).find(normalized)
-        if (m3u8Match != null) {
-            return ResolvedPlayback(
-                url = m3u8Match.value,
-                headers = mapOf(
-                    "Referer" to "$origin/",
-                    "Origin" to origin,
-                    "User-Agent" to USER_AGENT
-                ),
-                isWeb = false,
-                webUrl = epPageUrl
-            )
-        }
-        val iframeMatch = Regex("""https?://[^\s"'<>]+""", RegexOption.IGNORE_CASE).find(normalized)
-        if (iframeMatch != null) {
-            return ResolvedPlayback(
-                url = iframeMatch.value,
-                headers = mapOf(
-                    "Referer" to "$origin/",
-                    "Origin" to origin,
-                    "User-Agent" to USER_AGENT
-                ),
-                isWeb = true,
-                webUrl = epPageUrl
-            )
-        }
-        return null
+        return resolved(clearText)
     }
 
     // =========================================================================
@@ -1571,6 +1544,8 @@ object CatalogService {
         return Base64.decode(padded, Base64.DEFAULT)
     }
 
+    private class HttpStatusException(val code: Int, host: String) : java.io.IOException("$host: HTTP $code")
+
     private fun getBytes(
         url: String,
         referer: String? = null,
@@ -1578,7 +1553,7 @@ object CatalogService {
         timeoutMs: Int = 10000
     ): ByteArray {
         var lastError: Throwable? = null
-        for (attempt in 1..2) {
+        for (attempt in 1..if (timeoutMs <= 5000) 1 else 2) {
             var conn: HttpURLConnection? = null
             try {
                 val u = URL(url)
@@ -1598,9 +1573,11 @@ object CatalogService {
                 }
                 val code = conn.responseCode
                 WebViewHelper.saveSetCookieHeaders(conn.url?.toString() ?: url, conn.headerFields)
-                if (code !in 200..299) throw IllegalStateException("HTTP $code")
+                if (code !in 200..299) throw HttpStatusException(code, u.host)
                 return conn.inputStream.use { it.readBytes() }
             } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                if (t is HttpStatusException && t.code in 400..499) throw t
                 lastError = t
             } finally {
                 conn?.disconnect()
@@ -1630,7 +1607,9 @@ object CatalogService {
                 setRequestProperty("Accept", "application/json")
                 setRequestProperty("Origin", "${u.protocol}://${u.host}")
                 setRequestProperty("Referer", "${u.protocol}://${u.host}/")
+                WebViewHelper.getCookieHeader(url)?.let { setRequestProperty("Cookie", it) }
             }
+            WebViewHelper.saveSetCookieHeaders(url, conn.headerFields)
             return JSONObject(String(conn.inputStream.use { it.readBytes() }, Charsets.UTF_8))
         } finally {
             conn?.disconnect()

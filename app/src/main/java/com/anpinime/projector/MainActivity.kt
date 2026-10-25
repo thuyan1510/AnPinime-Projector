@@ -31,6 +31,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ensureActive
 import org.json.JSONArray
 import java.lang.ref.WeakReference
 
@@ -557,12 +559,14 @@ class MainActivity : AppCompatActivity() {
         loadJob = uiScope.launch {
             try {
                 val sections = CatalogService.loadHome(targetSource)
-                if (targetSource != currentSource) return@launch
+                ensureActive()
+                if (targetSource != currentSource || currentTab != "home") return@launch
                 homeSections = sections
                 featuredIndex = 0
                 renderHome()
             } catch (t: Throwable) {
-                if (targetSource != currentSource) return@launch
+                if (t is CancellationException) throw t
+                if (targetSource != currentSource || currentTab != "home") return@launch
                 showError(t.message ?: "Không kết nối được máy chủ.") {
                     loadHomeData()
                 }
@@ -1112,6 +1116,7 @@ class MainActivity : AppCompatActivity() {
             loadJob = uiScope.launch {
                 try {
                     val items = CatalogService.search(currentSource, clean)
+                    ensureActive()
                     resultsFrame.removeAllViews()
                     if (items.isEmpty()) {
                         val emptyText = TextView(this@MainActivity).apply {
@@ -1139,6 +1144,7 @@ class MainActivity : AppCompatActivity() {
                         resultsFrame.addView(grid)
                     }
                 } catch (t: Throwable) {
+                    if (t is CancellationException) throw t
                     resultsFrame.removeAllViews()
                     val errText = TextView(this@MainActivity).apply {
                         text = "Lỗi tìm kiếm: ${t.message}"
@@ -1360,6 +1366,7 @@ class MainActivity : AppCompatActivity() {
             loadJob = uiScope.launch {
                 try {
                     val nextItems = CatalogService.loadList(currentSource, active.path, pageToLoad)
+                    ensureActive()
                     val existingUrls = browseItems.map { it.url }.toHashSet()
                     val unique = nextItems.filter { existingUrls.add(it.url) }
                     browseItems.addAll(unique)
@@ -1379,6 +1386,7 @@ class MainActivity : AppCompatActivity() {
                     }
                     gridContainer.addView(grid)
                 } catch (t: Throwable) {
+                    if (t is CancellationException) throw t
                     if (pageToLoad == 1) {
                         gridContainer.removeAllViews()
                         gridContainer.addView(

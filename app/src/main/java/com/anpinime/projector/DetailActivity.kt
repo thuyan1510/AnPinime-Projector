@@ -86,6 +86,7 @@ class DetailActivity : AppCompatActivity() {
                 }
                 renderDetail(loaded)
             } catch (t: Throwable) {
+                if (t is kotlinx.coroutines.CancellationException) throw t
                 renderError(t.message ?: "Không tải được chi tiết phim.")
             }
         }

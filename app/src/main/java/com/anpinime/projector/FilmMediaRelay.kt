@@ -1,6 +1,5 @@
 package com.anpinime.projector
 
-import android.net.Uri
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
@@ -17,15 +16,18 @@ import java.util.concurrent.Executors
  * Strips PNG header envelopes from HLS fMP4/TS segments and injects play tickets.
  */
 class FilmMediaRelay(
-    private val baseHeaders: Map<String, String>
+    private val baseHeaders: Map<String, String>,
+    private val userAgent: String = CatalogService.USER_AGENT
 ) {
     private var serverSocket: ServerSocket? = null
-    private val executor = Executors.newCachedThreadPool()
+    private val executor = Executors.newFixedThreadPool(4)
+    private val clients = java.util.concurrent.ConcurrentHashMap.newKeySet<Socket>()
+    private val connections = java.util.concurrent.ConcurrentHashMap.newKeySet<HttpURLConnection>()
     @Volatile private var running = false
     private var port = 0
 
     fun start(masterUrl: String): String {
-        stop()
+        check(!running && !executor.isShutdown) { "Relay already used" }
         val socket = ServerSocket(0, 32, InetAddress.getByName("127.0.0.1"))
         serverSocket = socket
         port = socket.localPort
@@ -34,7 +36,15 @@ class FilmMediaRelay(
             while (running) {
                 try {
                     val client = socket.accept()
-                    executor.execute { handleClient(client) }
+                    clients.add(client)
+                    try {
+                        executor.execute {
+                            try { handleClient(client) } finally { clients.remove(client) }
+                        }
+                    } catch (_: java.util.concurrent.RejectedExecutionException) {
+                        client.close()
+                        clients.remove(client)
+                    }
                 } catch (_: Throwable) {
                     break
                 }
@@ -49,6 +59,11 @@ class FilmMediaRelay(
             serverSocket?.close()
         } catch (_: Throwable) {}
         serverSocket = null
+        clients.forEach { try { it.close() } catch (_: Exception) {} }
+        clients.clear()
+        connections.forEach { it.disconnect() }
+        connections.clear()
+        executor.shutdownNow()
     }
 
     private fun proxyUrlFor(remoteUrl: String): String {
@@ -87,8 +102,10 @@ class FilmMediaRelay(
                     for ((k, v) in baseHeaders) {
                         setRequestProperty(k, v)
                     }
-                    setRequestProperty("User-Agent", CatalogService.USER_AGENT)
+                    if (baseHeaders.keys.none { it.equals("User-Agent", true) }) setRequestProperty("User-Agent", userAgent)
                 }
+                connections.add(conn)
+                if (!running) return
                 val rawBytes = conn.inputStream.use { it.readBytes() }
                 val contentType = conn.contentType ?: ""
                 val cleanTarget = targetUrl.substringBefore('?').lowercase()
@@ -113,7 +130,13 @@ class FilmMediaRelay(
                     val isTs = cleanTarget.endsWith(".ts") ||
                         contentType.contains("mp2t", ignoreCase = true) ||
                         (unwrapped.isNotEmpty() && unwrapped[0] == 0x47.toByte())
-                    val mime = if (isTs) "video/mp2t" else "video/mp4"
+                    val mime = when {
+                        cleanTarget.endsWith(".vtt") || contentType.contains("text/vtt") -> "text/vtt"
+                        cleanTarget.endsWith(".key") -> "application/octet-stream"
+                        isTs -> "video/mp2t"
+                        contentType.isNotBlank() && !contentType.startsWith("image/") -> contentType
+                        else -> "video/mp4"
+                    }
 
                     val slice = parseRange(rangeHeader, unwrapped.size)
                     if (slice != null) {
@@ -140,6 +163,7 @@ class FilmMediaRelay(
             } catch (_: Throwable) {
             } finally {
                 conn?.disconnect()
+                conn?.let { connections.remove(it) }
             }
         }
     }

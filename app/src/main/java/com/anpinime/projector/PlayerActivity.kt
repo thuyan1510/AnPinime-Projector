@@ -21,6 +21,7 @@ import android.webkit.JavascriptInterface
 import android.webkit.JsResult
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -37,6 +38,13 @@ import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
+import androidx.media3.common.Tracks
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.text.CueGroup
+import androidx.media3.ui.SubtitleView
+import androidx.appcompat.app.AlertDialog
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
@@ -54,6 +62,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 import org.json.JSONObject
 import java.net.URLEncoder
 
@@ -70,6 +79,9 @@ class PlayerActivity : AppCompatActivity() {
     private var allEpisodes: List<Episode> = emptyList()
 
     private var exoPlayer: ExoPlayer? = null
+    private var compatibilityPlayer: CompatibilityPlayer? = null
+    private var lastNativeUrl = ""
+    private var lastNativeHeaders: Map<String, String> = emptyMap()
     private var trackSelector: DefaultTrackSelector? = null
     private var filmRelay: FilmMediaRelay? = null
     private var fallbackWebView: WebView? = null
@@ -79,6 +91,15 @@ class PlayerActivity : AppCompatActivity() {
 
     private lateinit var videoFrame: FrameLayout
     private lateinit var surfaceView: SurfaceView
+    private lateinit var subtitleView: SubtitleView
+    private var scrubbing = false
+    private var seekGestureKey = -1
+    private var playbackGeneration = 0
+    private var webPositionMs = 0L
+    private var webDurationMs = 0L
+    private var webPaused = true
+    private var openingFrame = false
+    private val visitedFrames = HashSet<String>()
     private lateinit var loadingOverlay: LinearLayout
     private lateinit var loadingText: TextView
     private lateinit var osdContainer: FrameLayout
@@ -97,7 +118,8 @@ class PlayerActivity : AppCompatActivity() {
     private var osdVisible = true
 
     private val hideOsdRunnable = Runnable {
-        if (exoPlayer?.isPlaying == true || fallbackWebView != null) {
+        if (!scrubbing && serverDrawer.visibility != View.VISIBLE && episodeDrawer.visibility != View.VISIBLE &&
+            (exoPlayer?.isPlaying == true || compatibilityPlayer?.playing == true || fallbackWebView != null)) {
             hideOsd()
         }
     }
@@ -113,7 +135,7 @@ class PlayerActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         WebViewHelper.registerActivity(this)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        ImageLoader.trimMemory()
+        // Keep small cached posters for an instant return to the catalog.
 
         movieTitle = intent.getStringExtra("movie_title").orEmpty()
         val epRaw = intent.getStringExtra("episode_json").orEmpty()
@@ -133,11 +155,14 @@ class PlayerActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         WebViewHelper.registerActivity(this)
+        fallbackWebView?.onResume()
     }
 
     override fun onStop() {
         super.onStop()
         exoPlayer?.pause()
+        compatibilityPlayer?.pause()
+        sendWebCommand("pause")
         fallbackWebView?.onPause()
     }
 
@@ -150,11 +175,14 @@ class PlayerActivity : AppCompatActivity() {
         destroyWebPlayer()
     }
 
-    private fun releasePlayer() {
+    private fun releasePlayer(stopRelay: Boolean = true) {
+        compatibilityPlayer?.release()
+        compatibilityPlayer = null
         try {
-            filmRelay?.stop()
+            if (stopRelay) filmRelay?.stop()
         } catch (_: Throwable) {}
-        filmRelay = null
+        if (stopRelay) filmRelay = null
+        if (::subtitleView.isInitialized) subtitleView.setCues(emptyList())
         val oldPlayer = exoPlayer
         exoPlayer = null
         trackSelector = null
@@ -184,6 +212,20 @@ class PlayerActivity : AppCompatActivity() {
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val keyCode = event.keyCode
+        if (event.action == KeyEvent.ACTION_UP && keyCode == seekGestureKey) {
+            seekGestureKey = -1
+            return true
+        }
+        if (event.action == KeyEvent.ACTION_DOWN &&
+            (keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) &&
+            (!osdVisible || seekGestureKey == keyCode || seekBar.hasFocus())) {
+            seekGestureKey = keyCode
+            val step = if (event.repeatCount >= 8) 30_000L else 10_000L
+            seekRelative(if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) -step else step)
+            showOsd()
+            seekBar.requestFocus()
+            return true
+        }
 
         // Never intercept system power, volume, or home keys so projector remote always works
         if (keyCode == KeyEvent.KEYCODE_POWER ||
@@ -204,17 +246,22 @@ class PlayerActivity : AppCompatActivity() {
             // Media buttons on projector remote work whether OSD is visible or hidden
             when (keyCode) {
                 KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
+                    if (event.repeatCount > 0) return true
                     togglePlayPause()
                     showOsd()
                     return true
                 }
                 KeyEvent.KEYCODE_MEDIA_PLAY -> {
                     exoPlayer?.play()
+                    compatibilityPlayer?.play()
+                    sendWebCommand("play")
                     showOsd()
                     return true
                 }
                 KeyEvent.KEYCODE_MEDIA_PAUSE -> {
                     exoPlayer?.pause()
+                    compatibilityPlayer?.pause()
+                    sendWebCommand("pause")
                     showOsd()
                     return true
                 }
@@ -245,6 +292,7 @@ class PlayerActivity : AppCompatActivity() {
                     KeyEvent.KEYCODE_DPAD_CENTER,
                     KeyEvent.KEYCODE_ENTER,
                     KeyEvent.KEYCODE_NUMPAD_ENTER -> {
+                        if (event.repeatCount > 0) return true
                         togglePlayPause()
                         showOsd(focusPlayButton = true)
                         return true
@@ -263,7 +311,7 @@ class PlayerActivity : AppCompatActivity() {
                 }
             } else {
                 if (keyCode == KeyEvent.KEYCODE_BACK || keyCode == KeyEvent.KEYCODE_ESCAPE) {
-                    if (exoPlayer?.isPlaying == true || fallbackWebView != null) {
+                    if (exoPlayer?.isPlaying == true || compatibilityPlayer?.playing == true || fallbackWebView != null) {
                         hideOsd()
                     } else {
                         finish()
@@ -309,6 +357,13 @@ class PlayerActivity : AppCompatActivity() {
             isFocusableInTouchMode = false
         }
         videoFrame.addView(surfaceView)
+        subtitleView = SubtitleView(this).apply {
+            setUserDefaultStyle()
+            setUserDefaultTextSize()
+            isFocusable = false
+            layoutParams = FrameLayout.LayoutParams(-1, -1)
+        }
+        videoFrame.addView(subtitleView)
         root.addView(videoFrame)
 
         // Loading / Status Overlay with iOS Animated Loading GIF
@@ -440,8 +495,9 @@ class PlayerActivity : AppCompatActivity() {
         }
         seekBar = SeekBar(this).apply {
             max = 1000
-            isFocusable = false
-            isFocusableInTouchMode = false
+            isFocusable = true
+            isFocusableInTouchMode = true
+            contentDescription = "Thời lượng: trái/phải tua 10 giây, giữ để tua nhanh"
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
                 leftMargin = UiHelper.dp(context, 10)
                 rightMargin = UiHelper.dp(context, 10)
@@ -449,14 +505,22 @@ class PlayerActivity : AppCompatActivity() {
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
                     if (fromUser) {
-                        val dur = exoPlayer?.duration ?: 0L
+                        val dur = exoPlayer?.duration ?: compatibilityPlayer?.duration ?: webDurationMs
                         if (dur > 0) {
                             exoPlayer?.seekTo(dur * progress / 1000L)
+                            compatibilityPlayer?.seekTo(dur * progress / 1000L)
+                            if (fallbackWebView != null) sendWebCommand("seek", dur * progress / 1_000_000.0)
                         }
                     }
                 }
-                override fun onStartTrackingTouch(bar: SeekBar?) {}
-                override fun onStopTrackingTouch(bar: SeekBar?) {}
+                override fun onStartTrackingTouch(bar: SeekBar?) {
+                    scrubbing = true
+                    mainHandler.removeCallbacks(hideOsdRunnable)
+                }
+                override fun onStopTrackingTouch(bar: SeekBar?) {
+                    scrubbing = false
+                    scheduleHideOsd()
+                }
             })
         }
         timeTotalText = TextView(this).apply {
@@ -507,8 +571,20 @@ class PlayerActivity : AppCompatActivity() {
         }
         btnRow.addView(playPauseBtn)
 
-        btnRow.addView(makeOsdBtn("⏪ -10s") { seekRelative(-10_000L) })
-        btnRow.addView(makeOsdBtn("⏩ +10s") { seekRelative(10_000L) })
+        fun seekButton(label: String, delta: Long): TextView = makeOsdBtn(label) { seekRelative(delta) }.apply {
+            var lastRepeatAt = 0L
+            setOnKeyListener { _, code, event ->
+                if (code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER || code == KeyEvent.KEYCODE_NUMPAD_ENTER) {
+                    if (event.action == KeyEvent.ACTION_DOWN && (event.repeatCount == 0 || event.eventTime - lastRepeatAt >= 200L)) {
+                        lastRepeatAt = event.eventTime
+                        performClick()
+                    }
+                    true
+                } else false
+            }
+        }
+        btnRow.addView(seekButton("⏪ -10s", -10_000L))
+        btnRow.addView(seekButton("⏩ +10s", 10_000L))
 
         btnRow.addView(makeOsdBtn("⏭ Tập tiếp") {
             playNextEpisode()
@@ -521,6 +597,7 @@ class PlayerActivity : AppCompatActivity() {
             } else {
                 populateServerDrawer()
                 serverDrawer.visibility = View.VISIBLE
+                serverDrawerRow.getChildAt(0)?.requestFocus()
             }
         })
 
@@ -531,6 +608,7 @@ class PlayerActivity : AppCompatActivity() {
             } else {
                 populateEpisodeDrawer()
                 episodeDrawer.visibility = View.VISIBLE
+                episodeDrawerRow.getChildAt(0)?.requestFocus()
             }
         })
 
@@ -538,12 +616,20 @@ class PlayerActivity : AppCompatActivity() {
             cycleQualityMode()
         }
         btnRow.addView(qualityBtn)
+        btnRow.addView(makeOsdBtn("Âm thanh") { showTrackPicker(C.TRACK_TYPE_AUDIO) })
+        btnRow.addView(makeOsdBtn("Phụ đề") { showTrackPicker(C.TRACK_TYPE_TEXT) })
+        btnRow.addView(makeOsdBtn("Sửa mất tiếng") {
+            if (exoPlayer != null) startCompatibilityPlayback(exoPlayer?.currentPosition ?: 0L)
+        })
 
         btnRow.addView(makeOsdBtn("✕ Thoát", Color.parseColor("#381E24")) {
             finish()
         })
 
-        bottomPanel.addView(btnRow)
+        bottomPanel.addView(HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(btnRow)
+        })
         osdContainer.addView(bottomPanel)
         root.addView(osdContainer)
 
@@ -582,8 +668,9 @@ class PlayerActivity : AppCompatActivity() {
                 radiusDp = 16
             ) {
                 serverDrawer.visibility = View.GONE
-                val resumePos = exoPlayer?.currentPosition ?: 0L
-                startEpisodePlayback(matchedEp, resetPosition = false, initialPositionMs = resumePos)
+                val resumePos = exoPlayer?.currentPosition ?: compatibilityPlayer?.position ?: webPositionMs
+                startEpisodePlayback(matchedEp, resetPosition = matchedEp.number != currentEpisode.number, initialPositionMs = resumePos)
+                playPauseBtn.requestFocus()
             }
             serverDrawerRow.addView(chip)
         }
@@ -628,7 +715,12 @@ class PlayerActivity : AppCompatActivity() {
         resetPosition: Boolean,
         initialPositionMs: Long = 0L
     ) {
+        val generation = ++playbackGeneration
+        releasePlayer()
         currentEpisode = episode
+        visitedFrames.clear()
+        webPositionMs = 0L
+        webDurationMs = 0L
         retryCount = 0
         attemptedStreamUrls.clear()
         topServerText.text = "${episode.title} • ${episode.season}"
@@ -641,6 +733,7 @@ class PlayerActivity : AppCompatActivity() {
         resolveJob = uiScope.launch {
             try {
                 val resolved = CatalogService.resolvePlayback(episode)
+                if (generation != playbackGeneration) return@launch
                 lastWebUrl = resolved.webUrl.ifBlank { episode.url }
                 if (resolved.isWeb) {
                     startWebFallback(resolved.url, resolved.headers["Referer"] ?: episode.url)
@@ -665,6 +758,8 @@ class PlayerActivity : AppCompatActivity() {
                     seekMs = if (resetPosition) 0L else initialPositionMs
                 )
             } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                if (generation != playbackGeneration) return@launch
                 if (!trySwitchToBackupServer(0L)) {
                     if (episode.url.startsWith("http", ignoreCase = true) && !episode.source.isMovie) {
                         startWebFallback(episode.url, CatalogService.animeBaseUrl)
@@ -683,12 +778,20 @@ class PlayerActivity : AppCompatActivity() {
         headers: Map<String, String>,
         seekMs: Long
     ) {
-        releasePlayer()
+        // The newly created relay belongs to this stream, not the old player.
+        releasePlayer(stopRelay = false)
+        lastNativeUrl = streamUrl
+        lastNativeHeaders = headers
         destroyWebPlayer()
         surfaceView.visibility = View.VISIBLE
 
         val selector = DefaultTrackSelector(this).apply {
             parameters = buildUponParameters()
+                .setPreferredAudioLanguages("vi", "en")
+                .setPreferredAudioMimeTypes(MimeTypes.AUDIO_AAC, MimeTypes.AUDIO_MPEG)
+                .setMaxAudioChannelCount(2)
+                .setPreferredTextLanguages("vi", "en")
+                .setSelectUndeterminedTextLanguage(true)
                 .apply {
                     when (currentQualityMode) {
                         0 -> setMaxVideoSize(1920, 1080).setMaxVideoBitrate(8_500_000)
@@ -719,6 +822,7 @@ class PlayerActivity : AppCompatActivity() {
 
         val mergedHeaders = HashMap(headers)
         WebViewHelper.getCookieHeader(streamUrl)?.let { mergedHeaders["Cookie"] = it }
+        lastNativeHeaders = mergedHeaders
 
         val ua = headers["User-Agent"] ?: CatalogService.USER_AGENT
         val httpFactory = DefaultHttpDataSource.Factory()
@@ -764,11 +868,28 @@ class PlayerActivity : AppCompatActivity() {
             .setLoadControl(loadControl)
             .build()
 
+        player.setAudioAttributes(androidx.media3.common.AudioAttributes.DEFAULT, true)
+        player.setHandleAudioBecomingNoisy(true)
+
         player.videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
         player.setVideoSurfaceView(surfaceView)
 
         player.addListener(object : Player.Listener {
+            override fun onCues(cueGroup: CueGroup) {
+                if (exoPlayer === player) subtitleView.setCues(cueGroup.cues)
+            }
+
+            override fun onTracksChanged(tracks: Tracks) {
+                if (exoPlayer !== player) return
+                if (tracks.groups.any { it.type == C.TRACK_TYPE_AUDIO } &&
+                    tracks.groups.none { it.type == C.TRACK_TYPE_AUDIO && it.isSupported }) {
+                    mainHandler.post {
+                        if (exoPlayer === player) startCompatibilityPlayback(player.currentPosition)
+                    }
+                }
+            }
             override fun onPlaybackStateChanged(state: Int) {
+                if (exoPlayer !== player) return
                 when (state) {
                     Player.STATE_BUFFERING -> {
                         loadingOverlay.visibility = View.VISIBLE
@@ -789,6 +910,7 @@ class PlayerActivity : AppCompatActivity() {
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (exoPlayer !== player) return
                 playPauseBtn.text = if (isPlaying) "⏸ Tạm dừng" else "▶ Phát tiếp"
                 if (isPlaying) {
                     scheduleHideOsd()
@@ -800,7 +922,12 @@ class PlayerActivity : AppCompatActivity() {
             }
 
             override fun onPlayerError(error: PlaybackException) {
+                if (exoPlayer !== player) return
                 val lastPos = player.currentPosition.coerceAtLeast(0L)
+                if (error.errorCode in 4000..4999 || error.errorCode in 5000..5999) {
+                    mainHandler.post { if (exoPlayer === player) startCompatibilityPlayback(lastPos) }
+                    return
+                }
                 if (retryCount < 1) {
                     retryCount++
                     loadingOverlay.visibility = View.VISIBLE
@@ -810,6 +937,11 @@ class PlayerActivity : AppCompatActivity() {
                     player.play()
                 } else {
                     mainHandler.post {
+                        if (exoPlayer !== player) return@post
+                        if (currentEpisode.source.isMovie) {
+                            if (!trySwitchToBackupServer(lastPos)) startCompatibilityPlayback(lastPos)
+                            return@post
+                        }
                         val fallbackUrl = when {
                             lastWebUrl.startsWith("http", ignoreCase = true) &&
                                 (lastWebUrl.contains("embed", ignoreCase = true) ||
@@ -853,6 +985,7 @@ class PlayerActivity : AppCompatActivity() {
 
         val wv = WebView(this).apply {
             setBackgroundColor(Color.BLACK)
+            visibility = View.INVISIBLE
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -861,6 +994,8 @@ class PlayerActivity : AppCompatActivity() {
             isFocusable = false
             isFocusableInTouchMode = false
         }
+        openingFrame = false
+        visitedFrames.add(webUrl)
         val cm = CookieManager.getInstance()
         cm.setAcceptCookie(true)
         cm.setAcceptThirdPartyCookies(wv, true)
@@ -878,6 +1013,7 @@ class PlayerActivity : AppCompatActivity() {
             @JavascriptInterface
             fun onVideoFound(streamUrl: String, refUrl: String) {
                 mainHandler.post {
+                    if (fallbackWebView !== wv) return@post
                     if (streamUrl.startsWith("http", ignoreCase = true) && exoPlayer == null) {
                         if (attemptedStreamUrls.contains(streamUrl)) {
                             return@post
@@ -902,8 +1038,33 @@ class PlayerActivity : AppCompatActivity() {
             @JavascriptInterface
             fun onPlayerReady() {
                 mainHandler.post {
+                    if (fallbackWebView !== wv) return@post
+                    wv.visibility = View.VISIBLE
                     loadingOverlay.visibility = View.GONE
                     scheduleHideOsd()
+                }
+            }
+
+            @JavascriptInterface
+            fun onFrameFound(url: String, referer: String) {
+                mainHandler.post {
+                    if (fallbackWebView !== wv || openingFrame || visitedFrames.size >= 4 ||
+                        url in visitedFrames || !url.startsWith("https://")) return@post
+                    openingFrame = true
+                    startWebFallback(url, referer)
+                }
+            }
+
+            @JavascriptInterface
+            fun onProgress(position: Double, duration: Double, paused: Boolean) {
+                if (!position.isFinite() || !duration.isFinite()) return
+                mainHandler.post {
+                    if (fallbackWebView !== wv) return@post
+                    webPositionMs = (position * 1000).toLong().coerceAtLeast(0)
+                    webDurationMs = (duration * 1000).toLong().coerceAtLeast(0)
+                    webPaused = paused
+                    playPauseBtn.text = if (paused) "▶ Phát tiếp" else "⏸ Tạm dừng"
+                    updateProgressUi()
                 }
             }
         }, "AnPinimeWebBridge")
@@ -933,6 +1094,7 @@ class PlayerActivity : AppCompatActivity() {
                   url = new URL(String(url), location.href).href;
                   if (/\.(?:m3u8|mp4)(?:[?#]|$)/i.test(url) && !/(?:doubleclick|popads|\/ads?\/)/i.test(url) && detectedStreams.indexOf(url) < 0) {
                     detectedStreams.push(url);
+                    sendVideo(url, location.href);
                   }
                 } catch(e){}
               }
@@ -988,6 +1150,7 @@ class PlayerActivity : AppCompatActivity() {
                     switch(c.name){
                       case 'play': v.__aaUserPaused = false; tryPlay(v); break;
                       case 'pause': v.__aaUserPaused = true; v.pause(); break;
+                      case 'seekBy': if (isFinite(v.duration)) v.currentTime = Math.max(0, Math.min(v.currentTime + Number(c.value), v.duration)); break;
                       case 'seek': if (isFinite(v.duration)) v.currentTime = Math.max(0, Math.min(Number(c.value)||0, v.duration)); break;
                       case 'rate': v.playbackRate = Math.max(0.5, Math.min(Number(c.value)||1, 2)); break;
                       case 'volume': v.volume = Math.max(0, Math.min(Number(c.value)||0, 1)); break;
@@ -1029,7 +1192,6 @@ class PlayerActivity : AppCompatActivity() {
                 important(el, 'height', '100vh'); important(el, 'max-width', 'none'); important(el, 'max-height', 'none');
                 important(el, 'margin', '0'); important(el, 'padding', '0'); important(el, 'z-index', '2147483647');
                 important(el, 'background', '#000');
-                sendReady();
                 return true;
               }
               function watch(v){
@@ -1043,9 +1205,15 @@ class PlayerActivity : AppCompatActivity() {
                 if (!v.__aa){
                   v.__aa = true;
                   ['loadedmetadata', 'canplay'].forEach(function(name){ v.addEventListener(name, function(){ tryPlay(v); }); });
-                  v.addEventListener('playing', function(){ reportSource(v); });
+                  v.addEventListener('playing', function(){ reportSource(v); sendReady(); });
+                  ['timeupdate','durationchange','pause','playing'].forEach(function(name){
+                    v.addEventListener(name, function(){
+                      try { AnPinimeWebBridge.onProgress(v.currentTime || 0, isFinite(v.duration) ? v.duration : 0, v.paused); } catch(e){}
+                    });
+                  });
                   tryPlay(v);
                 }
+                if (v.readyState >= 2) sendReady();
                 return true;
               }
               function usefulFrame(frame){
@@ -1078,6 +1246,7 @@ class PlayerActivity : AppCompatActivity() {
                       var url = new URL(frame.getAttribute('src'), location.href).href;
                       if (!reportedFrames[url]) {
                         reportedFrames[url] = true;
+                        AnPinimeWebBridge.onFrameFound(url, location.href);
                       }
                     } catch(e){}
                   }
@@ -1102,6 +1271,9 @@ class PlayerActivity : AppCompatActivity() {
             })();
         """.trimIndent()
 
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            WebViewCompat.addDocumentStartJavaScript(wv, fallbackIsolateScript, setOf("*"))
+        }
         wv.webChromeClient = object : WebChromeClient() {
             override fun onJsAlert(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean {
                 result?.confirm()
@@ -1110,14 +1282,29 @@ class PlayerActivity : AppCompatActivity() {
         }
 
         wv.webViewClient = object : WebViewClient() {
+            override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                val url = request?.url?.toString().orEmpty()
+                if (request?.method == "GET" && Regex("(?i)\\.(m3u8|mp4)([?#]|$)").containsMatchIn(url) &&
+                    !url.contains("/ads/", true)) {
+                    val requestHeaders = request?.requestHeaders.orEmpty()
+                    mainHandler.post {
+                        if (fallbackWebView === wv && url !in attemptedStreamUrls && exoPlayer == null) {
+                            val headers = requestHeaders.filterKeys { it.equals("Referer", true) || it.equals("Origin", true) || it.equals("User-Agent", true) }
+                            prepareExoPlayer(url, headers, webPositionMs)
+                        }
+                    }
+                }
+                return null
+            }
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 view?.evaluateJavascript(fallbackIsolateScript, null)
                 mainHandler.postDelayed({
-                    if (fallbackWebView === view) {
-                        loadingOverlay.visibility = View.GONE
+                    if (fallbackWebView === view && view?.visibility != View.VISIBLE) {
+                        loadingText.text = "Chưa mở được video. Hãy thử server khác hoặc kiểm tra Android System WebView."
+                        showOsd(true)
                     }
-                }, 2500L)
+                }, 20_000L)
             }
 
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
@@ -1138,15 +1325,17 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun trySwitchToBackupServer(resumePosMs: Long): Boolean {
+        // Film4K's "Phần" denotes real seasons, not interchangeable servers.
+        if (currentEpisode.source == ContentSource.FILM4K && currentEpisode.seasonNum > 0) return false
         val seasons = ArrayList<String>()
         for (ep in allEpisodes) {
             if (!seasons.contains(ep.season)) seasons.add(ep.season)
         }
         val currentIdx = seasons.indexOf(currentEpisode.season)
-        if (currentIdx >= 0 && currentIdx + 1 < seasons.size) {
-            val nextSeason = seasons[currentIdx + 1]
-            val backupEp = allEpisodes.firstOrNull { it.season == nextSeason && it.number == currentEpisode.number }
-                ?: allEpisodes.firstOrNull { it.season == nextSeason }
+        if (currentIdx >= 0) {
+            val backupEp = seasons.drop(currentIdx + 1).firstNotNullOfOrNull { nextSeason ->
+                allEpisodes.firstOrNull { it.season == nextSeason && it.number == currentEpisode.number }
+            }
             if (backupEp != null) {
                 startEpisodePlayback(backupEp, resetPosition = false, initialPositionMs = resumePosMs)
                 return true
@@ -1196,7 +1385,93 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
+    private fun startCompatibilityPlayback(position: Long) {
+        if (lastNativeUrl.isBlank() || compatibilityPlayer != null) return
+        releasePlayer(stopRelay = false)
+        destroyWebPlayer()
+        surfaceView.visibility = View.GONE
+        loadingText.text = "Đang chuyển bộ giải mã âm thanh/video…"
+        loadingOverlay.visibility = View.VISIBLE
+        try {
+            // LibVLC accepts UA/Referer options, but HLS tickets, Origin and cookies
+            // must also reach every segment/key/subtitle request.
+            var compatibilityUrl = lastNativeUrl
+            if (!compatibilityUrl.startsWith("http://127.0.0.1:") &&
+                (compatibilityUrl.contains(".m3u8", true) || compatibilityUrl.contains("/stream/hls", true))) {
+                filmRelay?.stop()
+                val relay = FilmMediaRelay(lastNativeHeaders)
+                filmRelay = relay
+                compatibilityUrl = relay.start(compatibilityUrl)
+            }
+            val compat = CompatibilityPlayer(this, videoFrame)
+            compatibilityPlayer = compat
+            compat.start(compatibilityUrl, lastNativeHeaders, position,
+                onReady = {
+                    if (compatibilityPlayer === compat) {
+                        loadingOverlay.visibility = View.GONE
+                        scheduleHideOsd()
+                    }
+                }, onEnd = {
+                    mainHandler.post { if (compatibilityPlayer === compat) playNextEpisode() }
+                }, onError = {
+                    if (compatibilityPlayer === compat) {
+                        loadingText.text = "Luồng phát không tương thích hoặc bị gián đoạn. Hãy đổi server."
+                        loadingOverlay.visibility = View.VISIBLE
+                        showOsd(true)
+                    }
+                })
+        } catch (error: Exception) {
+            compatibilityPlayer?.release()
+            compatibilityPlayer = null
+            loadingText.text = "Không mở được bộ giải mã. Hãy đổi server."
+            showOsd(true)
+        }
+    }
+
+    private fun showTrackPicker(type: Int) {
+        compatibilityPlayer?.let { compat ->
+            val subtitles = type == C.TRACK_TYPE_TEXT
+            val tracks = compat.tracks(subtitles)
+            mainHandler.removeCallbacks(hideOsdRunnable)
+            AlertDialog.Builder(this).setTitle(if (subtitles) "Phụ đề" else "Âm thanh")
+                .setItems(tracks.map { it.second }.toTypedArray()) { _, index -> compat.selectTrack(subtitles, tracks[index].first) }
+                .setOnDismissListener { scheduleHideOsd() }.show()
+            return
+        }
+        val player = exoPlayer ?: return
+        val options = mutableListOf<Pair<androidx.media3.common.TrackGroup, Int>>()
+        val labels = mutableListOf(if (type == C.TRACK_TYPE_TEXT) "Tắt phụ đề" else "Tự động")
+        for (group in player.currentTracks.groups.filter { it.type == type }) {
+            for (index in 0 until group.length) {
+                if (!group.isTrackSupported(index)) continue
+                val format = group.getTrackFormat(index)
+                options.add(group.mediaTrackGroup to index)
+                labels.add(listOfNotNull(format.label, format.language, format.sampleMimeType,
+                    format.channelCount.takeIf { it > 0 }?.let { "$it kênh" }).joinToString(" • ")
+                    .ifBlank { "Track ${options.size}" })
+            }
+        }
+        mainHandler.removeCallbacks(hideOsdRunnable)
+        AlertDialog.Builder(this)
+            .setTitle(if (type == C.TRACK_TYPE_TEXT) "Phụ đề" else "Âm thanh")
+            .setItems(labels.toTypedArray()) { _, index ->
+                val builder = player.trackSelectionParameters.buildUpon().clearOverridesOfType(type)
+                    .setTrackTypeDisabled(type, type == C.TRACK_TYPE_TEXT && index == 0)
+                if (index > 0) {
+                    val (group, track) = options[index - 1]
+                    builder.setOverrideForType(TrackSelectionOverride(group, track))
+                }
+                player.trackSelectionParameters = builder.build()
+            }
+            .setOnDismissListener { scheduleHideOsd() }
+            .show()
+    }
+
     private fun togglePlayPause() {
+        compatibilityPlayer?.let {
+            if (it.playing) it.pause() else it.play()
+            return
+        }
         val player = exoPlayer
         if (player != null) {
             if (player.isPlaying) {
@@ -1206,27 +1481,15 @@ class PlayerActivity : AppCompatActivity() {
             }
             return
         }
-        fallbackWebView?.evaluateJavascript(
-            """
-            (function(){
-                var v = document.querySelector('video');
-                var isPaused = v ? v.paused : true;
-                if (v) {
-                    if (v.paused) { v.__aaUserPaused = false; v.play(); }
-                    else { v.__aaUserPaused = true; v.pause(); }
-                }
-                var cmd = {type: 'AnPinimeCommand', name: isPaused ? 'play' : 'pause'};
-                window.postMessage(cmd, '*');
-                document.querySelectorAll('iframe').forEach(function(f){
-                    try { f.contentWindow.postMessage(cmd, '*'); } catch(e){}
-                });
-            })();
-            """.trimIndent(),
-            null
-        )
+        sendWebCommand(if (webPaused) "play" else "pause")
     }
 
     private fun seekRelative(deltaMs: Long) {
+        compatibilityPlayer?.let {
+            it.seekTo(it.position + deltaMs)
+            updateProgressUi()
+            return
+        }
         val player = exoPlayer
         if (player != null) {
             val dur = player.duration.takeIf { it > 0 } ?: return
@@ -1235,24 +1498,12 @@ class PlayerActivity : AppCompatActivity() {
             updateProgressUi()
             return
         }
-        val deltaSec = deltaMs / 1000.0
-        fallbackWebView?.evaluateJavascript(
-            """
-            (function(){
-                var v = document.querySelector('video');
-                if (v && isFinite(v.duration)) {
-                    var target = Math.max(0, Math.min(v.duration, v.currentTime + ($deltaSec)));
-                    v.currentTime = target;
-                    var cmd = {type: 'AnPinimeCommand', name: 'seek', value: target};
-                    window.postMessage(cmd, '*');
-                    document.querySelectorAll('iframe').forEach(function(f){
-                        try { f.contentWindow.postMessage(cmd, '*'); } catch(e){}
-                    });
-                }
-            })();
-            """.trimIndent(),
-            null
-        )
+        sendWebCommand("seekBy", deltaMs / 1000.0)
+    }
+
+    private fun sendWebCommand(name: String, value: Double = 0.0) {
+        val command = JSONObject().put("type", "AnPinimeCommand").put("name", name).put("value", value)
+        fallbackWebView?.evaluateJavascript("window.postMessage($command, '*');", null)
     }
 
     private fun playNextEpisode() {
@@ -1281,16 +1532,19 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun scheduleHideOsd() {
         mainHandler.removeCallbacks(hideOsdRunnable)
-        mainHandler.postDelayed(hideOsdRunnable, 4800L)
+        if (!scrubbing && serverDrawer.visibility != View.VISIBLE && episodeDrawer.visibility != View.VISIBLE) {
+            mainHandler.postDelayed(hideOsdRunnable, 6000L)
+        }
     }
 
     private fun updateProgressUi() {
-        val player = exoPlayer ?: return
-        val pos = player.currentPosition.coerceAtLeast(0L)
-        val dur = player.duration.takeIf { it > 0 } ?: 0L
+        val player = exoPlayer
+        val pos = player?.currentPosition?.coerceAtLeast(0L) ?: compatibilityPlayer?.position ?: webPositionMs
+        val dur = player?.duration?.takeIf { it > 0 } ?: compatibilityPlayer?.duration ?: webDurationMs
+        compatibilityPlayer?.let { playPauseBtn.text = if (it.playing) "⏸ Tạm dừng" else "▶ Phát tiếp" }
         timeCurrentText.text = formatTime(pos)
         timeTotalText.text = formatTime(dur)
-        if (dur > 0L) {
+        if (dur > 0L && !scrubbing) {
             seekBar.progress = ((pos * 1000L) / dur).toInt().coerceIn(0, 1000)
         }
     }
