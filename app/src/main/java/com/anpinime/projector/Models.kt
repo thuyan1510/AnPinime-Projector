@@ -2,16 +2,51 @@ package com.anpinime.projector
 
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.Calendar
 
 enum class ContentSource(val id: String, val title: String, val subtitle: String, val isMovie: Boolean) {
-    FILM4K("film4k", "Nguồn phim 1", "Nguồn phim 1 (Film4K)", true),
-    PHIM4K("phim4k", "Nguồn phim 2", "Nguồn phim 2 (Phim4K)", true),
+    FILM4K("film4k", "Nguồn phim 1", "Nguồn 1 · NguonC", true),
+    PHIM4K("phim4k", "Nguồn phim 2", "Nguồn 2 · Phim4K", true),
+    KKPHIM("kkphim", "Nguồn phim 3", "Nguồn 3 · KKPhim", true),
     ANIME("anime", "AnimeVietsub", "AnimeVietsub", false);
 
     companion object {
         fun fromId(id: String?): ContentSource = entries.firstOrNull { it.id == id } ?: FILM4K
     }
 }
+
+enum class DayOfWeek(val rawValue: String, val displayName: String) {
+    MONDAY("Thứ 2", "Thứ Hai"),
+    TUESDAY("Thứ 3", "Thứ Ba"),
+    WEDNESDAY("Thứ 4", "Thứ Tư"),
+    THURSDAY("Thứ 5", "Thứ Năm"),
+    FRIDAY("Thứ 6", "Thứ Sáu"),
+    SATURDAY("Thứ 7", "Thứ Bảy"),
+    SUNDAY("Chủ Nhật", "Chủ Nhật");
+
+    companion object {
+        fun today(): DayOfWeek {
+            return when (Calendar.getInstance().get(Calendar.DAY_OF_WEEK)) {
+                Calendar.MONDAY -> MONDAY
+                Calendar.TUESDAY -> TUESDAY
+                Calendar.WEDNESDAY -> WEDNESDAY
+                Calendar.THURSDAY -> THURSDAY
+                Calendar.FRIDAY -> FRIDAY
+                Calendar.SATURDAY -> SATURDAY
+                else -> SUNDAY
+            }
+        }
+    }
+}
+
+data class AnimeScheduleItem(
+    val id: String,
+    val title: String,
+    val url: String,
+    val episodeText: String,
+    val timeText: String,
+    val dayOfWeek: DayOfWeek
+)
 
 data class Anime(
     val title: String,
@@ -24,7 +59,8 @@ data class Anime(
     val score: String = "",
     val summary: String = "",
     val info: String = "",
-    val source: ContentSource = ContentSource.FILM4K
+    val source: ContentSource = ContentSource.FILM4K,
+    val catalogLabel: String? = null
 ) {
     fun toJson(): String = JSONObject().apply {
         put("title", title)
@@ -38,6 +74,7 @@ data class Anime(
         put("summary", summary)
         put("info", info)
         put("source", source.id)
+        put("catalogLabel", catalogLabel ?: "")
     }.toString()
 
     companion object {
@@ -54,7 +91,8 @@ data class Anime(
                 score = o.optString("score"),
                 summary = o.optString("summary"),
                 info = o.optString("info"),
-                source = ContentSource.fromId(o.optString("source"))
+                source = ContentSource.fromId(o.optString("source")),
+                catalogLabel = o.optString("catalogLabel").takeIf { it.isNotEmpty() }
             )
         }
     }
@@ -68,7 +106,8 @@ data class AnimeSection(
 
 data class AnimeCategory(
     val title: String,
-    val path: String
+    val path: String,
+    val group: String = "Danh mục"
 )
 
 data class Episode(
@@ -78,7 +117,7 @@ data class Episode(
     val season: String,
     val qualityBadge: String = "",
     val source: ContentSource = ContentSource.FILM4K,
-    val playbackKind: String = "phim4k", // "film4k", "phim4k", "direct", "anime"
+    val playbackKind: String = "phim4k", // "film4k", "phim4k", "phim4k_core", "catalog_episode", "direct", "anime"
     val slug: String = "",
     val seasonNum: Int = -1,
     val episodeNum: Int = -1,
@@ -87,7 +126,15 @@ data class Episode(
     val directUrl: String = "",
     val refererUrl: String = "",
     val animeHash: String = "",
-    val animeFilmId: String = ""
+    val animeFilmId: String = "",
+    val detailUrl: String = "",
+    val serverName: String = "",
+    val episodeKey: String = "",
+    val videoFileId: String = "",
+    val seasonId: String = "",
+    val episodeId: String = "",
+    val audioLabel: String = "",
+    val subtitleLabel: String = ""
 ) {
     fun toJsonObject(): JSONObject = JSONObject().apply {
         put("title", title)
@@ -106,6 +153,14 @@ data class Episode(
         put("refererUrl", refererUrl)
         put("animeHash", animeHash)
         put("animeFilmId", animeFilmId)
+        put("detailUrl", detailUrl)
+        put("serverName", serverName)
+        put("episodeKey", episodeKey)
+        put("videoFileId", videoFileId)
+        put("seasonId", seasonId)
+        put("episodeId", episodeId)
+        put("audioLabel", audioLabel)
+        put("subtitleLabel", subtitleLabel)
     }
 
     companion object {
@@ -125,7 +180,15 @@ data class Episode(
             directUrl = o.optString("directUrl"),
             refererUrl = o.optString("refererUrl"),
             animeHash = o.optString("animeHash"),
-            animeFilmId = o.optString("animeFilmId")
+            animeFilmId = o.optString("animeFilmId"),
+            detailUrl = o.optString("detailUrl"),
+            serverName = o.optString("serverName"),
+            episodeKey = o.optString("episodeKey"),
+            videoFileId = o.optString("videoFileId"),
+            seasonId = o.optString("seasonId"),
+            episodeId = o.optString("episodeId"),
+            audioLabel = o.optString("audioLabel"),
+            subtitleLabel = o.optString("subtitleLabel")
         )
 
         fun toJsonArray(list: List<Episode>): String {
@@ -152,13 +215,47 @@ data class AnimeDetail(
     val bannerUrl: String?,
     val summary: String,
     val info: String,
-    val episodes: List<Episode>
+    val episodes: List<Episode>,
+    val watchUrl: String? = null
 )
+
+enum class StreamMediaKind {
+    HLS,
+    DASH,
+    MP4,
+    MKV,
+    UNKNOWN
+}
+
+data class ExternalSubtitleTrack(
+    val url: String,
+    val language: String = "vi",
+    val label: String = "Vietsub",
+    val mimeType: String? = null
+) {
+    fun toJsonObject(): JSONObject = JSONObject().apply {
+        put("url", url)
+        put("language", language)
+        put("label", label)
+        put("mimeType", mimeType ?: "")
+    }
+
+    companion object {
+        fun fromJsonObject(o: JSONObject): ExternalSubtitleTrack = ExternalSubtitleTrack(
+            url = o.optString("url"),
+            language = o.optString("language", "vi"),
+            label = o.optString("label", "Vietsub"),
+            mimeType = o.optString("mimeType").takeIf { it.isNotEmpty() }
+        )
+    }
+}
 
 data class ResolvedPlayback(
     val url: String,
     val headers: Map<String, String> = emptyMap(),
     val isF4kWrapped: Boolean = false,
     val isWeb: Boolean = false,
-    val webUrl: String = ""
+    val webUrl: String = "",
+    val mediaKind: StreamMediaKind = StreamMediaKind.UNKNOWN,
+    val subtitles: List<ExternalSubtitleTrack> = emptyList()
 )

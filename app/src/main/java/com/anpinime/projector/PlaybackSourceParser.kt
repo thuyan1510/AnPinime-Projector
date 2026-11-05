@@ -43,4 +43,21 @@ internal object PlaybackSourceParser {
         }
         return null
     }
+
+    fun extractStreamCandidates(text: String, base: String): List<String> {
+        val list = mutableListOf<String>()
+        val parsed = parse(text, base)
+        if (parsed != null && !parsed.isWeb) {
+            list.add(parsed.url)
+        }
+        val clean = text.replace("\\/", "/")
+        val matches = Regex("""https?://[^\s"'<>]+\.(?:m3u8|mp4|mkv|webm)[^\s"'<>]*""", RegexOption.IGNORE_CASE)
+            .findAll(clean)
+            .map { it.value }
+            .toList()
+        for (m in matches) {
+            if (!list.contains(m)) list.add(m)
+        }
+        return list
+    }
 }

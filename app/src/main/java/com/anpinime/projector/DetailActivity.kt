@@ -24,6 +24,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class DetailActivity : AppCompatActivity() {
 
@@ -35,6 +36,7 @@ class DetailActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CatalogService.init(this)
         WebViewHelper.registerActivity(this)
 
         val rawJson = intent.getStringExtra("anime_json")
@@ -78,7 +80,9 @@ class DetailActivity : AppCompatActivity() {
 
         uiScope.launch {
             try {
-                val loaded = CatalogService.loadDetail(anime)
+                val loaded = withContext(Dispatchers.IO) {
+                    CatalogService.loadDetail(anime)
+                }
                 detail = loaded
                 val seasons = orderedSeasons(loaded.episodes)
                 if (selectedSeason.isBlank() || !seasons.contains(selectedSeason)) {
@@ -262,6 +266,10 @@ class DetailActivity : AppCompatActivity() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
             typeface = Typeface.DEFAULT_BOLD
             setPadding(UiHelper.dp(context, 26), UiHelper.dp(context, 12), UiHelper.dp(context, 26), UiHelper.dp(context, 12))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { rightMargin = UiHelper.dp(context, 10) }
         }
         if (firstEp != null) {
             UiHelper.makeFocusableButton(
@@ -276,6 +284,34 @@ class DetailActivity : AppCompatActivity() {
             }
         }
         playRow.addView(playNowBtn)
+
+        if (firstEp != null) {
+            if (firstEp.qualityBadge.isNotBlank()) {
+                playRow.addView(
+                    UiHelper.createBadge(this, "🎞 ${firstEp.qualityBadge}", UiHelper.COLOR_BLUE, Color.WHITE).apply {
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply { rightMargin = UiHelper.dp(context, 8) }
+                    }
+                )
+            }
+            if (firstEp.audioLabel.isNotBlank()) {
+                playRow.addView(
+                    UiHelper.createBadge(this, "🔊 ${firstEp.audioLabel}", Color.parseColor("#2A3B5C"), Color.WHITE).apply {
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply { rightMargin = UiHelper.dp(context, 8) }
+                    }
+                )
+            }
+            if (firstEp.subtitleLabel.isNotBlank()) {
+                playRow.addView(
+                    UiHelper.createBadge(this, "💬 ${firstEp.subtitleLabel}", Color.parseColor("#3B1E6D"), Color.WHITE)
+                )
+            }
+        }
         rightCol.addView(playRow)
 
         // Server Selector Bar

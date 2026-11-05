@@ -1,6 +1,6 @@
 {
-  "versionCode": 7,
-  "versionName": "1.5.1",
-  "apkUrl": "https://github.com/thuyan1510/anpinime-dl/releases/download/latest/AnPinime-K670Pro.apk",
-  "changelog": "Bản cập nhật tự động v1.5.1: Tối ưu siêu nhẹ 9.7MB, hỗ trợ D-Pad remote và âm thanh FFmpeg."
+  "versionCode": 9,
+  "versionName": "1.6.1",
+  "apkUrl": "https://github.com/thuyan1510/AnPinime-Projector/releases/download/latest/AnPinime-K670Pro.apk",
+  "changelog": "Bản cập nhật v1.6.1: Tối ưu banner vừa vặn máy chiếu, tải phim tự động không cần bấm xem thêm, sửa nguồn Premium VIP, tìm kiếm tức thì và phím Back mở menu nhớ tab."
 }

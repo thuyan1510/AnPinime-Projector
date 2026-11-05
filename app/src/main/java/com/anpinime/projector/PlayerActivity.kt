@@ -50,6 +50,8 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.SeekParameters
+import androidx.media3.exoplayer.dash.DashMediaSource
 import androidx.media3.exoplayer.hls.DefaultHlsExtractorFactory
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
@@ -63,8 +65,11 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
+import java.util.Locale
 
 @OptIn(UnstableApi::class)
 class PlayerActivity : AppCompatActivity() {
@@ -82,6 +87,9 @@ class PlayerActivity : AppCompatActivity() {
     private var preferSoftwareAudio = false
     private var lastNativeUrl = ""
     private var lastNativeHeaders: Map<String, String> = emptyMap()
+    private var lastMediaKind: StreamMediaKind = StreamMediaKind.UNKNOWN
+    private var lastSubtitles: List<ExternalSubtitleTrack> = emptyList()
+    private var subtitleScaleMode = 2 // 0 = Nhỏ (18sp), 1 = Vừa (22sp), 2 = Lớn (26sp - Chuẩn máy chiếu), 3 = Rất lớn (32sp)
     private var trackSelector: DefaultTrackSelector? = null
     private var filmRelay: FilmMediaRelay? = null
     private var fallbackWebView: WebView? = null
@@ -89,10 +97,17 @@ class PlayerActivity : AppCompatActivity() {
     private var retryCount = 0
     private var currentQualityMode = 0 // 0 = Auto 1080p, 1 = 720p (Siêu mượt), 2 = 4K Gốc
 
+    private data class WebTrackItem(val id: String, val label: String, val selected: Boolean)
+    private var webAudioTracks: List<WebTrackItem> = emptyList()
+    private var webSubtitleTracks: List<WebTrackItem> = emptyList()
+
     private lateinit var videoFrame: FrameLayout
     private lateinit var surfaceView: SurfaceView
     private lateinit var subtitleView: SubtitleView
     private var scrubbing = false
+    private var pendingSeekTargetMs: Long = -1L
+    private var consecutiveSeekKeyCount: Int = 0
+    private var lastSeekInputAtMs: Long = 0L
     private var seekGestureKey = -1
     private var playbackGeneration = 0
     private var webPositionMs = 0L
@@ -118,8 +133,13 @@ class PlayerActivity : AppCompatActivity() {
     private var osdVisible = true
     private var selectionDialog: AlertDialog? = null
 
+    private val commitPendingSeekRunnable = Runnable {
+        commitPendingSeek()
+    }
+
     private val hideOsdRunnable = Runnable {
-        if (selectionDialog == null && !scrubbing && serverDrawer.visibility != View.VISIBLE && episodeDrawer.visibility != View.VISIBLE &&
+        if (selectionDialog == null && !scrubbing && pendingSeekTargetMs < 0L &&
+            serverDrawer.visibility != View.VISIBLE && episodeDrawer.visibility != View.VISIBLE &&
             (exoPlayer?.isPlaying == true || fallbackWebView != null)) {
             hideOsd()
         }
@@ -134,9 +154,9 @@ class PlayerActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CatalogService.init(this)
         WebViewHelper.registerActivity(this)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        // Keep small cached posters for an instant return to the catalog.
 
         movieTitle = intent.getStringExtra("movie_title").orEmpty()
         val epRaw = intent.getStringExtra("episode_json").orEmpty()
@@ -150,6 +170,7 @@ class PlayerActivity : AppCompatActivity() {
             .filter { it.source == currentEpisode.source }.ifEmpty { listOf(currentEpisode) }
 
         buildUi()
+        applySubtitleScale()
         startEpisodePlayback(currentEpisode, resetPosition = true)
         mainHandler.post(progressRunnable)
     }
@@ -178,6 +199,9 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun releasePlayer(stopRelay: Boolean = true) {
+        mainHandler.removeCallbacks(commitPendingSeekRunnable)
+        pendingSeekTargetMs = -1L
+        consecutiveSeekKeyCount = 0
         try {
             if (stopRelay) filmRelay?.stop()
         } catch (_: Throwable) {}
@@ -199,6 +223,8 @@ class PlayerActivity : AppCompatActivity() {
     private fun destroyWebPlayer() {
         val wv = fallbackWebView ?: return
         fallbackWebView = null
+        webAudioTracks = emptyList()
+        webSubtitleTracks = emptyList()
         try {
             wv.stopLoading()
             (wv.parent as? ViewGroup)?.removeView(wv)
@@ -220,7 +246,7 @@ class PlayerActivity : AppCompatActivity() {
             (keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) &&
             (!osdVisible || seekGestureKey == keyCode || seekBar.hasFocus())) {
             seekGestureKey = keyCode
-            val step = if (event.repeatCount >= 8) 30_000L else 10_000L
+            val step = computeAcceleratedSeekStep(event.repeatCount)
             seekRelative(if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) -step else step)
             showOsd()
             seekBar.requestFocus()
@@ -243,6 +269,16 @@ class PlayerActivity : AppCompatActivity() {
         if (event.action == KeyEvent.ACTION_DOWN) {
             scheduleHideOsd()
 
+            // If user presses OK/Enter while a seek target is pending on the seekbar, commit immediately!
+            if ((keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
+                    keyCode == KeyEvent.KEYCODE_ENTER ||
+                    keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER) &&
+                pendingSeekTargetMs >= 0L
+            ) {
+                commitPendingSeek()
+                return true
+            }
+
             // Media buttons on projector remote work whether OSD is visible or hidden
             when (keyCode) {
                 KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
@@ -264,12 +300,14 @@ class PlayerActivity : AppCompatActivity() {
                     return true
                 }
                 KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
-                    seekRelative(10_000L)
+                    val step = computeAcceleratedSeekStep(event.repeatCount)
+                    seekRelative(step)
                     showOsd(focusPlayButton = false)
                     return true
                 }
                 KeyEvent.KEYCODE_MEDIA_REWIND -> {
-                    seekRelative(-10_000L)
+                    val step = computeAcceleratedSeekStep(event.repeatCount)
+                    seekRelative(-step)
                     showOsd(focusPlayButton = false)
                     return true
                 }
@@ -278,12 +316,14 @@ class PlayerActivity : AppCompatActivity() {
             if (!osdVisible) {
                 when (keyCode) {
                     KeyEvent.KEYCODE_DPAD_LEFT -> {
-                        seekRelative(-10_000L)
+                        val step = computeAcceleratedSeekStep(event.repeatCount)
+                        seekRelative(-step)
                         showOsd(focusPlayButton = false)
                         return true
                     }
                     KeyEvent.KEYCODE_DPAD_RIGHT -> {
-                        seekRelative(10_000L)
+                        val step = computeAcceleratedSeekStep(event.repeatCount)
+                        seekRelative(step)
                         showOsd(focusPlayButton = false)
                         return true
                     }
@@ -495,27 +535,35 @@ class PlayerActivity : AppCompatActivity() {
             max = 1000
             isFocusable = true
             isFocusableInTouchMode = true
-            contentDescription = "Thời lượng: trái/phải tua 10 giây, giữ để tua nhanh"
+            contentDescription = "Thời lượng: trái/phải tua nhanh, nhả tay hoặc bấm OK để nhảy tới thời gian mong muốn"
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
                 leftMargin = UiHelper.dp(context, 10)
                 rightMargin = UiHelper.dp(context, 10)
             }
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
-                    if (fromUser) {
-                        val dur = exoPlayer?.duration ?: webDurationMs
-                        if (dur > 0) {
-                            exoPlayer?.seekTo(dur * progress / 1000L)
-                            if (fallbackWebView != null) sendWebCommand("seek", dur * progress / 1_000_000.0)
+                    if (!fromUser) return
+                    val dur = (exoPlayer?.duration?.takeIf { it > 0 } ?: webDurationMs)
+                    if (dur > 0L) {
+                        val targetMs = (dur * progress.toLong() / 1000L).coerceIn(0L, dur)
+                        pendingSeekTargetMs = targetMs
+                        timeCurrentText.text = formatTime(targetMs)
+                        // Do NOT seek on every progress tick during drag; only debounce if not in touch tracking
+                        if (!scrubbing) {
+                            mainHandler.removeCallbacks(commitPendingSeekRunnable)
+                            mainHandler.postDelayed(commitPendingSeekRunnable, 600L)
                         }
                     }
                 }
                 override fun onStartTrackingTouch(bar: SeekBar?) {
                     scrubbing = true
+                    mainHandler.removeCallbacks(commitPendingSeekRunnable)
                     mainHandler.removeCallbacks(hideOsdRunnable)
                 }
                 override fun onStopTrackingTouch(bar: SeekBar?) {
                     scrubbing = false
+                    mainHandler.removeCallbacks(commitPendingSeekRunnable)
+                    commitPendingSeek()
                     scheduleHideOsd()
                 }
             })
@@ -568,13 +616,17 @@ class PlayerActivity : AppCompatActivity() {
         }
         btnRow.addView(playPauseBtn)
 
-        fun seekButton(label: String, delta: Long): TextView = makeOsdBtn(label) { seekRelative(delta) }.apply {
+        fun seekButton(label: String, baseDelta: Long): TextView = makeOsdBtn(label) {
+            val step = computeAcceleratedSeekStep(0).coerceAtLeast(kotlin.math.abs(baseDelta))
+            seekRelative(if (baseDelta < 0) -step else step)
+        }.apply {
             var lastRepeatAt = 0L
             setOnKeyListener { _, code, event ->
                 if (code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER || code == KeyEvent.KEYCODE_NUMPAD_ENTER) {
-                    if (event.action == KeyEvent.ACTION_DOWN && (event.repeatCount == 0 || event.eventTime - lastRepeatAt >= 200L)) {
+                    if (event.action == KeyEvent.ACTION_DOWN && (event.repeatCount == 0 || event.eventTime - lastRepeatAt >= 150L)) {
                         lastRepeatAt = event.eventTime
-                        performClick()
+                        val step = computeAcceleratedSeekStep(event.repeatCount)
+                        seekRelative(if (baseDelta < 0) -step else step)
                     }
                     true
                 } else false
@@ -613,15 +665,17 @@ class PlayerActivity : AppCompatActivity() {
             showQualityPicker()
         }
         btnRow.addView(qualityBtn)
-        btnRow.addView(makeOsdBtn("Âm thanh") { showTrackPicker(C.TRACK_TYPE_AUDIO) })
-        btnRow.addView(makeOsdBtn("Phụ đề") { showTrackPicker(C.TRACK_TYPE_TEXT) })
-        btnRow.addView(makeOsdBtn("Sửa mất tiếng") {
-            showSelection("Bộ giải mã âm thanh", listOf("Thiết bị (mặc định)", "FFmpeg (thử khi mất tiếng)"),
+        btnRow.addView(makeOsdBtn("🔊 Âm thanh") { showTrackPicker(C.TRACK_TYPE_AUDIO) })
+        btnRow.addView(makeOsdBtn("💬 Phụ đề") { showTrackPicker(C.TRACK_TYPE_TEXT) })
+        btnRow.addView(makeOsdBtn("🔤 Cỡ Sub") { showSubtitleSizePicker() })
+        btnRow.addView(makeOsdBtn("🛠 Bộ giải mã Audio") {
+            showSelection("Bộ giải mã âm thanh (Hỗ trợ 5.1 / EAC3 / DTS / AAC)",
+                listOf("Tự động / Thiết bị", "FFmpeg Đa kênh (Khuyên dùng cho 4K/MKV VIP)"),
                 if (preferSoftwareAudio) 1 else 0) { index ->
                 val player = exoPlayer ?: return@showSelection
                 val position = player.currentPosition
                 preferSoftwareAudio = index == 1
-                prepareExoPlayer(lastNativeUrl, lastNativeHeaders, position)
+                prepareExoPlayer(lastNativeUrl, lastNativeHeaders, position, lastMediaKind, lastSubtitles)
             }
         })
 
@@ -736,7 +790,9 @@ class PlayerActivity : AppCompatActivity() {
         resolveJob?.cancel()
         resolveJob = uiScope.launch {
             try {
-                val resolved = CatalogService.resolvePlayback(episode)
+                val resolved = withContext(Dispatchers.IO) {
+                    CatalogService.resolvePlayback(episode)
+                }
                 if (generation != playbackGeneration) return@launch
                 lastWebUrl = resolved.webUrl.ifBlank { episode.url }
                 attemptedStreamUrls.add(resolved.url)
@@ -751,23 +807,31 @@ class PlayerActivity : AppCompatActivity() {
                     filmRelay?.stop()
                     val relay = FilmMediaRelay(resolved.headers)
                     filmRelay = relay
-                    relay.start(resolved.url)
+                    withContext(Dispatchers.IO) {
+                        relay.start(resolved.url)
+                    }
                 } else {
                     filmRelay?.stop()
                     filmRelay = null
                     resolved.url
                 }
+                // For MKV / VIP streams, prefer FFmpeg audio decoder so 5.1 AC3/EAC3/DTS/FLAC/TrueHD never fails silently
+                if (resolved.mediaKind == StreamMediaKind.MKV || playUrl.lowercase().contains(".mkv")) {
+                    preferSoftwareAudio = true
+                }
                 prepareExoPlayer(
                     streamUrl = playUrl,
                     headers = if (needsRelay) emptyMap() else resolved.headers,
-                    seekMs = if (resetPosition) 0L else initialPositionMs
+                    seekMs = if (resetPosition) 0L else initialPositionMs,
+                    mediaKind = resolved.mediaKind,
+                    subtitles = resolved.subtitles
                 )
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
                 if (generation != playbackGeneration) return@launch
                 if (!trySwitchToBackupServer(0L)) {
                     if (episode.url.startsWith("http", ignoreCase = true) && !episode.source.isMovie) {
-                        startWebFallback(episode.url, CatalogService.animeBaseUrl)
+                        startWebFallback(episode.url, CatalogService.currentAnimeBaseUrl())
                     } else {
                         loadingOverlay.visibility = View.VISIBLE
                         loadingText.text = "Lỗi tải luồng: ${t.message}\nBấm phím Lên/Xuống -> Đổi Server khác."
@@ -781,25 +845,28 @@ class PlayerActivity : AppCompatActivity() {
     private fun prepareExoPlayer(
         streamUrl: String,
         headers: Map<String, String>,
-        seekMs: Long
+        seekMs: Long,
+        mediaKind: StreamMediaKind = StreamMediaKind.UNKNOWN,
+        subtitles: List<ExternalSubtitleTrack> = emptyList()
     ) {
-        // The newly created relay belongs to this stream, not the old player.
         releasePlayer(stopRelay = false)
         lastNativeUrl = streamUrl
         lastNativeHeaders = headers
+        lastMediaKind = mediaKind
+        lastSubtitles = subtitles
         destroyWebPlayer()
         surfaceView.visibility = View.VISIBLE
 
         val selector = DefaultTrackSelector(this).apply {
             parameters = buildUponParameters()
-                .setPreferredAudioLanguages("vi", "en")
-                .setPreferredAudioMimeTypes(MimeTypes.AUDIO_AAC, MimeTypes.AUDIO_MPEG)
-                .setMaxAudioChannelCount(2)
-                .setPreferredTextLanguages("vi", "en")
+                .setPreferredAudioLanguages("vi", "vie", "vn", "en", "eng", "ja", "jpn", "ko", "kor", "zh", "chi")
+                .setPreferredTextLanguages("vi", "vie", "vn", "en", "eng")
                 .setSelectUndeterminedTextLanguage(true)
+                .setExceedAudioConstraintsIfNecessary(true)
+                .setExceedRendererCapabilitiesIfNecessary(true)
                 .apply {
                     when (currentQualityMode) {
-                        0 -> setMaxVideoSize(1920, 1080).setMaxVideoBitrate(8_500_000)
+                        0 -> setMaxVideoSize(1920, 1080).setMaxVideoBitrate(12_000_000)
                         1 -> setMaxVideoSize(1280, 720).setMaxVideoBitrate(3_500_000)
                         else -> clearVideoSizeConstraints().setMaxVideoBitrate(Int.MAX_VALUE)
                     }
@@ -808,23 +875,25 @@ class PlayerActivity : AppCompatActivity() {
         }
         trackSelector = selector
 
-        // Target 12MB of media buffering; total process memory is higher.
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
                 10_000, // minBufferMs
-                24_000, // maxBufferMs
-                2_000,  // bufferForPlaybackMs
-                4_000   // bufferForPlaybackAfterRebufferMs
+                28_000, // maxBufferMs
+                1_500,  // bufferForPlaybackMs (fast start after seek!)
+                3_000   // bufferForPlaybackAfterRebufferMs
             )
-            .setTargetBufferBytes(12 * 1024 * 1024)
+            .setTargetBufferBytes(14 * 1024 * 1024)
             .setPrioritizeTimeOverSizeThresholds(false)
             .build()
 
         val renderersFactory = ProjectorRenderersFactory(this)
             .setEnableDecoderFallback(true)
             .setExtensionRendererMode(
-                if (preferSoftwareAudio) DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
-                else DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
+                if (preferSoftwareAudio || mediaKind == StreamMediaKind.MKV) {
+                    DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
+                } else {
+                    DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
+                }
             )
 
         attemptedStreamUrls.add(streamUrl)
@@ -833,7 +902,7 @@ class PlayerActivity : AppCompatActivity() {
         WebViewHelper.getCookieHeader(streamUrl)?.let { mergedHeaders["Cookie"] = it }
         lastNativeHeaders = mergedHeaders
 
-        val ua = headers["User-Agent"] ?: CatalogService.USER_AGENT
+        val ua = headers["User-Agent"] ?: "Mozilla/5.0"
         val httpFactory = DefaultHttpDataSource.Factory()
             .setUserAgent(ua)
             .setConnectTimeoutMs(15_000)
@@ -842,34 +911,72 @@ class PlayerActivity : AppCompatActivity() {
             .setDefaultRequestProperties(mergedHeaders)
 
         val cleanLower = streamUrl.lowercase()
-        val isHls = cleanLower.contains(".m3u8") ||
-            cleanLower.contains("/hls/") ||
-            cleanLower.contains("/stream/hls") ||
-            cleanLower.contains("format=m3u8") ||
-            cleanLower.contains("m3u8")
+        val effectiveKind = if (mediaKind != StreamMediaKind.UNKNOWN) {
+            mediaKind
+        } else {
+            when {
+                cleanLower.contains(".m3u8") ||
+                    cleanLower.contains("/hls/") ||
+                    cleanLower.contains("/stream/hls") ||
+                    cleanLower.contains("format=m3u8") ||
+                    cleanLower.contains("m3u8") -> StreamMediaKind.HLS
+                cleanLower.contains(".mpd") -> StreamMediaKind.DASH
+                cleanLower.contains(".mkv") -> StreamMediaKind.MKV
+                else -> StreamMediaKind.MP4
+            }
+        }
+
+        val subtitleConfigs = subtitles.mapIndexed { idx, sub ->
+            val subMime = sub.mimeType ?: when {
+                sub.url.lowercase().contains(".vtt") -> MimeTypes.TEXT_VTT
+                sub.url.lowercase().contains(".ass") || sub.url.lowercase().contains(".ssa") -> MimeTypes.TEXT_SSA
+                else -> MimeTypes.APPLICATION_SUBRIP
+            }
+            val isViet = sub.language.lowercase().startsWith("vi") || sub.label.lowercase().contains("viet")
+            MediaItem.SubtitleConfiguration.Builder(Uri.parse(sub.url))
+                .setMimeType(subMime)
+                .setLanguage(sub.language)
+                .setLabel(sub.label)
+                .setSelectionFlags(if (idx == 0 || isViet) C.SELECTION_FLAG_DEFAULT else 0)
+                .build()
+        }
 
         val mediaItem = MediaItem.Builder()
             .setUri(Uri.parse(streamUrl))
             .apply {
-                if (isHls) {
-                    setMimeType(MimeTypes.APPLICATION_M3U8)
+                when (effectiveKind) {
+                    StreamMediaKind.HLS -> setMimeType(MimeTypes.APPLICATION_M3U8)
+                    StreamMediaKind.DASH -> setMimeType(MimeTypes.APPLICATION_MPD)
+                    StreamMediaKind.MKV -> setMimeType(MimeTypes.VIDEO_MATROSKA)
+                    else -> {}
+                }
+                if (subtitleConfigs.isNotEmpty()) {
+                    setSubtitleConfigurations(subtitleConfigs)
                 }
             }
             .build()
 
-        val mediaSource = if (isHls) {
-            val hlsExtractorFactory = DefaultHlsExtractorFactory(
-                DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
-                    DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS,
-                true
-            )
-            HlsMediaSource.Factory(httpFactory)
-                .setExtractorFactory(hlsExtractorFactory)
-                .setAllowChunklessPreparation(false)
-                .createMediaSource(mediaItem)
-        } else {
-            ProgressiveMediaSource.Factory(httpFactory, DefaultExtractorsFactory().setConstantBitrateSeekingEnabled(true))
-                .createMediaSource(mediaItem)
+        val mediaSource = when (effectiveKind) {
+            StreamMediaKind.HLS -> {
+                val hlsExtractorFactory = DefaultHlsExtractorFactory(
+                    DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
+                        DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS,
+                    true
+                )
+                HlsMediaSource.Factory(httpFactory)
+                    .setExtractorFactory(hlsExtractorFactory)
+                    .setAllowChunklessPreparation(false)
+                    .createMediaSource(mediaItem)
+            }
+            StreamMediaKind.DASH -> {
+                DashMediaSource.Factory(httpFactory).createMediaSource(mediaItem)
+            }
+            else -> {
+                ProgressiveMediaSource.Factory(
+                    httpFactory,
+                    DefaultExtractorsFactory().setConstantBitrateSeekingEnabled(true)
+                ).createMediaSource(mediaItem)
+            }
         }
 
         val player = ExoPlayer.Builder(this, renderersFactory)
@@ -877,6 +984,8 @@ class PlayerActivity : AppCompatActivity() {
             .setLoadControl(loadControl)
             .build()
 
+        // Fast keyframe seeking for projector hardware decoder
+        player.setSeekParameters(SeekParameters.CLOSEST_SYNC)
         player.setAudioAttributes(androidx.media3.common.AudioAttributes.DEFAULT, true)
         player.setHandleAudioBecomingNoisy(true)
 
@@ -901,8 +1010,10 @@ class PlayerActivity : AppCompatActivity() {
                 if (exoPlayer !== player) return
                 when (state) {
                     Player.STATE_BUFFERING -> {
-                        loadingOverlay.visibility = View.VISIBLE
-                        loadingText.text = "Đang nạp bộ đệm…"
+                        if (!scrubbing && pendingSeekTargetMs < 0L) {
+                            loadingOverlay.visibility = View.VISIBLE
+                            loadingText.text = "Đang nạp bộ đệm…"
+                        }
                     }
                     Player.STATE_READY -> {
                         loadingOverlay.visibility = View.GONE
@@ -1045,12 +1156,12 @@ class PlayerActivity : AppCompatActivity() {
                             ""
                         }
                         val hdrs = HashMap<String, String>()
-                        hdrs["User-Agent"] = CatalogService.USER_AGENT
+                        hdrs["User-Agent"] = "Mozilla/5.0"
                         if (origin.isNotBlank()) {
                             hdrs["Referer"] = "$origin/"
                             hdrs["Origin"] = origin
                         }
-                        prepareExoPlayer(streamUrl, hdrs, 0L)
+                        prepareExoPlayer(streamUrl, hdrs, 0L, StreamMediaKind.UNKNOWN, emptyList())
                     }
                 }
             }
@@ -1061,6 +1172,7 @@ class PlayerActivity : AppCompatActivity() {
                     if (fallbackWebView !== wv) return@post
                     wv.visibility = View.VISIBLE
                     loadingOverlay.visibility = View.GONE
+                    applySubtitleScale()
                     scheduleHideOsd()
                 }
             }
@@ -1087,12 +1199,95 @@ class PlayerActivity : AppCompatActivity() {
                     updateProgressUi()
                 }
             }
+
+            @JavascriptInterface
+            fun onMediaState(stateJson: String) {
+                mainHandler.post {
+                    if (fallbackWebView !== wv) return@post
+                    try {
+                        val root = JSONObject(stateJson)
+                        val pos = root.optDouble("time", 0.0)
+                        val dur = root.optDouble("duration", 0.0)
+                        val paused = root.optBoolean("paused", true)
+                        if (pos.isFinite() && dur.isFinite()) {
+                            webPositionMs = (pos * 1000).toLong().coerceAtLeast(0L)
+                            webDurationMs = (dur * 1000).toLong().coerceAtLeast(0L)
+                            webPaused = paused
+                            playPauseBtn.text = if (paused) "▶ Phát tiếp" else "⏸ Tạm dừng"
+                            updateProgressUi()
+                        }
+                        val tracksObj = root.optJSONObject("tracks")
+                        if (tracksObj != null) {
+                            val audioArr = tracksObj.optJSONArray("audio")
+                            if (audioArr != null) {
+                                val list = ArrayList<WebTrackItem>()
+                                val curAid = tracksObj.optString("audioID")
+                                for (i in 0 until audioArr.length()) {
+                                    val t = audioArr.optJSONObject(i) ?: continue
+                                    val tid = t.optString("id")
+                                    val title = t.optString("title").ifEmpty { "Âm thanh ${i + 1}" }
+                                    list.add(WebTrackItem(tid, title, tid == curAid))
+                                }
+                                webAudioTracks = list
+                            }
+                            val subArr = tracksObj.optJSONArray("subtitles")
+                            if (subArr != null) {
+                                val list = ArrayList<WebTrackItem>()
+                                val curSid = tracksObj.optString("subtitleID")
+                                for (i in 0 until subArr.length()) {
+                                    val t = subArr.optJSONObject(i) ?: continue
+                                    val tid = t.optString("id")
+                                    val title = t.optString("title").ifEmpty { if (tid == "off") "Tắt" else "Phụ đề ${i + 1}" }
+                                    list.add(WebTrackItem(tid, title, tid == curSid))
+                                }
+                                webSubtitleTracks = list
+                            }
+                        }
+                    } catch (_: Throwable) {}
+                }
+            }
         }, "AnPinimeWebBridge")
 
         val fallbackIsolateScript = """
             (function(){
               if(window.__anpinimeInstalled) return;
               window.__anpinimeInstalled = true;
+              var streamC = /(^|\.)streamc\.xyz$/i.test(location.hostname);
+              function wrapJW(factory){
+                if(!streamC || typeof factory !== 'function' || factory.__anpinimeWrapped) return factory;
+                var wrapped = new Proxy(factory, {
+                  apply: function(target, receiver, args){
+                    var api = Reflect.apply(target, receiver, args);
+                    if(api && typeof api.setup === 'function' && !api.__anpinimeSetup){
+                      var setup = api.setup;
+                      api.setup = function(config){
+                        var clean = Object.assign({}, config, {autostart: true});
+                        delete clean.advertising;
+                        return setup.call(this, clean);
+                      };
+                      api.__anpinimeSetup = true;
+                    }
+                    return api;
+                  }
+                });
+                Object.defineProperty(wrapped, '__anpinimeWrapped', {value: true});
+                return wrapped;
+              }
+              if(streamC){
+                var currentJW = wrapJW(window.jwplayer), descriptor = Object.getOwnPropertyDescriptor(window, 'jwplayer');
+                if(!descriptor || descriptor.configurable){
+                  Object.defineProperty(window, 'jwplayer', {
+                    configurable: true,
+                    get: function(){ return currentJW; },
+                    set: function(v){ currentJW = wrapJW(v); }
+                  });
+                } else if(typeof window.jwplayer === 'function'){
+                  window.jwplayer = wrapJW(window.jwplayer);
+                }
+              }
+              function needsWebsiteDecoder(){
+                return streamC && window.streamAccess && window.streamAccess.shouldUseSealedLoader && window.streamAccess.shouldUseSealedLoader() === true;
+              }
               var hidden = [
                 '.Adv', '.ad-center', '.ads', '.advertisement', '[class*="ads"]', '[class*="banner"]', '[id*="ads"]',
                 'iframe[src*="ads"]', '.popup', '.modal-backdrop', '.header-ads-pc', '.Adv.ad-center-header',
@@ -1100,6 +1295,37 @@ class PlayerActivity : AppCompatActivity() {
                 '.heading-film', '.list-episode-box', '.server-list', '.film-thumb', '.film-desc', '.film-buttons',
                 '.category-heading', '.block-film', 'nav', '.navbar', '.menu'
               ];
+              var adSelectors = '.ad,.ads,.advertisement,.video-ad,.ima-ad-container,.jw-ad,.jw-flag-ads,.vjs-ad-playing,[data-ad="true"]';
+              function adURL(s){
+                return /(?:doubleclick|googlesyndication|popads|adservice|vast|\/ads?[\/.?]|[?&](?:ad|preroll)=)/i.test(s || '');
+              }
+              function playerAPI(v){
+                try{
+                  if(typeof window.jwplayer !== 'function') return null;
+                  var container = v && v.closest('.jwplayer');
+                  var api = container ? window.jwplayer(container.id) : window.jwplayer();
+                  if(!api || typeof api.getPlaylistItem !== 'function') return null;
+                  if(!api.__aaAdEvents && api.on){
+                    api.__aaAdEvents = true;
+                    ['adPlay','adImpression','adStarted'].forEach(function(e){ api.on(e, function(){ api.__aaAdActive = true; }); });
+                    ['adBreakEnd','adComplete','adSkipped','adError'].forEach(function(e){ api.on(e, function(){ api.__aaAdActive = false; }); });
+                  }
+                  return api;
+                }catch(e){ return null; }
+              }
+              function contentSources(api){
+                try{
+                  var item = api && api.getPlaylistItem(); if(!item) return [];
+                  return (item.sources||[]).map(function(x){ return x.file||x.src; }).concat(item.file||[])
+                    .filter(function(x){ return typeof x === 'string' && x && !adURL(x); })
+                    .map(function(x){ return new URL(x, location.href).href; });
+                }catch(e){ return []; }
+              }
+              function isAdvertisement(v){
+                if(!v || v.closest(adSelectors) || adURL(mediaURL(v))) return true;
+                var api = playerAPI(v);
+                return !!(api && api.__aaAdActive);
+              }
               var reportedFrames = {};
               var activeVideo = null;
               var detectedStreams = [], reportedSources = {};
@@ -1112,9 +1338,9 @@ class PlayerActivity : AppCompatActivity() {
               function observeStream(url){
                 try {
                   url = new URL(String(url), location.href).href;
-                  if (/\.(?:m3u8|mp4)(?:[?#]|$)/i.test(url) && !/(?:doubleclick|popads|\/ads?\/)/i.test(url) && detectedStreams.indexOf(url) < 0) {
+                  if (/\.(?:m3u8|mp4)(?:[?#]|$)/i.test(url) && !adURL(url) && detectedStreams.indexOf(url) < 0) {
                     detectedStreams.push(url);
-                    sendVideo(url, location.href);
+                    if (!needsWebsiteDecoder()) sendVideo(url, location.href);
                   }
                 } catch(e){}
               }
@@ -1134,8 +1360,19 @@ class PlayerActivity : AppCompatActivity() {
                 if (!s) { var src = v.querySelector('source[src]'); if (src) s = src.getAttribute('src') || ''; }
                 try { return s ? new URL(s, location.href).href : ''; } catch(e) { return ''; }
               }
+              function contentURL(v){
+                var s = mediaURL(v), api = playerAPI(v), sources = contentSources(api);
+                if(api){
+                  if(!sources.length) return '';
+                  if(sources.indexOf(s) >= 0) return s;
+                  return sources.find(function(x){ return /\.m3u8(?:[?#]|$)/i.test(x); }) || sources[0];
+                }
+                if(isAdvertisement(v)) return '';
+                return /^https?:/i.test(s) && !adURL(s) ? s : '';
+              }
               function reportSource(v){
-                var s = mediaURL(v);
+                if(needsWebsiteDecoder()) return;
+                var s = contentURL(v);
                 if (!/^https?:/i.test(s)) s = detectedStreams[detectedStreams.length - 1] || '';
                 if (/^https?:/i.test(s) && !reportedSources[s]){
                   reportedSources[s] = true;
@@ -1162,20 +1399,75 @@ class PlayerActivity : AppCompatActivity() {
               function challenge(){
                 return /just a moment|xác minh an toàn|xác minh bảo mật|verify you are human|checking your browser/i.test(document.title) || !!document.querySelector('#challenge-form');
               }
+              function trackState(v){
+                var api = playerAPI(v), audio = [], subs = [{id: 'off', title: 'Tắt'}], aid = '', sid = 'off';
+                try {
+                  if (api && api.getAudioTracks) {
+                    audio = api.getAudioTracks().map(function(t, i){ return {id: String(i), title: t.name||t.label||t.language||('Âm thanh ' + (i+1))}; });
+                    aid = String(api.getCurrentAudioTrack());
+                  } else if (v.audioTracks) {
+                    Array.from(v.audioTracks).forEach(function(t, i){ audio.push({id: String(i), title: t.label||t.language||('Âm thanh ' + (i+1))}); if (t.enabled) aid = String(i); });
+                  }
+                  if (api && api.getCaptionsList) {
+                    api.getCaptionsList().forEach(function(t, i){ if (i > 0) subs.push({id: String(i), title: t.label||t.language||('Phụ đề ' + i)}); });
+                    var selected = api.getCurrentCaptions(); if (selected > 0) sid = String(selected);
+                  } else if (v.textTracks) {
+                    Array.from(v.textTracks).forEach(function(t, i){ if (t.kind === 'metadata' || t.kind === 'chapters') return; subs.push({id: String(i), title: t.label||t.language||('Phụ đề ' + (i+1))}); if (t.mode === 'showing') sid = String(i); });
+                  }
+                } catch(e){}
+                return {audio: audio, subtitles: subs, audioID: aid, subtitleID: sid};
+              }
+              function chooseTrack(v, kind, id){
+                var api = playerAPI(v), index = Number(id);
+                if (kind === 'audio') {
+                  if (api && api.setCurrentAudioTrack) api.setCurrentAudioTrack(index);
+                  else if (v.audioTracks) Array.from(v.audioTracks).forEach(function(t, i){ t.enabled = (i === index); });
+                } else if (kind === 'subtitles') {
+                  if (api && api.setCurrentCaptions) api.setCurrentCaptions(id === 'off' ? 0 : index);
+                  else if (v.textTracks) Array.from(v.textTracks).forEach(function(t, i){ if (t.kind !== 'metadata' && t.kind !== 'chapters') t.mode = (id !== 'off' && i === index) ? 'showing' : 'disabled'; });
+                }
+              }
+              function styleSubtitles(v, s){
+                if (!s) return;
+                var font = s.font || 'Arial';
+                var size = Math.max(18, Math.min(80, Number(s.size) || 38));
+                var css = document.getElementById('anpinime-sub-style');
+                if (!css) { css = document.createElement('style'); css.id = 'anpinime-sub-style'; document.head.appendChild(css); }
+                css.textContent = 'video::cue{font-family:"' + font + '";font-size:' + size + 'px;color:#ffffffff;background-color:rgba(0,0,0,0.65);text-shadow:1px 1px 2px #000;}' +
+                  '.jw-captions{bottom:24px!important;text-align:center!important;}.jw-text-track-cue{font-family:"' + font + '"!important;font-size:' + size + 'px!important;color:#fff!important;background-color:rgba(0,0,0,0.65)!important;}';
+                var api = playerAPI(v);
+                if (api && api.setCaptions) api.setCaptions({fontFamily: font, fontSize: size, color: '#ffffff', backgroundColor: '#000000'});
+              }
+              function state(){
+                var v = activeVideo; if (!v || isAdvertisement(v)) return;
+                reportSource(v);
+                try {
+                  AnPinimeWebBridge.onMediaState(JSON.stringify({
+                    time: isFinite(v.currentTime) ? v.currentTime : 0,
+                    duration: isFinite(v.duration) ? v.duration : 0,
+                    paused: v.paused,
+                    buffering: !v.paused && v.readyState < 3,
+                    tracks: trackState(v)
+                  }));
+                } catch(e){}
+              }
               window.addEventListener('message', function(event){
                 var c = event.data; if (!c || c.type !== 'AnPinimeCommand') return;
                 var v = activeVideo || document.querySelector('video');
+                if (v && isAdvertisement(v)) v = null;
                 if (v) {
                   try {
                     switch(c.name){
+                      case 'track': chooseTrack(v, c.kind, c.id); break;
+                      case 'subtitleStyle': styleSubtitles(v, c.style); break;
                       case 'play': v.__aaUserPaused = false; tryPlay(v); break;
                       case 'pause': v.__aaUserPaused = true; v.pause(); break;
-                      case 'seekBy': if (isFinite(v.duration)) v.currentTime = Math.max(0, Math.min(v.currentTime + Number(c.value), v.duration)); break;
                       case 'seek': if (isFinite(v.duration)) v.currentTime = Math.max(0, Math.min(Number(c.value)||0, v.duration)); break;
                       case 'rate': v.playbackRate = Math.max(0.5, Math.min(Number(c.value)||1, 2)); break;
                       case 'volume': v.volume = Math.max(0, Math.min(Number(c.value)||0, 1)); break;
                       case 'fit': important(v, 'object-fit', c.value === 1 ? 'cover' : 'contain'); break;
                     }
+                    state();
                   } catch(e){}
                 }
                 document.querySelectorAll('iframe').forEach(function(f){
@@ -1225,10 +1517,11 @@ class PlayerActivity : AppCompatActivity() {
                 if (!v.__aa){
                   v.__aa = true;
                   ['loadedmetadata', 'canplay'].forEach(function(name){ v.addEventListener(name, function(){ tryPlay(v); }); });
-                  v.addEventListener('playing', function(){ reportSource(v); sendReady(); });
+                  v.addEventListener('playing', function(){ reportSource(v); sendReady(); state(); });
                   ['timeupdate','durationchange','pause','playing'].forEach(function(name){
                     v.addEventListener(name, function(){
                       try { AnPinimeWebBridge.onProgress(v.currentTime || 0, isFinite(v.duration) ? v.duration : 0, v.paused); } catch(e){}
+                      state();
                     });
                   });
                   tryPlay(v);
@@ -1238,7 +1531,7 @@ class PlayerActivity : AppCompatActivity() {
               }
               function usefulFrame(frame){
                 var src = frame.getAttribute('src') || '';
-                if (!src || /^(?:about:blank|javascript:)/i.test(src) || /(?:doubleclick|googlesyndication|facebook|popads|adservice|\/ads?[\/.?])/i.test(src)) return false;
+                if (!src || /^(?:about:blank|javascript:)/i.test(src) || adURL(src)) return false;
                 var rect = frame.getBoundingClientRect();
                 return rect.width >= 240 && rect.height >= 120;
               }
@@ -1310,7 +1603,7 @@ class PlayerActivity : AppCompatActivity() {
                     mainHandler.post {
                         if (fallbackWebView === wv && url !in attemptedStreamUrls && exoPlayer == null) {
                             val headers = requestHeaders.filterKeys { it.equals("Referer", true) || it.equals("Origin", true) || it.equals("User-Agent", true) }
-                            prepareExoPlayer(url, headers, webPositionMs)
+                            prepareExoPlayer(url, headers, webPositionMs, StreamMediaKind.UNKNOWN, emptyList())
                         }
                     }
                 }
@@ -1341,7 +1634,7 @@ class PlayerActivity : AppCompatActivity() {
 
         fallbackWebView = wv
         videoFrame.addView(wv, 0)
-        wv.loadUrl(webUrl, mapOf("Referer" to referer, "User-Agent" to CatalogService.USER_AGENT))
+        wv.loadUrl(webUrl, mapOf("Referer" to referer, "User-Agent" to "Mozilla/5.0"))
     }
 
     private fun trySwitchToBackupServer(resumePosMs: Long): Boolean {
@@ -1453,14 +1746,40 @@ class PlayerActivity : AppCompatActivity() {
             return
         }
         preferSoftwareAudio = true
-        prepareExoPlayer(lastNativeUrl, lastNativeHeaders, position)
+        prepareExoPlayer(lastNativeUrl, lastNativeHeaders, position, lastMediaKind, lastSubtitles)
     }
 
     private fun showTrackPicker(type: Int) {
         val title = if (type == C.TRACK_TYPE_TEXT) "Phụ đề" else "Âm thanh"
         val player = exoPlayer
         if (player == null) {
-            showPlayerMessage(title, "Chưa có danh sách track. Hãy chờ video phát bằng trình phát native.")
+            if (fallbackWebView != null) {
+                if (type == C.TRACK_TYPE_AUDIO) {
+                    if (webAudioTracks.isEmpty()) {
+                        showPlayerMessage("Âm thanh", "Trình phát web chưa phát hiện track âm thanh riêng.")
+                        return
+                    }
+                    val labels = webAudioTracks.map { it.label }
+                    val selected = webAudioTracks.indexOfFirst { it.selected }.coerceAtLeast(0)
+                    showSelection("Âm thanh (Trình phát Web)", labels, selected) { idx ->
+                        val chosen = webAudioTracks.getOrNull(idx) ?: return@showSelection
+                        sendWebTrackCommand("audio", chosen.id)
+                    }
+                } else {
+                    if (webSubtitleTracks.isEmpty()) {
+                        showPlayerMessage("Phụ đề", "Trình phát web chưa phát hiện phụ đề rời hoặc phụ đề đã ghi sẵn trong hình.")
+                        return
+                    }
+                    val labels = webSubtitleTracks.map { it.label }
+                    val selected = webSubtitleTracks.indexOfFirst { it.selected }.coerceAtLeast(0)
+                    showSelection("Phụ đề (Trình phát Web)", labels, selected) { idx ->
+                        val chosen = webSubtitleTracks.getOrNull(idx) ?: return@showSelection
+                        sendWebTrackCommand("subtitles", chosen.id)
+                    }
+                }
+            } else {
+                showPlayerMessage(title, "Chưa có danh sách track. Hãy chờ video phát bằng trình phát native.")
+            }
             return
         }
         val options = mutableListOf<Pair<androidx.media3.common.TrackGroup, Int>>()
@@ -1472,26 +1791,90 @@ class PlayerActivity : AppCompatActivity() {
                 val format = group.getTrackFormat(index)
                 options.add(group.mediaTrackGroup to index)
                 if (group.isTrackSelected(index)) selected = options.size
-                labels.add(listOfNotNull(format.label, format.language, format.sampleMimeType,
-                    format.channelCount.takeIf { it > 0 }?.let { "$it kênh" }).joinToString(" • ")
-                    .ifBlank { "Track ${options.size}" })
+                val details = mutableListOf<String>()
+                format.label?.takeIf { it.isNotBlank() }?.let { details.add(it) }
+                val langName = format.language?.takeIf { it.isNotBlank() }?.let { formatLanguageName(it) }
+                if (langName != null && !details.contains(langName)) {
+                    details.add(langName)
+                }
+                if (type == C.TRACK_TYPE_AUDIO) {
+                    when (format.channelCount) {
+                        6 -> details.add("5.1 kênh")
+                        8 -> details.add("7.1 kênh")
+                        2 -> details.add("Stereo")
+                        1 -> details.add("Mono")
+                        in 3..5, in 7..7 -> details.add("${format.channelCount} kênh")
+                    }
+                    format.sampleMimeType?.substringAfterLast('/')?.uppercase()?.let { details.add(it) }
+                } else {
+                    format.sampleMimeType?.substringAfterLast('/')?.uppercase()?.let { details.add(it) }
+                }
+                labels.add(details.joinToString(" • ").ifBlank { "Track ${options.size}" })
             }
         }
         if (options.isEmpty()) {
-            showPlayerMessage(title, if (type == C.TRACK_TYPE_TEXT)
-                "Nguồn chưa cung cấp phụ đề rời được hỗ trợ. Phụ đề ghi sẵn trong hình không thể đổi hoặc tắt."
-                else "Chưa tìm thấy track âm thanh được hỗ trợ. Hãy chờ tải xong hoặc thử bộ giải mã FFmpeg.")
+            showPlayerMessage(
+                title,
+                if (type == C.TRACK_TYPE_TEXT)
+                    "Nguồn chưa cung cấp phụ đề rời được hỗ trợ. Phụ đề ghi sẵn trong hình (hardsub) không thể đổi hoặc tắt."
+                else
+                    "Chưa tìm thấy track âm thanh được hỗ trợ. Hãy thử đổi bộ giải mã âm thanh hoặc server khác."
+            )
             return
         }
         showSelection(title, labels, selected) { index ->
-                val builder = player.trackSelectionParameters.buildUpon().clearOverridesOfType(type)
-                    .setTrackTypeDisabled(type, type == C.TRACK_TYPE_TEXT && index == 0)
-                if (index > 0) {
-                    val (group, track) = options[index - 1]
-                    builder.setOverrideForType(TrackSelectionOverride(group, track))
-                }
-                player.trackSelectionParameters = builder.build()
+            val builder = player.trackSelectionParameters.buildUpon()
+                .clearOverridesOfType(type)
+                .setTrackTypeDisabled(type, type == C.TRACK_TYPE_TEXT && index == 0)
+            if (index > 0) {
+                val (group, track) = options[index - 1]
+                builder.setOverrideForType(TrackSelectionOverride(group, track))
+            }
+            player.trackSelectionParameters = builder.build()
         }
+    }
+
+    private fun formatLanguageName(code: String): String {
+        return when (code.lowercase().trim()) {
+            "vi", "vie", "vietnamese" -> "Tiếng Việt"
+            "en", "eng", "english" -> "Tiếng Anh"
+            "ja", "jpn", "japanese" -> "Tiếng Nhật"
+            "ko", "kor", "korean" -> "Tiếng Hàn"
+            "zh", "zho", "chi", "chinese" -> "Tiếng Trung"
+            "th", "tha", "thai" -> "Tiếng Thái"
+            "fr", "fra", "fre", "french" -> "Tiếng Pháp"
+            "de", "deu", "ger", "german" -> "Tiếng Đức"
+            "es", "spa", "spanish" -> "Tiếng Tây Ban Nha"
+            "ru", "rus", "russian" -> "Tiếng Nga"
+            else -> code
+        }
+    }
+
+    private fun showSubtitleSizePicker() {
+        val options = listOf(
+            "Nhỏ (18sp)",
+            "Vừa (22sp)",
+            "Lớn (26sp — Chuẩn máy chiếu KAW K670Pro)",
+            "Rất lớn (32sp — Dành cho màn chiếu lớn)"
+        )
+        showSelection("Cỡ chữ phụ đề", options, subtitleScaleMode) { index ->
+            subtitleScaleMode = index
+            applySubtitleScale()
+        }
+    }
+
+    private fun applySubtitleScale() {
+        if (!::subtitleView.isInitialized) return
+        val spSize = when (subtitleScaleMode) {
+            0 -> 18f
+            1 -> 22f
+            3 -> 32f
+            else -> 26f
+        }
+        subtitleView.setFixedTextSize(TypedValue.COMPLEX_UNIT_SP, spSize)
+        val styleObj = JSONObject().put("size", spSize.toInt())
+        val command = JSONObject().put("type", "AnPinimeCommand").put("name", "subtitleStyle").put("style", styleObj)
+        fallbackWebView?.evaluateJavascript("window.postMessage($command, '*');", null)
     }
 
     private fun togglePlayPause() {
@@ -1507,20 +1890,65 @@ class PlayerActivity : AppCompatActivity() {
         sendWebCommand(if (webPaused) "play" else "pause")
     }
 
+    private fun computeAcceleratedSeekStep(repeatCount: Int): Long {
+        return when {
+            repeatCount >= 12 -> 120_000L
+            repeatCount >= 6 -> 60_000L
+            repeatCount >= 2 -> 30_000L
+            else -> 10_000L
+        }
+    }
+
     private fun seekRelative(deltaMs: Long) {
         val player = exoPlayer
         if (player != null) {
             val dur = player.duration.takeIf { it > 0 } ?: return
-            val target = (player.currentPosition + deltaMs).coerceIn(0L, dur)
+            val basePos = if (pendingSeekTargetMs >= 0L) pendingSeekTargetMs else player.currentPosition
+            val target = (basePos + deltaMs).coerceIn(0L, dur)
+            pendingSeekTargetMs = target
+            timeCurrentText.text = formatTime(target)
+            seekBar.progress = ((target * 1000L) / dur).toInt().coerceIn(0, 1000)
+            mainHandler.removeCallbacks(commitPendingSeekRunnable)
+            mainHandler.postDelayed(commitPendingSeekRunnable, 600L)
+            return
+        }
+        val dur = webDurationMs.takeIf { it > 0 } ?: return
+        val basePos = if (pendingSeekTargetMs >= 0L) pendingSeekTargetMs else webPositionMs
+        val target = (basePos + deltaMs).coerceIn(0L, dur)
+        pendingSeekTargetMs = target
+        timeCurrentText.text = formatTime(target)
+        seekBar.progress = ((target * 1000L) / dur).toInt().coerceIn(0, 1000)
+        mainHandler.removeCallbacks(commitPendingSeekRunnable)
+        mainHandler.postDelayed(commitPendingSeekRunnable, 600L)
+    }
+
+    private fun commitPendingSeek() {
+        val target = pendingSeekTargetMs
+        pendingSeekTargetMs = -1L
+        mainHandler.removeCallbacks(commitPendingSeekRunnable)
+        if (target < 0L) return
+        val player = exoPlayer
+        if (player != null) {
             player.seekTo(target)
             updateProgressUi()
             return
         }
-        sendWebCommand("seekBy", deltaMs / 1000.0)
+        sendWebCommand("seek", target / 1000.0)
+        webPositionMs = target
+        updateProgressUi()
     }
 
     private fun sendWebCommand(name: String, value: Double = 0.0) {
         val command = JSONObject().put("type", "AnPinimeCommand").put("name", name).put("value", value)
+        fallbackWebView?.evaluateJavascript("window.postMessage($command, '*');", null)
+    }
+
+    private fun sendWebTrackCommand(kind: String, id: String) {
+        val command = JSONObject()
+            .put("type", "AnPinimeCommand")
+            .put("name", "track")
+            .put("kind", kind)
+            .put("id", id)
         fallbackWebView?.evaluateJavascript("window.postMessage($command, '*');", null)
     }
 
@@ -1557,11 +1985,15 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun updateProgressUi() {
         val player = exoPlayer
-        val pos = player?.currentPosition?.coerceAtLeast(0L) ?: webPositionMs
         val dur = player?.duration?.takeIf { it > 0 } ?: webDurationMs
+        val pos = if (pendingSeekTargetMs >= 0L) {
+            pendingSeekTargetMs
+        } else {
+            player?.currentPosition?.coerceAtLeast(0L) ?: webPositionMs
+        }
         timeCurrentText.text = formatTime(pos)
         timeTotalText.text = formatTime(dur)
-        if (dur > 0L && !scrubbing) {
+        if (dur > 0L && !scrubbing && pendingSeekTargetMs < 0L) {
             seekBar.progress = ((pos * 1000L) / dur).toInt().coerceIn(0, 1000)
         }
     }

@@ -117,6 +117,7 @@ object UiHelper {
         focusedStrokeColor: Int = Color.WHITE,
         radiusDp: Int = 10,
         scaleOnFocus: Float = 1.04f,
+        onFocusChange: ((Boolean) -> Unit)? = null,
         onClick: () -> Unit
     ) {
         val ctx = view.context
@@ -135,6 +136,7 @@ object UiHelper {
             v.scaleX = targetScale
             v.scaleY = targetScale
             v.elevation = if (hasFocus) 8f else 0f
+            onFocusChange?.invoke(hasFocus)
         }
 
         view.setOnClickListener { onClick() }
@@ -169,15 +171,15 @@ object UiHelper {
     /**
      * Lightweight, zero-lag Movie/Anime poster card for RecyclerViews on projector.
      */
-    fun createPosterCard(context: Context, widthDp: Int = 148, heightDp: Int = 212): FrameLayout {
+    fun createPosterCard(context: Context, widthDp: Int = 118, heightDp: Int = 168): FrameLayout {
         val cardWidth = dp(context, widthDp)
         val cardHeight = dp(context, heightDp)
         return FrameLayout(context).apply {
-            layoutParams = ViewGroup.MarginLayoutParams(cardWidth, cardHeight + dp(context, 48)).apply {
-                rightMargin = dp(context, 14)
-                bottomMargin = dp(context, 10)
+            layoutParams = ViewGroup.MarginLayoutParams(cardWidth, cardHeight + dp(context, 40)).apply {
+                rightMargin = dp(context, 10)
+                bottomMargin = dp(context, 8)
             }
-            setPadding(dp(context, 5), dp(context, 5), dp(context, 5), dp(context, 5))
+            setPadding(dp(context, 4), dp(context, 4), dp(context, 4), dp(context, 4))
 
             val inner = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
@@ -190,7 +192,7 @@ object UiHelper {
             val posterFrame = FrameLayout(context).apply {
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
-                    cardHeight - dp(context, 10)
+                    cardHeight - dp(context, 8)
                 )
                 background = roundedBg(COLOR_CARD, 8, context)
             }
@@ -208,19 +210,19 @@ object UiHelper {
             val badgeText = TextView(context).apply {
                 id = R.id.poster_badge
                 setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
                 typeface = Typeface.DEFAULT_BOLD
                 setSingleLine(true)
                 ellipsize = TextUtils.TruncateAt.END
-                setPadding(dp(context, 6), dp(context, 2), dp(context, 6), dp(context, 2))
+                setPadding(dp(context, 5), dp(context, 2), dp(context, 5), dp(context, 2))
                 background = roundedBg(Color.parseColor("#D9E53935"), 5, context)
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     Gravity.BOTTOM or Gravity.START
                 ).apply {
-                    leftMargin = dp(context, 6)
-                    bottomMargin = dp(context, 6)
+                    leftMargin = dp(context, 5)
+                    bottomMargin = dp(context, 5)
                 }
             }
             posterFrame.addView(badgeText)
@@ -228,18 +230,18 @@ object UiHelper {
             val scoreText = TextView(context).apply {
                 id = R.id.poster_score
                 setTextColor(Color.BLACK)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
                 typeface = Typeface.DEFAULT_BOLD
                 setSingleLine(true)
-                setPadding(dp(context, 6), dp(context, 2), dp(context, 6), dp(context, 2))
+                setPadding(dp(context, 5), dp(context, 2), dp(context, 5), dp(context, 2))
                 background = roundedBg(COLOR_YELLOW, 5, context)
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     Gravity.TOP or Gravity.END
                 ).apply {
-                    rightMargin = dp(context, 6)
-                    topMargin = dp(context, 6)
+                    rightMargin = dp(context, 5)
+                    topMargin = dp(context, 5)
                 }
             }
             posterFrame.addView(scoreText)
@@ -247,11 +249,11 @@ object UiHelper {
             val titleView = TextView(context).apply {
                 id = R.id.poster_title
                 setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                 typeface = Typeface.DEFAULT_BOLD
                 maxLines = 2
                 ellipsize = TextUtils.TruncateAt.END
-                setPadding(dp(context, 2), dp(context, 6), dp(context, 2), 0)
+                setPadding(dp(context, 2), dp(context, 5), dp(context, 2), 0)
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
@@ -271,16 +273,38 @@ object UiHelper {
         val titleView = card.findViewById<TextView>(R.id.poster_title)
 
         titleView.text = anime.title
-        val badgeStr = listOf(anime.episodeText, anime.quality).filter { it.isNotBlank() }.joinToString(" · ")
+        val badgeParts = listOf(anime.episodeText.trim(), anime.quality.trim())
+            .filter { it.isNotBlank() }
+            .distinctBy { it.lowercase() }
+        val badgeStr = badgeParts.joinToString(" · ")
         if (badgeStr.isNotBlank()) {
             badgeView.visibility = View.VISIBLE
             badgeView.text = badgeStr
         } else {
             badgeView.visibility = View.GONE
         }
+        val catLabel = anime.catalogLabel?.trim().orEmpty()
         if (anime.score.isNotBlank()) {
             scoreView.visibility = View.VISIBLE
             scoreView.text = "★ ${anime.score}"
+            scoreView.setTextColor(Color.BLACK)
+            scoreView.background = roundedBg(COLOR_YELLOW, 5, card.context)
+        } else if (catLabel.isNotEmpty()) {
+            scoreView.visibility = View.VISIBLE
+            val shortCatalog = when {
+                catLabel.contains("VIP", ignoreCase = true) -> "VIP"
+                catLabel.contains("Free1", ignoreCase = true) -> "Free1"
+                catLabel.contains("Free2", ignoreCase = true) -> "Free2"
+                else -> catLabel
+            }
+            scoreView.text = shortCatalog
+            val isVip = shortCatalog == "VIP"
+            scoreView.setTextColor(if (isVip) Color.BLACK else Color.WHITE)
+            scoreView.background = roundedBg(
+                if (isVip) COLOR_YELLOW else Color.parseColor("#CC1485F5"),
+                5,
+                card.context
+            )
         } else {
             scoreView.visibility = View.GONE
         }

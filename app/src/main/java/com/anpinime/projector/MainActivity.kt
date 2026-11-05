@@ -33,6 +33,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import java.lang.ref.WeakReference
 
@@ -42,7 +43,7 @@ class MainActivity : AppCompatActivity() {
     private var loadJob: Job? = null
 
     private var currentSource: ContentSource = ContentSource.FILM4K
-    private var currentTab: String = "home" // "home", "search", "browse"
+    private var currentTab: String = "home" // "home", "search", "browse", "schedule"
     private var homeSections: List<AnimeSection> = emptyList()
     private var featuredIndex: Int = 0
     private var activeCategory: AnimeCategory? = null
@@ -57,10 +58,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var topMenuBadgeText: TextView
     private val sidebarButtons = HashMap<String, TextView>()
     private var isSidebarOpen = false
+    private var activeSidebarKey: String = "tab_home"
     private var lastContentFocusRef: WeakReference<View>? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CatalogService.init(this)
         WebViewHelper.registerActivity(this)
 
         val prefs = getSharedPreferences("anpinime_projector", Context.MODE_PRIVATE)
@@ -190,6 +193,19 @@ class MainActivity : AppCompatActivity() {
                     return true
                 }
             } else {
+                if (keyCode == KeyEvent.KEYCODE_BACK || keyCode == KeyEvent.KEYCODE_ESCAPE) {
+                    if (currentTab != "home") {
+                        currentTab = "home"
+                        activeSidebarKey = "tab_home"
+                        updateSidebarState()
+                        if (homeSections.isEmpty()) loadHomeData() else renderHome()
+                        return true
+                    } else {
+                        // Khi ở màn hình home, ấn nút trở về sẽ mở menu
+                        openSidebar()
+                        return true
+                    }
+                }
                 if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
                     val focused = currentFocus
                     // If focused on an EditText with cursor not at start, let cursor move left naturally
@@ -225,12 +241,22 @@ class MainActivity : AppCompatActivity() {
         isSidebarOpen = true
         updateSidebarState()
         sidebarOverlay.visibility = View.VISIBLE
-        val targetKey = when (currentTab) {
-            "search" -> "tab_search"
-            "browse" -> "tab_browse"
-            else -> "tab_home"
-        }
-        (sidebarButtons[targetKey] ?: sidebarButtons["src_film4k"])?.requestFocus()
+        val target = sidebarButtons[activeSidebarKey]
+            ?: when (currentTab) {
+                "search" -> sidebarButtons["tab_search"]
+                "browse" -> sidebarButtons["tab_browse"]
+                "schedule" -> sidebarButtons["tab_schedule"]
+                else -> when (currentSource) {
+                    ContentSource.FILM4K -> sidebarButtons["src_film4k"]
+                    ContentSource.PHIM4K -> sidebarButtons["src_phim4k"]
+                    ContentSource.KKPHIM -> sidebarButtons["src_kkphim"]
+                    ContentSource.ANIME -> sidebarButtons["src_anime"]
+                }
+            }
+            ?: sidebarButtons["tab_home"]
+        target?.post {
+            target.requestFocus()
+        } ?: target?.requestFocus()
     }
 
     private fun closeSidebar(restoreFocus: Boolean) {
@@ -398,8 +424,12 @@ class MainActivity : AppCompatActivity() {
                 focusedBgColor = Color.parseColor("#352256"),
                 focusedStrokeColor = Color.WHITE,
                 radiusDp = 10,
-                scaleOnFocus = 1.03f
+                scaleOnFocus = 1.03f,
+                onFocusChange = { hasFocus ->
+                    if (hasFocus) activeSidebarKey = key
+                }
             ) {
+                activeSidebarKey = key
                 closeSidebar(restoreFocus = false)
                 onClick()
             }
@@ -421,8 +451,13 @@ class MainActivity : AppCompatActivity() {
         addMenuButton("tab_browse", "📂  Thể loại") {
             currentTab = "browse"
             updateSidebarState()
-            val firstCat = CatalogService.categoriesFor(currentSource).firstOrNull()
-            openCategoryBrowse(firstCat)
+            openCategoryBrowse(null)
+        }
+
+        addMenuButton("tab_schedule", "📅  Lịch chiếu Anime") {
+            currentTab = "schedule"
+            updateSidebarState()
+            renderSchedule(DayOfWeek.today())
         }
 
         val dividerLabel = TextView(this).apply {
@@ -434,16 +469,24 @@ class MainActivity : AppCompatActivity() {
         }
         sidebar.addView(dividerLabel)
 
-        addMenuButton("src_film4k", "🎬  Nguồn phim 1") {
+        addMenuButton("src_film4k", "🎬  Nguồn 1 · NguonC") {
             switchSource(ContentSource.FILM4K)
         }
 
-        addMenuButton("src_phim4k", "⚡  Nguồn phim 2") {
+        addMenuButton("src_phim4k", "⚡  Nguồn 2 · Phim4K") {
             switchSource(ContentSource.PHIM4K)
+        }
+
+        addMenuButton("src_kkphim", "🍿  Nguồn 3 · KKPhim") {
+            switchSource(ContentSource.KKPHIM)
         }
 
         addMenuButton("src_anime", "✨  AnimeVietsub") {
             switchSource(ContentSource.ANIME)
+        }
+
+        addMenuButton("settings_domain", "🌐  Tên miền Anime") {
+            showAnimeDomainDialog()
         }
 
         addMenuButton("refresh", "🔄  Làm mới") {
@@ -462,6 +505,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun switchSource(newSource: ContentSource) {
+        val srcKey = when (newSource) {
+            ContentSource.FILM4K -> "src_film4k"
+            ContentSource.PHIM4K -> "src_phim4k"
+            ContentSource.KKPHIM -> "src_kkphim"
+            ContentSource.ANIME -> "src_anime"
+        }
+        activeSidebarKey = srcKey
         if (currentSource == newSource && homeSections.isNotEmpty() && currentTab == "home") return
         currentSource = newSource
         loadJob?.cancel()
@@ -481,13 +531,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateSidebarState() {
         UiHelper.setSourceLogo(logoImage, currentSource.isMovie)
-        sourceSubtitleText.text = currentSource.title
+        sourceSubtitleText.text = currentSource.subtitle
         val tabName = when (currentTab) {
             "search" -> "Tìm kiếm"
             "browse" -> "Thể loại"
+            "schedule" -> "Lịch chiếu Anime"
             else -> "Trang chủ"
         }
-        topMenuBadgeText.text = "${currentSource.title} • $tabName  (Ấn ◀ sang trái hết cỡ để mở Menu)"
+        topMenuBadgeText.text = "${currentSource.subtitle} • $tabName  (Ấn ◀ sang trái hết cỡ để mở Menu)"
 
         fun styleBtn(key: String, active: Boolean) {
             val btn = sidebarButtons[key] ?: return
@@ -507,8 +558,10 @@ class MainActivity : AppCompatActivity() {
         styleBtn("tab_home", currentTab == "home")
         styleBtn("tab_search", currentTab == "search")
         styleBtn("tab_browse", currentTab == "browse")
+        styleBtn("tab_schedule", currentTab == "schedule")
         styleBtn("src_film4k", currentSource == ContentSource.FILM4K)
         styleBtn("src_phim4k", currentSource == ContentSource.PHIM4K)
+        styleBtn("src_kkphim", currentSource == ContentSource.KKPHIM)
         styleBtn("src_anime", currentSource == ContentSource.ANIME)
     }
 
@@ -567,10 +620,12 @@ class MainActivity : AppCompatActivity() {
     private fun loadHomeData() {
         loadJob?.cancel()
         val targetSource = currentSource
-        showLoading("Đang tải ${targetSource.title}…")
+        showLoading("Đang tải ${targetSource.subtitle}…")
         loadJob = uiScope.launch {
             try {
-                val sections = CatalogService.loadHome(targetSource)
+                val sections = withContext(Dispatchers.IO) {
+                    CatalogService.loadHome(targetSource)
+                }
                 ensureActive()
                 if (targetSource != currentSource || currentTab != "home") return@launch
                 homeSections = SourceIsolation.sections(targetSource, sections)
@@ -627,9 +682,9 @@ class MainActivity : AppCompatActivity() {
         val heroFrame = FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                UiHelper.dp(context, 240)
+                UiHelper.dp(context, 190)
             ).apply {
-                bottomMargin = UiHelper.dp(context, 18)
+                bottomMargin = UiHelper.dp(context, 16)
             }
             background = UiHelper.roundedBg(UiHelper.COLOR_CARD, 16, context, Color.parseColor("#2AFFFFFF"), 1)
             clipChildren = true
@@ -679,13 +734,13 @@ class MainActivity : AppCompatActivity() {
             scaleType = ImageView.ScaleType.CENTER_CROP
             background = UiHelper.roundedBg(UiHelper.COLOR_SIDEBAR, 10, context, Color.parseColor("#40FFFFFF"), 1)
             layoutParams = LinearLayout.LayoutParams(
-                UiHelper.dp(context, 134),
-                UiHelper.dp(context, 194)
+                UiHelper.dp(context, 104),
+                UiHelper.dp(context, 152)
             ).apply {
-                rightMargin = UiHelper.dp(context, 22)
+                rightMargin = UiHelper.dp(context, 18)
             }
         }
-        ImageLoader.load(posterCard, current.imageUrl, maxWidth = 220, maxHeight = 320)
+        ImageLoader.load(posterCard, current.imageUrl, maxWidth = 180, maxHeight = 260)
         contentRow.addView(posterCard)
 
         val centerStack = LinearLayout(this).apply {
@@ -697,7 +752,7 @@ class MainActivity : AppCompatActivity() {
         val titleView = TextView(this).apply {
             text = current.title
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 23f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             maxLines = 2
@@ -893,7 +948,7 @@ class MainActivity : AppCompatActivity() {
             setItemViewCacheSize(5)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                UiHelper.dp(context, 262)
+                UiHelper.dp(context, 216)
             )
             adapter = PosterAdapter(section.items) { anime ->
                 openDetail(anime)
@@ -1103,18 +1158,24 @@ class MainActivity : AppCompatActivity() {
             historyContainer.addView(rowWrap)
         }
 
-        fun runSearch(query: String) {
+        var debounceSearchJob: Job? = null
+
+        fun runSearch(query: String, autoFocusFirst: Boolean = true, saveToHistory: Boolean = true) {
             val clean = query.trim()
             if (clean.isEmpty()) return
-            saveSearchQuery(clean)
-            refreshHistoryBar { selectedTerm ->
-                input.setText(selectedTerm)
-                input.setSelection(selectedTerm.length)
-                runSearch(selectedTerm)
+            if (saveToHistory) {
+                saveSearchQuery(clean)
+                refreshHistoryBar { selectedTerm ->
+                    input.setText(selectedTerm)
+                    input.setSelection(selectedTerm.length)
+                    runSearch(selectedTerm, autoFocusFirst = true, saveToHistory = true)
+                }
             }
 
-            val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-            imm?.hideSoftInputFromWindow(input.windowToken, 0)
+            if (autoFocusFirst) {
+                val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                imm?.hideSoftInputFromWindow(input.windowToken, 0)
+            }
 
             resultsFrame.removeAllViews()
             resultsFrame.addView(
@@ -1129,7 +1190,9 @@ class MainActivity : AppCompatActivity() {
             loadJob?.cancel()
             loadJob = uiScope.launch {
                 try {
-                    val items = SourceIsolation.items(screenSource, CatalogService.search(screenSource, clean))
+                    val items = withContext(Dispatchers.IO) {
+                        SourceIsolation.items(screenSource, CatalogService.search(screenSource, clean))
+                    }
                     ensureActive()
                     if (currentSource != screenSource || currentTab != "search") return@launch
                     resultsFrame.removeAllViews()
@@ -1157,6 +1220,17 @@ class MainActivity : AppCompatActivity() {
                             adapter = PosterAdapter(items) { anime -> openDetail(anime) }
                         }
                         resultsFrame.addView(grid)
+
+                        // Khi tìm kiếm: con trỏ đặt luôn ở phim đầu tiên tìm thấy
+                        if (autoFocusFirst) {
+                            grid.post {
+                                val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                                imm?.hideSoftInputFromWindow(input.windowToken, 0)
+                                val first = grid.findViewHolderForAdapterPosition(0)?.itemView
+                                    ?: grid.getChildAt(0)
+                                first?.requestFocus()
+                            }
+                        }
                     }
                 } catch (t: Throwable) {
                     if (t is CancellationException) throw t
@@ -1176,11 +1250,28 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Tự động tìm kiếm ngay trong lúc người dùng nhập tên phim (debounce 350ms)
+        input.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                val q = s?.toString()?.trim().orEmpty()
+                debounceSearchJob?.cancel()
+                if (q.length >= 2) {
+                    debounceSearchJob = uiScope.launch {
+                        kotlinx.coroutines.delay(350)
+                        runSearch(q, autoFocusFirst = false, saveToHistory = false)
+                    }
+                }
+            }
+        })
+
         input.setOnEditorActionListener { _, actionId, event ->
             if (actionId == EditorInfo.IME_ACTION_SEARCH ||
                 (event != null && event.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN)
             ) {
-                runSearch(input.text.toString())
+                debounceSearchJob?.cancel()
+                runSearch(input.text.toString(), autoFocusFirst = true, saveToHistory = true)
                 true
             } else false
         }
@@ -1192,7 +1283,8 @@ class MainActivity : AppCompatActivity() {
             focusedStrokeColor = Color.WHITE,
             radiusDp = 10
         ) {
-            runSearch(input.text.toString())
+            debounceSearchJob?.cancel()
+            runSearch(input.text.toString(), autoFocusFirst = true, saveToHistory = true)
         }
 
         UiHelper.makeFocusableButton(
@@ -1271,176 +1363,421 @@ class MainActivity : AppCompatActivity() {
     }
 
     // =========================================================================
-    // CATEGORY BROWSE SCREEN (Full-Width 6-Column Grid + Pagination)
+    // CATEGORY BROWSE SCREEN (Grouped Filter + Full-Width 6-Column Grid)
     // =========================================================================
 
     private fun openCategoryBrowse(selectedCategory: AnimeCategory?) {
         loadJob?.cancel()
         val screenSource = currentSource
-        val categories = CatalogService.categoriesFor(currentSource)
-        val active = selectedCategory ?: categories.firstOrNull() ?: AnimeCategory("Mới cập nhật", "")
-        activeCategory = active
-        browsePage = 1
-        browseItems.clear()
+        showLoading("Đang tải danh mục ${screenSource.subtitle}…")
 
-        contentContainer.removeAllViews()
-        val mainCol = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(UiHelper.dp(context, 18), UiHelper.dp(context, 10), UiHelper.dp(context, 18), UiHelper.dp(context, 14))
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-        }
-
-        // Top Horizontal Category Picker
-        val catScroll = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { bottomMargin = UiHelper.dp(context, 10) }
-        }
-        val catRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
-        for (cat in categories) {
-            val isSelected = cat.path == active.path && cat.title == active.title
-            val chip = TextView(this).apply {
-                text = cat.title
-                setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                typeface = Typeface.DEFAULT_BOLD
-                setPadding(UiHelper.dp(context, 14), UiHelper.dp(context, 8), UiHelper.dp(context, 14), UiHelper.dp(context, 8))
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply { rightMargin = UiHelper.dp(context, 8) }
+        loadJob = uiScope.launch {
+            val categories = try {
+                withContext(Dispatchers.IO) {
+                    CatalogService.getCategories(screenSource)
+                }
+            } catch (_: Throwable) {
+                emptyList()
             }
-            UiHelper.makeFocusableButton(
-                view = chip,
-                normalBgColor = if (isSelected) UiHelper.COLOR_ACCENT else UiHelper.COLOR_CARD,
-                focusedBgColor = Color.parseColor("#C084FC"),
-                focusedStrokeColor = Color.WHITE,
-                radiusDp = 18
-            ) {
-                openCategoryBrowse(cat)
+            ensureActive()
+            if (currentSource != screenSource || currentTab != "browse") return@launch
+
+            val active = selectedCategory ?: categories.firstOrNull() ?: AnimeCategory("Mới cập nhật", "")
+            activeCategory = active
+            browsePage = 1
+            browseItems.clear()
+
+            val groups = categories.map { it.group }.distinct()
+            val activeGroup = active.group.takeIf { groups.contains(it) } ?: groups.firstOrNull().orEmpty()
+            val groupCategories = if (activeGroup.isNotEmpty()) {
+                categories.filter { it.group == activeGroup }
+            } else {
+                categories
             }
-            catRow.addView(chip)
-        }
-        catScroll.addView(catRow)
-        mainCol.addView(catScroll)
 
-        // Header + Next Page Button
-        val headerRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { bottomMargin = UiHelper.dp(context, 10) }
-        }
-        val titleLabel = TextView(this).apply {
-            text = "${active.title} • Trang 1"
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16.5f)
-            typeface = Typeface.DEFAULT_BOLD
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        }
-        val nextPageBtn = TextView(this).apply {
-            text = "Tải thêm phim (Trang tiếp) ❯"
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(UiHelper.dp(context, 16), UiHelper.dp(context, 8), UiHelper.dp(context, 16), UiHelper.dp(context, 8))
-        }
-        headerRow.addView(titleLabel)
-        headerRow.addView(nextPageBtn)
-        mainCol.addView(headerRow)
-
-        val gridContainer = FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                0,
-                1f
-            )
-        }
-        mainCol.addView(gridContainer)
-        contentContainer.addView(mainCol)
-
-        fun loadPage(pageToLoad: Int) {
-            if (pageToLoad == 1) {
-                gridContainer.removeAllViews()
-                gridContainer.addView(
-                    UiHelper.createLoadingBox(
-                        this,
-                        currentSource.isMovie,
-                        "Đang tải danh mục ${active.title}…",
-                        sizeDp = 100
-                    )
+            contentContainer.removeAllViews()
+            val mainCol = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(UiHelper.dp(context, 18), UiHelper.dp(context, 8), UiHelper.dp(context, 18), UiHelper.dp(context, 14))
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
                 )
             }
-            loadJob?.cancel()
-            loadJob = uiScope.launch {
-                try {
-                    val nextItems = SourceIsolation.items(screenSource,
-                        CatalogService.loadList(screenSource, active.path, pageToLoad))
-                    ensureActive()
-                    if (currentSource != screenSource || currentTab != "browse" || activeCategory != active) return@launch
-                    val existingUrls = browseItems.map { it.url }.toHashSet()
-                    val unique = nextItems.filter { existingUrls.add(it.url) }
-                    browseItems.addAll(unique)
-                    browsePage = pageToLoad
-                    titleLabel.text = "${active.title} • Trang $browsePage (${browseItems.size} phim)"
 
-                    gridContainer.removeAllViews()
-                    val grid = RecyclerView(this@MainActivity).apply {
-                        layoutManager = GridLayoutManager(context, 6)
-                        clipToPadding = false
-                        setHasFixedSize(true)
-                        layoutParams = FrameLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT
-                        )
-                        adapter = PosterAdapter(browseItems.toList()) { anime -> openDetail(anime) }
+            // Row 1: Group Filter Tabs (Danh mục / Thể loại / Quốc gia / Năm / VIP / Free1)
+            if (groups.size > 1) {
+                val groupScroll = HorizontalScrollView(this@MainActivity).apply {
+                    isHorizontalScrollBarEnabled = false
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply { bottomMargin = UiHelper.dp(context, 6) }
+                }
+                val groupRow = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                }
+                for (grp in groups) {
+                    val isGrpActive = grp == activeGroup
+                    val grpBtn = TextView(this@MainActivity).apply {
+                        text = grp
+                        setTextColor(if (isGrpActive) Color.BLACK else Color.WHITE)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setPadding(UiHelper.dp(context, 14), UiHelper.dp(context, 6), UiHelper.dp(context, 14), UiHelper.dp(context, 6))
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply { rightMargin = UiHelper.dp(context, 8) }
                     }
-                    gridContainer.addView(grid)
-                } catch (t: Throwable) {
-                    if (t is CancellationException) throw t
-                    if (currentSource != screenSource || currentTab != "browse" || activeCategory != active) return@launch
-                    if (pageToLoad == 1) {
-                        gridContainer.removeAllViews()
-                        gridContainer.addView(
-                            TextView(this@MainActivity).apply {
-                                text = "Không tải được danh mục: ${t.message}"
-                                setTextColor(UiHelper.COLOR_TEXT_SECONDARY)
-                                gravity = Gravity.CENTER
-                                layoutParams = FrameLayout.LayoutParams(
-                                    ViewGroup.LayoutParams.MATCH_PARENT,
-                                    ViewGroup.LayoutParams.MATCH_PARENT
-                                )
-                            }
+                    UiHelper.makeFocusableButton(
+                        view = grpBtn,
+                        normalBgColor = if (isGrpActive) UiHelper.COLOR_YELLOW else Color.parseColor("#222638"),
+                        focusedBgColor = UiHelper.COLOR_ACCENT,
+                        focusedStrokeColor = Color.WHITE,
+                        radiusDp = 16
+                    ) {
+                        val firstInGroup = categories.firstOrNull { it.group == grp }
+                        if (firstInGroup != null) openCategoryBrowse(firstInGroup)
+                    }
+                    groupRow.addView(grpBtn)
+                }
+                groupScroll.addView(groupRow)
+                mainCol.addView(groupScroll)
+            }
+
+            // Row 2: Category Chips within active group
+            val catScroll = HorizontalScrollView(this@MainActivity).apply {
+                isHorizontalScrollBarEnabled = false
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = UiHelper.dp(context, 10) }
+            }
+            val catRow = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+            }
+            for (cat in groupCategories) {
+                val isSelected = cat.path == active.path && cat.title == active.title
+                val chip = TextView(this@MainActivity).apply {
+                    text = cat.title
+                    setTextColor(Color.WHITE)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                    typeface = Typeface.DEFAULT_BOLD
+                    setPadding(UiHelper.dp(context, 14), UiHelper.dp(context, 8), UiHelper.dp(context, 14), UiHelper.dp(context, 8))
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply { rightMargin = UiHelper.dp(context, 8) }
+                }
+                UiHelper.makeFocusableButton(
+                    view = chip,
+                    normalBgColor = if (isSelected) UiHelper.COLOR_ACCENT else UiHelper.COLOR_CARD,
+                    focusedBgColor = Color.parseColor("#C084FC"),
+                    focusedStrokeColor = Color.WHITE,
+                    radiusDp = 18
+                ) {
+                    openCategoryBrowse(cat)
+                }
+                catRow.addView(chip)
+            }
+            catScroll.addView(catRow)
+            mainCol.addView(catScroll)
+
+            // Header (Shows title + status, loads automatically on scroll without manual button)
+            val headerRow = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = UiHelper.dp(context, 8) }
+            }
+            val titleLabel = TextView(this@MainActivity).apply {
+                text = active.title
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 16.5f)
+                typeface = Typeface.DEFAULT_BOLD
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            val statusLabel = TextView(this@MainActivity).apply {
+                text = "Đang tải…"
+                setTextColor(UiHelper.COLOR_TEXT_SECONDARY)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                typeface = Typeface.DEFAULT_BOLD
+            }
+            headerRow.addView(titleLabel)
+            headerRow.addView(statusLabel)
+            mainCol.addView(headerRow)
+
+            val gridContainer = FrameLayout(this@MainActivity).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    0,
+                    1f
+                )
+            }
+            mainCol.addView(gridContainer)
+            contentContainer.addView(mainCol)
+
+            val items = ArrayList<Anime>()
+            var isLoadingMore = false
+            var hasMorePages = true
+            var currentPage = 1
+            var gridView: RecyclerView? = null
+            var posterAdapter: PosterAdapter? = null
+
+            fun loadPage(pageToLoad: Int) {
+                if (isLoadingMore || (!hasMorePages && pageToLoad > 1)) return
+                isLoadingMore = true
+                if (pageToLoad == 1) {
+                    items.clear()
+                    statusLabel.text = "Đang tải…"
+                    gridContainer.removeAllViews()
+                    gridContainer.addView(
+                        UiHelper.createLoadingBox(
+                            this@MainActivity,
+                            currentSource.isMovie,
+                            "Đang tải danh mục ${active.title}…",
+                            sizeDp = 100
                         )
+                    )
+                } else {
+                    statusLabel.text = "Đang tải thêm trang $pageToLoad…"
+                }
+
+                loadJob?.cancel()
+                loadJob = uiScope.launch {
+                    try {
+                        val nextItems = withContext(Dispatchers.IO) {
+                            SourceIsolation.items(
+                                screenSource,
+                                CatalogService.loadList(screenSource, active.path, pageToLoad)
+                            )
+                        }
+                        ensureActive()
+                        if (currentSource != screenSource || currentTab != "browse" || activeCategory != active) return@launch
+                        val existingUrls = items.map { it.url }.toHashSet()
+                        val unique = nextItems.filter { existingUrls.add(it.url) }
+
+                        if (nextItems.isEmpty() || (pageToLoad > 1 && unique.isEmpty())) {
+                            hasMorePages = false
+                            statusLabel.text = "${items.size} phim (Đã hết)"
+                        } else {
+                            val startPos = items.size
+                            items.addAll(unique)
+                            currentPage = pageToLoad
+                            statusLabel.text = "${items.size} phim"
+
+                            if (pageToLoad == 1 || gridView == null) {
+                                gridContainer.removeAllViews()
+                                val grid = RecyclerView(this@MainActivity).apply {
+                                    layoutManager = GridLayoutManager(context, 6)
+                                    clipToPadding = false
+                                    setHasFixedSize(true)
+                                    layoutParams = FrameLayout.LayoutParams(
+                                        ViewGroup.LayoutParams.MATCH_PARENT,
+                                        ViewGroup.LayoutParams.MATCH_PARENT
+                                    )
+                                    val adp = PosterAdapter(items) { anime -> openDetail(anime) }
+                                    posterAdapter = adp
+                                    adapter = adp
+
+                                    addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                                        override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
+                                            super.onScrolled(rv, dx, dy)
+                                            val glm = rv.layoutManager as? GridLayoutManager ?: return
+                                            val lastVis = glm.findLastVisibleItemPosition()
+                                            val total = glm.itemCount
+                                            if (!isLoadingMore && hasMorePages && total > 0 && lastVis >= total - 12) {
+                                                loadPage(currentPage + 1)
+                                            }
+                                        }
+                                    })
+                                }
+                                gridView = grid
+                                gridContainer.addView(grid)
+                            } else {
+                                posterAdapter?.notifyItemRangeInserted(startPos, unique.size)
+                            }
+                        }
+                    } catch (t: Throwable) {
+                        if (t is CancellationException) throw t
+                        if (currentSource != screenSource || currentTab != "browse" || activeCategory != active) return@launch
+                        if (pageToLoad == 1) {
+                            gridContainer.removeAllViews()
+                            gridContainer.addView(
+                                TextView(this@MainActivity).apply {
+                                    text = "Không tải được danh mục: ${t.message}"
+                                    setTextColor(UiHelper.COLOR_TEXT_SECONDARY)
+                                    gravity = Gravity.CENTER
+                                    layoutParams = FrameLayout.LayoutParams(
+                                        ViewGroup.LayoutParams.MATCH_PARENT,
+                                        ViewGroup.LayoutParams.MATCH_PARENT
+                                    )
+                                }
+                            )
+                        }
+                        statusLabel.text = "${items.size} phim"
+                    } finally {
+                        isLoadingMore = false
                     }
                 }
             }
+
+            loadPage(1)
+        }
+    }
+
+    // =========================================================================
+    // ANIME SCHEDULE & CUSTOM DOMAIN DIALOG
+    // =========================================================================
+
+    private fun renderSchedule(selectedDay: DayOfWeek) {
+        loadJob?.cancel()
+        showLoading("Đang tải lịch chiếu AnimeVietsub…")
+        loadJob = uiScope.launch {
+            val allItems = try {
+                withContext(Dispatchers.IO) { CatalogService.loadSchedule() }
+            } catch (_: Throwable) {
+                emptyList()
+            }
+            ensureActive()
+            if (currentTab != "schedule") return@launch
+
+            contentContainer.removeAllViews()
+            val mainCol = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(UiHelper.dp(context, 18), UiHelper.dp(context, 10), UiHelper.dp(context, 18), UiHelper.dp(context, 16))
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            }
+
+            val dayRowScroll = HorizontalScrollView(this@MainActivity).apply {
+                isHorizontalScrollBarEnabled = false
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = UiHelper.dp(context, 12) }
+            }
+            val dayRow = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+            }
+
+            for (day in DayOfWeek.entries) {
+                val isSelected = day == selectedDay
+                val chip = TextView(this@MainActivity).apply {
+                    text = day.displayName
+                    setTextColor(if (isSelected) Color.BLACK else Color.WHITE)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                    typeface = Typeface.DEFAULT_BOLD
+                    setPadding(UiHelper.dp(context, 16), UiHelper.dp(context, 8), UiHelper.dp(context, 16), UiHelper.dp(context, 8))
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply { rightMargin = UiHelper.dp(context, 8) }
+                }
+                UiHelper.makeFocusableButton(
+                    view = chip,
+                    normalBgColor = if (isSelected) UiHelper.COLOR_YELLOW else UiHelper.COLOR_CARD,
+                    focusedBgColor = UiHelper.COLOR_ACCENT,
+                    focusedStrokeColor = Color.WHITE,
+                    radiusDp = 18
+                ) {
+                    renderSchedule(day)
+                }
+                dayRow.addView(chip)
+            }
+            dayRowScroll.addView(dayRow)
+            mainCol.addView(dayRowScroll)
+
+            val filtered = allItems.filter { it.dayOfWeek == selectedDay }.ifEmpty { allItems }
+            val animeCards = filtered.map { item ->
+                Anime(
+                    title = item.title,
+                    subtitle = listOf(item.episodeText, item.timeText).filter { it.isNotEmpty() }.joinToString(" • "),
+                    url = item.url,
+                    episodeText = item.episodeText,
+                    quality = item.timeText.ifEmpty { item.dayOfWeek.rawValue },
+                    source = ContentSource.ANIME
+                )
+            }
+
+            if (animeCards.isEmpty()) {
+                mainCol.addView(TextView(this@MainActivity).apply {
+                    text = "Chưa có lịch chiếu cho ${selectedDay.displayName}."
+                    setTextColor(UiHelper.COLOR_TEXT_SECONDARY)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                    gravity = Gravity.CENTER
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        0,
+                        1f
+                    )
+                })
+            } else {
+                val grid = RecyclerView(this@MainActivity).apply {
+                    layoutManager = GridLayoutManager(context, 6)
+                    clipToPadding = false
+                    setHasFixedSize(true)
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        0,
+                        1f
+                    )
+                    adapter = PosterAdapter(animeCards) { anime ->
+                        currentSource = ContentSource.ANIME
+                        updateSidebarState()
+                        openDetail(anime)
+                    }
+                }
+                mainCol.addView(grid)
+            }
+
+            contentContainer.addView(mainCol)
+        }
+    }
+
+    private fun showAnimeDomainDialog() {
+        val currentCustom = CatalogService.getCustomAnimeDomain(this).orEmpty()
+        val activeDomain = CatalogService.currentAnimeBaseUrl()
+
+        val input = EditText(this).apply {
+            hint = "Để trống để tự động tìm qua bit.ly/animevietsubtv"
+            setText(currentCustom)
+            setTextColor(Color.WHITE)
+            setHintTextColor(UiHelper.COLOR_TEXT_SECONDARY)
+            setSingleLine(true)
+            setPadding(UiHelper.dp(context, 16), UiHelper.dp(context, 12), UiHelper.dp(context, 16), UiHelper.dp(context, 12))
         }
 
-        UiHelper.makeFocusableButton(
-            view = nextPageBtn,
-            normalBgColor = UiHelper.COLOR_BLUE,
-            focusedBgColor = Color.parseColor("#42A5F5"),
-            focusedStrokeColor = Color.WHITE,
-            radiusDp = 16
-        ) {
-            loadPage(browsePage + 1)
-        }
-
-        loadPage(1)
+        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("Tên miền AnimeVietsub (Đang dùng: $activeDomain)")
+            .setView(input)
+            .setPositiveButton("Lưu & Áp dụng") { _, _ ->
+                CatalogService.setCustomAnimeDomain(this, input.text.toString())
+                if (currentSource == ContentSource.ANIME) {
+                    loadHomeData()
+                }
+            }
+            .setNeutralButton("Tự động dò lại") { _, _ ->
+                CatalogService.setCustomAnimeDomain(this, null)
+                uiScope.launch {
+                    withContext(Dispatchers.IO) {
+                        CatalogService.resolveAnimeDomain(forceRefresh = true)
+                    }
+                    if (currentSource == ContentSource.ANIME) {
+                        loadHomeData()
+                    }
+                }
+            }
+            .setNegativeButton("Đóng", null)
+            .show()
     }
 
     private fun openDetail(anime: Anime) {
-        if (anime.source != currentSource) return
         val intent = Intent(this, DetailActivity::class.java).apply {
             putExtra("anime_json", anime.toJson())
         }
