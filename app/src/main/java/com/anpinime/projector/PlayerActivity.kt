@@ -96,10 +96,14 @@ class PlayerActivity : AppCompatActivity() {
     private var lastWebUrl: String = ""
     private var retryCount = 0
     private var currentQualityMode = 0 // 0 = Auto 1080p, 1 = 720p (Siêu mượt), 2 = 4K Gốc
+    private var currentPlaybackSpeed = 1.0f
 
     private data class WebTrackItem(val id: String, val label: String, val selected: Boolean)
     private var webAudioTracks: List<WebTrackItem> = emptyList()
     private var webSubtitleTracks: List<WebTrackItem> = emptyList()
+    private var webQualities: List<WebTrackItem> = emptyList()
+    private var aetherMenuOpen = false
+    private var aetherStatusNote: String = ""
 
     private lateinit var videoFrame: FrameLayout
     private lateinit var surfaceView: SurfaceView
@@ -125,6 +129,10 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var seekBar: SeekBar
     private lateinit var playPauseBtn: TextView
     private lateinit var qualityBtn: TextView
+    private lateinit var speedBtn: TextView
+    private lateinit var aetherTranslateBtn: TextView
+    private lateinit var aetherMenuBtn: TextView
+    private lateinit var audioDecoderBtn: TextView
     private lateinit var serverDrawer: HorizontalScrollView
     private lateinit var serverDrawerRow: LinearLayout
     private lateinit var episodeDrawer: HorizontalScrollView
@@ -132,6 +140,10 @@ class PlayerActivity : AppCompatActivity() {
 
     private var osdVisible = true
     private var selectionDialog: AlertDialog? = null
+
+    private fun isAetherEpisode(ep: Episode = currentEpisode): Boolean {
+        return ep.source == ContentSource.AETHER || ep.playbackKind.equals("aether_web", ignoreCase = true)
+    }
 
     private val commitPendingSeekRunnable = Runnable {
         commitPendingSeek()
@@ -221,13 +233,22 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun destroyWebPlayer() {
+        aetherMenuOpen = false
         val wv = fallbackWebView ?: return
         fallbackWebView = null
         webAudioTracks = emptyList()
         webSubtitleTracks = emptyList()
+        webQualities = emptyList()
         try {
+            wv.evaluateJavascript(
+                "(function(){try{document.querySelectorAll('video,audio').forEach(function(m){m.pause();m.removeAttribute('src');m.load();});}catch(e){}})();",
+                null
+            )
             wv.stopLoading()
+            wv.loadUrl("about:blank")
+            wv.clearHistory()
             (wv.parent as? ViewGroup)?.removeView(wv)
+            wv.removeAllViews()
             wv.destroy()
         } catch (_: Throwable) {}
     }
@@ -238,6 +259,67 @@ class PlayerActivity : AppCompatActivity() {
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val keyCode = event.keyCode
+
+        // Never intercept system power, volume, or home keys so projector remote always works
+        if (keyCode == KeyEvent.KEYCODE_POWER ||
+            keyCode == KeyEvent.KEYCODE_TV_POWER ||
+            keyCode == KeyEvent.KEYCODE_SLEEP ||
+            keyCode == KeyEvent.KEYCODE_WAKEUP ||
+            keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
+            keyCode == KeyEvent.KEYCODE_VOLUME_DOWN ||
+            keyCode == KeyEvent.KEYCODE_VOLUME_MUTE ||
+            keyCode == KeyEvent.KEYCODE_HOME
+        ) {
+            return super.dispatchKeyEvent(event)
+        }
+
+        // When Aether's native overlay menu is open inside WebView, route D-Pad & Back to it
+        if (aetherMenuOpen && fallbackWebView != null && selectionDialog == null) {
+            when (keyCode) {
+                KeyEvent.KEYCODE_DPAD_UP,
+                KeyEvent.KEYCODE_DPAD_LEFT -> {
+                    if (event.action == KeyEvent.ACTION_DOWN) {
+                        fallbackWebView?.evaluateJavascript(
+                            "window.__anpinimeAetherMenuMove && window.__anpinimeAetherMenuMove(-1);",
+                            null
+                        )
+                    }
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_DOWN,
+                KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                    if (event.action == KeyEvent.ACTION_DOWN) {
+                        fallbackWebView?.evaluateJavascript(
+                            "window.__anpinimeAetherMenuMove && window.__anpinimeAetherMenuMove(1);",
+                            null
+                        )
+                    }
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_CENTER,
+                KeyEvent.KEYCODE_ENTER,
+                KeyEvent.KEYCODE_NUMPAD_ENTER -> {
+                    if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                        fallbackWebView?.evaluateJavascript(
+                            "window.__anpinimeAetherMenuActivate && window.__anpinimeAetherMenuActivate();",
+                            null
+                        )
+                    }
+                    return true
+                }
+                KeyEvent.KEYCODE_BACK,
+                KeyEvent.KEYCODE_ESCAPE -> {
+                    if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                        fallbackWebView?.evaluateJavascript(
+                            "window.__anpinimeAetherMenuBack && window.__anpinimeAetherMenuBack();",
+                            null
+                        )
+                    }
+                    return true
+                }
+            }
+        }
+
         if (event.action == KeyEvent.ACTION_UP && keyCode == seekGestureKey) {
             seekGestureKey = -1
             return true
@@ -251,19 +333,6 @@ class PlayerActivity : AppCompatActivity() {
             showOsd()
             seekBar.requestFocus()
             return true
-        }
-
-        // Never intercept system power, volume, or home keys so projector remote always works
-        if (keyCode == KeyEvent.KEYCODE_POWER ||
-            keyCode == KeyEvent.KEYCODE_TV_POWER ||
-            keyCode == KeyEvent.KEYCODE_SLEEP ||
-            keyCode == KeyEvent.KEYCODE_WAKEUP ||
-            keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
-            keyCode == KeyEvent.KEYCODE_VOLUME_DOWN ||
-            keyCode == KeyEvent.KEYCODE_VOLUME_MUTE ||
-            keyCode == KeyEvent.KEYCODE_HOME
-        ) {
-            return super.dispatchKeyEvent(event)
         }
 
         if (event.action == KeyEvent.ACTION_DOWN) {
@@ -349,7 +418,12 @@ class PlayerActivity : AppCompatActivity() {
                 }
             } else {
                 if (keyCode == KeyEvent.KEYCODE_BACK || keyCode == KeyEvent.KEYCODE_ESCAPE) {
-                    if (exoPlayer?.isPlaying == true || fallbackWebView != null) {
+                    if (serverDrawer.visibility == View.VISIBLE || episodeDrawer.visibility == View.VISIBLE) {
+                        serverDrawer.visibility = View.GONE
+                        episodeDrawer.visibility = View.GONE
+                        playPauseBtn.requestFocus()
+                        scheduleHideOsd()
+                    } else if (exoPlayer?.isPlaying == true || fallbackWebView != null) {
                         hideOsd()
                     } else {
                         finish()
@@ -667,8 +741,20 @@ class PlayerActivity : AppCompatActivity() {
         btnRow.addView(qualityBtn)
         btnRow.addView(makeOsdBtn("🔊 Âm thanh") { showTrackPicker(C.TRACK_TYPE_AUDIO) })
         btnRow.addView(makeOsdBtn("💬 Phụ đề") { showTrackPicker(C.TRACK_TYPE_TEXT) })
+        aetherTranslateBtn = makeOsdBtn("🌐 Dịch Sub Việt", Color.parseColor("#3B1E6D")) {
+            triggerAetherVietnameseTranslation()
+        }
+        btnRow.addView(aetherTranslateBtn)
         btnRow.addView(makeOsdBtn("🔤 Cỡ Sub") { showSubtitleSizePicker() })
-        btnRow.addView(makeOsdBtn("🛠 Bộ giải mã Audio") {
+        speedBtn = makeOsdBtn("⏩ Tốc độ: 1.0x") {
+            showPlaybackSpeedPicker()
+        }
+        btnRow.addView(speedBtn)
+        aetherMenuBtn = makeOsdBtn("🎛 Menu Aether") {
+            openAetherNativeMenu("/captionsOverlay")
+        }
+        btnRow.addView(aetherMenuBtn)
+        audioDecoderBtn = makeOsdBtn("🛠 Bộ giải mã Audio") {
             showSelection("Bộ giải mã âm thanh (Hỗ trợ 5.1 / EAC3 / DTS / AAC)",
                 listOf("Tự động / Thiết bị", "FFmpeg Đa kênh (Khuyên dùng cho 4K/MKV VIP)"),
                 if (preferSoftwareAudio) 1 else 0) { index ->
@@ -677,7 +763,8 @@ class PlayerActivity : AppCompatActivity() {
                 preferSoftwareAudio = index == 1
                 prepareExoPlayer(lastNativeUrl, lastNativeHeaders, position, lastMediaKind, lastSubtitles)
             }
-        })
+        }
+        btnRow.addView(audioDecoderBtn)
 
         btnRow.addView(makeOsdBtn("✕ Thoát", Color.parseColor("#381E24")) {
             finish()
@@ -691,12 +778,69 @@ class PlayerActivity : AppCompatActivity() {
         root.addView(osdContainer)
 
         setContentView(root)
+        updateSourceSpecificOsdButtons()
         playPauseBtn.requestFocus()
         scheduleHideOsd()
     }
 
+    private fun updateSourceSpecificOsdButtons() {
+        if (!::aetherTranslateBtn.isInitialized) return
+        val aether = isAetherEpisode()
+        aetherTranslateBtn.visibility = if (aether) View.VISIBLE else View.GONE
+        // All Aether settings (Subtitles, Translate to Vietnamese, Audio, Quality, Size, Speed, Server)
+        // are now 100% integrated into AnPinime Projector's native dialogs & OSD!
+        aetherMenuBtn.visibility = View.GONE
+        audioDecoderBtn.visibility = if (aether) View.GONE else View.VISIBLE
+        if (aether) {
+            val activeQ = webQualities.firstOrNull { it.selected }?.label
+            qualityBtn.text = if (!activeQ.isNullOrBlank()) "⚙ Chất lượng: $activeQ" else "⚙ Chất lượng: Auto"
+        }
+    }
+
     private fun populateServerDrawer() {
         serverDrawerRow.removeAllViews()
+        if (isAetherEpisode()) {
+            // Offer native Aether domain switching chips inside the player drawer for both Movies & TV
+            val domains = AetherCatalog.getActiveDomains(this)
+            val currentDomain = AetherCatalog.normalizeHttpsDomain(currentEpisode.refererUrl)
+                ?: AetherCatalog.normalizeHttpsDomain(currentEpisode.url)
+                ?: domains.firstOrNull().orEmpty()
+            domains.forEachIndexed { idx, domain ->
+                val host = try { java.net.URI(domain).host ?: domain } catch (_: Throwable) { domain }
+                val isCurrentDom = domain.equals(currentDomain, ignoreCase = true)
+                val domChip = TextView(this).apply {
+                    text = "🌐 Domain ${idx + 1} · $host"
+                    setTextColor(Color.WHITE)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                    typeface = Typeface.DEFAULT_BOLD
+                    setPadding(UiHelper.dp(context, 14), UiHelper.dp(context, 8), UiHelper.dp(context, 14), UiHelper.dp(context, 8))
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply { rightMargin = UiHelper.dp(context, 8) }
+                }
+                UiHelper.makeFocusableButton(
+                    view = domChip,
+                    normalBgColor = if (isCurrentDom) UiHelper.COLOR_BLUE else UiHelper.COLOR_CARD,
+                    focusedBgColor = UiHelper.COLOR_ACCENT,
+                    focusedStrokeColor = Color.WHITE,
+                    radiusDp = 16
+                ) {
+                    serverDrawer.visibility = View.GONE
+                    AetherCatalog.setPreferredDomain(this, domain)
+                    val rewrittenUrl = AetherCatalog.rewriteUrlToDomain(currentEpisode.url, domain)
+                    val updatedEp = currentEpisode.copy(
+                        url = rewrittenUrl,
+                        directUrl = rewrittenUrl,
+                        refererUrl = domain
+                    )
+                    startEpisodePlayback(updatedEp, resetPosition = false, initialPositionMs = webPositionMs)
+                    playPauseBtn.requestFocus()
+                }
+                serverDrawerRow.addView(domChip)
+            }
+        }
+
         val seasons = ArrayList<String>()
         for (ep in allEpisodes) {
             if (!seasons.contains(ep.season)) seasons.add(ep.season)
@@ -780,11 +924,13 @@ class PlayerActivity : AppCompatActivity() {
         webPositionMs = 0L
         webDurationMs = 0L
         retryCount = 0
+        aetherStatusNote = ""
         attemptedStreamUrls.clear()
         topServerText.text = "${episode.title} • ${episode.season}"
         loadingOverlay.visibility = View.VISIBLE
         loadingText.text = "Đang tải ${episode.title} (${episode.season})…"
         destroyWebPlayer()
+        updateSourceSpecificOsdButtons()
         surfaceView.visibility = View.VISIBLE
 
         resolveJob?.cancel()
@@ -797,7 +943,8 @@ class PlayerActivity : AppCompatActivity() {
                 lastWebUrl = resolved.webUrl.ifBlank { episode.url }
                 attemptedStreamUrls.add(resolved.url)
                 if (resolved.isWeb) {
-                    startWebFallback(resolved.url, resolved.headers["Referer"] ?: episode.url)
+                    val resumeSeekMs = if (resetPosition) 0L else initialPositionMs
+                    startWebFallback(resolved.url, resolved.headers["Referer"] ?: episode.url, resumeSeekMs)
                     return@launch
                 }
                 val needsRelay = resolved.isF4kWrapped ||
@@ -1080,8 +1227,6 @@ class PlayerActivity : AppCompatActivity() {
                                     !currentEpisode.source.isMovie) -> lastWebUrl
                             currentEpisode.url.contains("embed", ignoreCase = true) ||
                                 currentEpisode.url.contains("player", ignoreCase = true) -> currentEpisode.url
-                            currentEpisode.source == ContentSource.PHIM4K && streamUrl.startsWith("http", ignoreCase = true) ->
-                                try { "https://player.phimapi.com/player/?url=" + URLEncoder.encode(streamUrl, "UTF-8") } catch (_: Throwable) { "" }
                             else -> ""
                         }
 
@@ -1103,27 +1248,49 @@ class PlayerActivity : AppCompatActivity() {
         if (seekMs > 0L) {
             player.seekTo(seekMs)
         }
+        if (currentPlaybackSpeed != 1.0f) {
+            player.setPlaybackSpeed(currentPlaybackSpeed)
+        }
         player.playWhenReady = true
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun startWebFallback(webUrl: String, referer: String) {
+    private fun startWebFallback(webUrl: String, referer: String, initialSeekMs: Long = 0L) {
         releasePlayer()
         destroyWebPlayer()
+        val aetherMode = isAetherEpisode()
         surfaceView.visibility = View.GONE
         loadingOverlay.visibility = View.VISIBLE
-        loadingText.text = "Đang mở trình phát dự phòng…"
 
-        val wv = WebView(this).apply {
-            setBackgroundColor(Color.BLACK)
-            visibility = View.INVISIBLE
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                Gravity.CENTER
-            )
-            isFocusable = false
-            isFocusableInTouchMode = false
+        if (aetherMode) {
+            val compat = WebViewHelper.checkAetherWebViewCompatibility(this)
+            if (!compat.isSupported) {
+                loadingText.text = compat.message
+                showOsd(focusPlayButton = true)
+                showPlayerMessage("WebView không tương thích", compat.message)
+                return
+            }
+            loadingText.text = "Đang khởi tạo trình phát Aether (${currentEpisode.title})…"
+        } else {
+            loadingText.text = "Đang mở trình phát dự phòng…"
+        }
+
+        val wv = try {
+            WebView(this).apply {
+                setBackgroundColor(Color.BLACK)
+                visibility = if (aetherMode) View.VISIBLE else View.INVISIBLE
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    Gravity.CENTER
+                )
+                isFocusable = false
+                isFocusableInTouchMode = false
+            }
+        } catch (t: Throwable) {
+            loadingText.text = "Không thể khởi tạo Android System WebView: ${t.message}"
+            showOsd(focusPlayButton = true)
+            return
         }
         openingFrame = false
         visitedFrames.add(webUrl)
@@ -1138,6 +1305,11 @@ class PlayerActivity : AppCompatActivity() {
             mediaPlaybackRequiresUserGesture = false
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             userAgentString = CatalogService.USER_AGENT
+            allowContentAccess = true
+            loadWithOverviewMode = true
+            useWideViewPort = true
+            setSupportMultipleWindows(false)
+            javaScriptCanOpenWindowsAutomatically = false
         }
 
         wv.addJavascriptInterface(object {
@@ -1145,6 +1317,13 @@ class PlayerActivity : AppCompatActivity() {
             fun onVideoFound(streamUrl: String, refUrl: String) {
                 mainHandler.post {
                     if (fallbackWebView !== wv) return@post
+                    // CRITICAL: Never extract/hijack Aether streams into ExoPlayer so Aether's
+                    // subtitles, OpenSubtitles scraper, and built-in Vietnamese translator stay active!
+                    if (aetherMode) {
+                        wv.visibility = View.VISIBLE
+                        loadingOverlay.visibility = View.GONE
+                        return@post
+                    }
                     if (streamUrl.startsWith("http", ignoreCase = true) && exoPlayer == null) {
                         if (attemptedStreamUrls.contains(streamUrl)) {
                             return@post
@@ -1173,13 +1352,29 @@ class PlayerActivity : AppCompatActivity() {
                     wv.visibility = View.VISIBLE
                     loadingOverlay.visibility = View.GONE
                     applySubtitleScale()
+                    if (currentPlaybackSpeed != 1.0f) {
+                        sendWebCommand("rate", currentPlaybackSpeed.toDouble())
+                    }
                     scheduleHideOsd()
+                }
+            }
+
+            @JavascriptInterface
+            fun onAetherScrapeFailed() {
+                mainHandler.post {
+                    if (fallbackWebView !== wv) return@post
+                    if (!trySwitchToBackupServer(webPositionMs)) {
+                        loadingOverlay.visibility = View.VISIBLE
+                        loadingText.text = "Aether đã dò hết các máy chủ nhưng chưa tìm thấy luồng phát cho phim này.\nHãy thử lại hoặc chọn phim/nguồn khác."
+                        showOsd(focusPlayButton = true)
+                    }
                 }
             }
 
             @JavascriptInterface
             fun onFrameFound(url: String, referer: String) {
                 mainHandler.post {
+                    if (aetherMode) return@post
                     if (fallbackWebView !== wv || openingFrame || visitedFrames.size >= 4 ||
                         url in visitedFrames || !url.startsWith("https://")) return@post
                     openingFrame = true
@@ -1192,11 +1387,45 @@ class PlayerActivity : AppCompatActivity() {
                 if (!position.isFinite() || !duration.isFinite()) return
                 mainHandler.post {
                     if (fallbackWebView !== wv) return@post
+                    if (duration > 0.5 && wv.visibility != View.VISIBLE) {
+                        wv.visibility = View.VISIBLE
+                        loadingOverlay.visibility = View.GONE
+                    }
                     webPositionMs = (position * 1000).toLong().coerceAtLeast(0)
                     webDurationMs = (duration * 1000).toLong().coerceAtLeast(0)
                     webPaused = paused
                     playPauseBtn.text = if (paused) "▶ Phát tiếp" else "⏸ Tạm dừng"
                     updateProgressUi()
+                }
+            }
+
+            @JavascriptInterface
+            fun onAetherMenuState(isOpen: Boolean) {
+                mainHandler.post {
+                    if (fallbackWebView !== wv) return@post
+                    val wasOpen = aetherMenuOpen
+                    aetherMenuOpen = isOpen
+                    if (isOpen) {
+                        wv.visibility = View.VISIBLE
+                        loadingOverlay.visibility = View.GONE
+                        hideOsd()
+                    } else if (wasOpen) {
+                        showOsd(focusPlayButton = true)
+                    }
+                }
+            }
+
+            @JavascriptInterface
+            fun onAetherStatus(statusText: String) {
+                mainHandler.post {
+                    if (fallbackWebView !== wv) return@post
+                    aetherStatusNote = statusText.trim()
+                    val baseLabel = "${currentEpisode.title} • ${currentEpisode.season}"
+                    topServerText.text = if (aetherStatusNote.isNotEmpty()) {
+                        "$baseLabel • $aetherStatusNote"
+                    } else {
+                        baseLabel
+                    }
                 }
             }
 
@@ -1210,6 +1439,10 @@ class PlayerActivity : AppCompatActivity() {
                         val dur = root.optDouble("duration", 0.0)
                         val paused = root.optBoolean("paused", true)
                         if (pos.isFinite() && dur.isFinite()) {
+                            if (dur > 0.5 && wv.visibility != View.VISIBLE) {
+                                wv.visibility = View.VISIBLE
+                                loadingOverlay.visibility = View.GONE
+                            }
                             webPositionMs = (pos * 1000).toLong().coerceAtLeast(0L)
                             webDurationMs = (dur * 1000).toLong().coerceAtLeast(0L)
                             webPaused = paused
@@ -1241,6 +1474,21 @@ class PlayerActivity : AppCompatActivity() {
                                     list.add(WebTrackItem(tid, title, tid == curSid))
                                 }
                                 webSubtitleTracks = list
+                            }
+                            val qualArr = tracksObj.optJSONArray("qualities")
+                            if (qualArr != null) {
+                                val list = ArrayList<WebTrackItem>()
+                                val curQid = tracksObj.optString("qualityID")
+                                for (i in 0 until qualArr.length()) {
+                                    val q = qualArr.optJSONObject(i) ?: continue
+                                    val qid = q.optString("id")
+                                    val title = q.optString("title").ifEmpty { qid }
+                                    list.add(WebTrackItem(qid, title, qid == curQid))
+                                }
+                                webQualities = list
+                                if (aetherMode) {
+                                    updateSourceSpecificOsdButtons()
+                                }
                             }
                         }
                     } catch (_: Throwable) {}
@@ -1584,8 +1832,14 @@ class PlayerActivity : AppCompatActivity() {
             })();
         """.trimIndent()
 
+        val activeScript = if (aetherMode) {
+            buildAetherBridgeScript(initialSeekMs / 1000.0)
+        } else {
+            fallbackIsolateScript
+        }
+
         if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
-            WebViewCompat.addDocumentStartJavaScript(wv, fallbackIsolateScript, setOf("*"))
+            WebViewCompat.addDocumentStartJavaScript(wv, activeScript, setOf("*"))
         }
         wv.webChromeClient = object : WebChromeClient() {
             override fun onJsAlert(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean {
@@ -1597,7 +1851,29 @@ class PlayerActivity : AppCompatActivity() {
         wv.webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                 val url = request?.url?.toString().orEmpty()
-                if (request?.method == "GET" && Regex("(?i)\\.(m3u8|mp4)([?#]|$)").containsMatchIn(url) &&
+                val path = request?.url?.path.orEmpty()
+                // Inject Aether polyfills & bridge synchronously inside /config.js before any ES module executes
+                if (aetherMode && path == "/config.js") {
+                    val configAndBridge = """
+                        window.__CONFIG__ = {
+                          VITE_CORS_PROXY_URL: "",
+                          VITE_TMDB_READ_API_KEY: "",
+                          VITE_DMCA_EMAIL: null,
+                          VITE_NORMAL_ROUTER: true,
+                          VITE_BACKEND_URL: null,
+                          VITE_DISALLOWED_IDS: "",
+                          VITE_SIMKL_CLIENT_ID: "",
+                          VITE_SIMKL_CLIENT_SECRET: ""
+                        };
+                    """.trimIndent() + "\n;\n" + activeScript
+                    return WebResourceResponse(
+                        "application/javascript",
+                        "UTF-8",
+                        java.io.ByteArrayInputStream(configAndBridge.toByteArray(Charsets.UTF_8))
+                    )
+                }
+                // Do NOT hijack Aether streams into ExoPlayer so Aether's subtitles and built-in Vietnamese translator remain intact.
+                if (!aetherMode && request?.method == "GET" && Regex("(?i)\\.(m3u8|mp4)([?#]|$)").containsMatchIn(url) &&
                     !url.contains("/ads/", true)) {
                     val requestHeaders = request?.requestHeaders.orEmpty()
                     mainHandler.post {
@@ -1609,15 +1885,47 @@ class PlayerActivity : AppCompatActivity() {
                 }
                 return null
             }
+
+            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                view?.evaluateJavascript(activeScript, null)
+                if (aetherMode) {
+                    mainHandler.post {
+                        if (fallbackWebView === view) {
+                            wv.visibility = View.VISIBLE
+                            loadingOverlay.visibility = View.GONE
+                        }
+                    }
+                }
+            }
+
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
-                view?.evaluateJavascript(fallbackIsolateScript, null)
+                view?.evaluateJavascript(activeScript, null)
+                if (aetherMode) {
+                    mainHandler.post {
+                        if (fallbackWebView === view) {
+                            wv.visibility = View.VISIBLE
+                            loadingOverlay.visibility = View.GONE
+                        }
+                    }
+                }
+                val timeoutMs = if (aetherMode) 45_000L else 22_000L
                 mainHandler.postDelayed({
-                    if (fallbackWebView === view && view?.visibility != View.VISIBLE) {
-                        loadingText.text = "Chưa mở được video. Hãy thử server khác hoặc kiểm tra Android System WebView."
+                    val notStarted = if (aetherMode) webDurationMs <= 0L else view?.visibility != View.VISIBLE
+                    if (fallbackWebView === view && notStarted) {
+                        if (trySwitchToBackupServer(webPositionMs)) {
+                            return@postDelayed
+                        }
+                        loadingOverlay.visibility = View.VISIBLE
+                        loadingText.text = if (aetherMode) {
+                            "Không thể tải nguồn phát Aether hoặc hết thời gian chờ. Hãy đổi tên miền dự phòng trong mục Máy chủ."
+                        } else {
+                            "Chưa mở được video. Hãy thử server khác hoặc kiểm tra Android System WebView."
+                        }
                         showOsd(true)
                     }
-                }, 20_000L)
+                }, timeoutMs)
             }
 
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
@@ -1634,10 +1942,765 @@ class PlayerActivity : AppCompatActivity() {
 
         fallbackWebView = wv
         videoFrame.addView(wv, 0)
-        wv.loadUrl(webUrl, mapOf("Referer" to referer, "User-Agent" to "Mozilla/5.0"))
+        if (aetherMode) {
+            wv.loadUrl(webUrl)
+        } else {
+            wv.loadUrl(webUrl, mapOf("Referer" to referer, "User-Agent" to "Mozilla/5.0"))
+        }
+    }
+
+    private fun buildAetherBridgeScript(initialSeekSec: Double): String {
+        return """
+            (function(){
+              if (window.__anpinimeAetherInstalled) return;
+              window.__anpinimeAetherInstalled = true;
+
+              // 1. Essential ES2021-ES2023 Polyfills for Projector Android System WebView (Chrome 80-97)
+              try {
+                if (typeof Object.hasOwn !== 'function') {
+                  Object.hasOwn = function(obj, prop) {
+                    return Object.prototype.hasOwnProperty.call(Object(obj), prop);
+                  };
+                }
+                if (typeof window.structuredClone !== 'function') {
+                  window.structuredClone = function(val) {
+                    if (val === undefined || val === null || typeof val !== 'object') return val;
+                    try { return JSON.parse(JSON.stringify(val)); } catch(e) { return val; }
+                  };
+                }
+                if (typeof Array.prototype.at !== 'function') {
+                  Array.prototype.at = function(n) {
+                    n = Math.trunc(n) || 0;
+                    if (n < 0) n += this.length;
+                    if (n < 0 || n >= this.length) return undefined;
+                    return this[n];
+                  };
+                }
+                if (typeof String.prototype.at !== 'function') {
+                  String.prototype.at = function(n) {
+                    n = Math.trunc(n) || 0;
+                    if (n < 0) n += this.length;
+                    if (n < 0 || n >= this.length) return undefined;
+                    return this.charAt(n);
+                  };
+                }
+                if (typeof String.prototype.replaceAll !== 'function') {
+                  String.prototype.replaceAll = function(str, newStr) {
+                    if (Object.prototype.toString.call(str).toLowerCase() === '[object regexp]') {
+                      return this.replace(str, newStr);
+                    }
+                    return this.split(String(str)).join(String(newStr));
+                  };
+                }
+                if (typeof window.crypto === 'object' && typeof window.crypto.randomUUID !== 'function') {
+                  window.crypto.randomUUID = function() {
+                    return '10000000-1000-4000-8000-100000000000'.replace(/[018]/g, function(c) {
+                      var r = (window.crypto.getRandomValues ? window.crypto.getRandomValues(new Uint8Array(1))[0] : Math.floor(Math.random() * 256));
+                      return (c ^ (r & (15 >> (c / 4)))).toString(16);
+                    });
+                  };
+                }
+                // Bypass Aether's WebAudio createMediaElementSource booster so <video> audio never stalls on suspended AudioContext
+                Object.defineProperty(HTMLMediaElement.prototype, '_hasAudioSource', {
+                  value: true,
+                  writable: true,
+                  configurable: true
+                });
+              } catch(e){}
+
+              // 2. Seed valid Zustand persist state ({ state: {...}, version: 0 }) for Subtitles & Onboarding
+              try {
+                var subKey = '__MW::subtitles';
+                var rawSub = localStorage.getItem(subKey);
+                var parsedSub = null;
+                try { parsedSub = rawSub ? JSON.parse(rawSub) : null; } catch(e){}
+                if (!parsedSub || typeof parsedSub !== 'object' || !parsedSub.state) {
+                  localStorage.setItem(subKey, JSON.stringify({
+                    state: {
+                      enabled: true,
+                      lastSelectedLanguage: 'vi',
+                      autoSelectSubtitles: true,
+                      preferredLanguages: ['vi', 'en'],
+                      styling: {
+                        color: '#ffffff',
+                        backgroundOpacity: 0.5,
+                        size: 1.2,
+                        backgroundBlur: 0,
+                        backgroundBlurEnabled: false,
+                        bold: true,
+                        boldWeight: 700,
+                        verticalPosition: 1,
+                        fontStyle: 'default',
+                        borderThickness: 1,
+                        fontFamily: 'sans-serif',
+                        lineSpacing: 1.5
+                      }
+                    },
+                    version: 0
+                  }));
+                }
+                localStorage.setItem('__MW::onboarding', JSON.stringify({
+                  state: { completed: true },
+                  version: 0
+                }));
+              } catch(e){}
+
+              var initialSeekTarget = ${initialSeekSec};
+              var initialSeekApplied = initialSeekTarget <= 2;
+              var autoSubProcessed = false;
+              var autoTranslateTriggered = false;
+              var scrapeFailReported = false;
+              var activeVideo = null;
+              var menuFocusIndex = 0;
+
+              function injectAetherStyles(){
+                if (!document.head || document.getElementById('anpinime-aether-style')) return;
+                var st = document.createElement('style');
+                st.id = 'anpinime-aether-style';
+                st.textContent =
+                  'html, body { background: #000 !important; overflow: hidden !important; margin: 0 !important; padding: 0 !important; user-select: none !important; }' +
+                  'a[href="/"], a[href*="/browse"] { opacity: 0 !important; pointer-events: none !important; }' +
+                  'body.anpinime-playing div.bg-gradient-to-b, ' +
+                  'body.anpinime-playing div.bg-gradient-to-t, ' +
+                  'body.anpinime-playing div.pointer-events-auto.z-10, ' +
+                  'body.anpinime-playing .popout-location, ' +
+                  'body.anpinime-playing [data-floating-ui-portal] { ' +
+                  'opacity: 0 !important; pointer-events: none !important; }' +
+                  'div.text-white.absolute.w-full.flex.flex-col.items-center { bottom: 2.2rem !important; z-index: 40 !important; opacity: 1 !important; }';
+                document.head.appendChild(st);
+              }
+
+              var cachedPlayerGetState = null;
+              var cachedSubGetState = null;
+              var cachedSelectCaptionById = null;
+              var moduleImportInFlight = false;
+
+              function tryResolveAetherModuleStores(){
+                if (typeof cachedPlayerGetState === 'function' && typeof cachedSubGetState === 'function') return;
+                if (moduleImportInFlight) return;
+                var scriptEl = document.querySelector('script[type="module"][src*="index-"]') ||
+                               document.querySelector('script[type="module"][src]');
+                if (!scriptEl || !scriptEl.src) return;
+                moduleImportInFlight = true;
+                import(scriptEl.src).then(function(mod){
+                  if (!mod) { moduleImportInFlight = false; return; }
+                  Object.keys(mod).forEach(function(k){
+                    try {
+                      var exp = mod[k];
+                      if (typeof exp === 'function' &&
+                          typeof exp.getState === 'function' &&
+                          typeof exp.setState === 'function' &&
+                          typeof exp.subscribe === 'function') {
+                        var st = exp.getState();
+                        if (st && typeof st === 'object') {
+                          if (!cachedPlayerGetState && 'captionList' in st && typeof st.translateCaption === 'function') {
+                            cachedPlayerGetState = exp.getState;
+                          } else if (!cachedSubGetState && 'preferredLanguages' in st && typeof st.updateStyling === 'function') {
+                            cachedSubGetState = exp.getState;
+                          }
+                        }
+                      }
+                    } catch(e){}
+                  });
+                  if (!cachedPlayerGetState) moduleImportInFlight = false;
+                }).catch(function(){
+                  moduleImportInFlight = false;
+                });
+              }
+
+              function findSelectCaptionCallback(){
+                if (typeof cachedSelectCaptionById === 'function') return cachedSelectCaptionById;
+                var rootEl = document.getElementById('root');
+                if (!rootEl) return null;
+                var fiberKey = Object.keys(rootEl).find(function(k){
+                  return k.indexOf('__reactContainer') === 0 || k.indexOf('_reactRootContainer') === 0;
+                });
+                if (!fiberKey) return null;
+                var rootFiber = rootEl[fiberKey];
+                if (rootFiber && rootFiber._internalRoot && rootFiber._internalRoot.current) {
+                  rootFiber = rootFiber._internalRoot.current;
+                }
+                var queue = [rootFiber];
+                var visited = 0;
+                while (queue.length > 0 && visited < 3000) {
+                  var f = queue.shift();
+                  if (!f) continue;
+                  visited++;
+                  var hook = f.memoizedState;
+                  var hGuard = 0;
+                  while (hook && hGuard < 40) {
+                    hGuard++;
+                    var ms = hook.memoizedState;
+                    // CRITICAL: Never invoke deps[0]() on React hooks! Only inspect the memoized callback reference.
+                    if (Array.isArray(ms) && ms.length === 2 && typeof ms[0] === 'function' && Array.isArray(ms[1]) && ms[1].length === 13) {
+                      cachedSelectCaptionById = ms[0];
+                      return cachedSelectCaptionById;
+                    }
+                    hook = hook.next;
+                  }
+                  if (f.child) queue.push(f.child);
+                  if (f.sibling) queue.push(f.sibling);
+                }
+                return null;
+              }
+
+              function findAetherStores(){
+                tryResolveAetherModuleStores();
+                var playerStore = null;
+                var subStore = null;
+                try {
+                  if (typeof cachedPlayerGetState === 'function') playerStore = cachedPlayerGetState();
+                  if (typeof cachedSubGetState === 'function') subStore = cachedSubGetState();
+                } catch(e){}
+                if (!playerStore && !subStore) return null;
+                var selectCaptionById = (playerStore && playerStore.status === 'playing') ? findSelectCaptionCallback() : cachedSelectCaptionById;
+                return { playerStore: playerStore, subStore: subStore, selectCaptionById: selectCaptionById };
+              }
+
+              function langLabel(code){
+                var c = String(code || '').toLowerCase();
+                var map = {
+                  vi: 'Tiếng Việt', vie: 'Tiếng Việt',
+                  en: 'Tiếng Anh', eng: 'Tiếng Anh',
+                  ja: 'Tiếng Nhật', jpn: 'Tiếng Nhật',
+                  ko: 'Tiếng Hàn', kor: 'Tiếng Hàn',
+                  zh: 'Tiếng Trung', zho: 'Tiếng Trung',
+                  fr: 'Tiếng Pháp', es: 'Tiếng Tây Ban Nha',
+                  de: 'Tiếng Đức', th: 'Tiếng Thái', ru: 'Tiếng Nga'
+                };
+                return map[c] || (c ? c.toUpperCase() : 'Phụ đề');
+              }
+
+              function selectSubById(stores, id){
+                if (!stores || !stores.playerStore) return false;
+                var ps = stores.playerStore;
+                if (id === 'off') {
+                  try {
+                    if (ps.clearTranslateTask) ps.clearTranslateTask();
+                    if (ps.setCaption) ps.setCaption(null);
+                    try { AnPinimeWebBridge.onAetherStatus('Đã tắt phụ đề'); } catch(e){}
+                  } catch(e){}
+                  return true;
+                }
+                if (typeof stores.selectCaptionById === 'function') {
+                  try {
+                    stores.selectCaptionById(id);
+                    return true;
+                  } catch(e){}
+                }
+                var item = (ps.captionList || []).find(function(x){ return String(x.id) === String(id); });
+                if (item && item.url && ps.setCaption) {
+                  fetch(item.url).then(function(r){ return r.text(); }).then(function(txt){
+                    ps.setCaption({ id: item.id, language: item.language || 'en', url: item.url, srtData: txt });
+                  }).catch(function(){});
+                  return true;
+                }
+                return false;
+              }
+
+              function translateSpecificCapToVi(ps, targetCap){
+                if (!ps || !targetCap || typeof ps.translateCaption !== 'function') return false;
+                try {
+                  if (ps.clearTranslateTask) ps.clearTranslateTask();
+                  ps.translateCaption(targetCap, 'vi');
+                  try {
+                    AnPinimeWebBridge.onAetherStatus('Đang dịch phụ đề (' + langLabel(targetCap.language) + ') sang Tiếng Việt...');
+                  } catch(e){}
+                  return true;
+                } catch(e){
+                  return false;
+                }
+              }
+
+              function triggerTranslateToVi(manual){
+                var stores = findAetherStores();
+                if (stores && stores.playerStore) {
+                  var ps = stores.playerStore;
+                  var list = ps.captionList || [];
+                  var selected = ps.caption && ps.caption.selected;
+                  var task = ps.caption && ps.caption.translateTask;
+                  if (task && task.targetLanguage === 'vi' && !task.error) {
+                    if (task.done && task.translatedCaption && ps.setCaption) {
+                      ps.setCaption(task.translatedCaption);
+                    }
+                    if (manual) {
+                      try { AnPinimeWebBridge.onAetherStatus(task.done ? 'Đã bật phụ đề dịch Tiếng Việt' : 'Đang dịch phụ đề sang Tiếng Việt...'); } catch(e){}
+                    }
+                    return true;
+                  }
+                  var matchedFromList = selected ? list.find(function(x){ return String(x.id) === String(selected.id); }) : null;
+                  var targetCap = matchedFromList || list.find(function(x){ return /^en/i.test(x.language || ''); }) || list[0] || selected;
+                  if (targetCap) {
+                    return translateSpecificCapToVi(ps, targetCap);
+                  }
+                  if (typeof ps.addExternalSubtitles === 'function' && !ps.isLoadingExternalSubtitles) {
+                    try { ps.addExternalSubtitles(); } catch(e){}
+                  }
+                }
+                if (manual) {
+                  try { AnPinimeWebBridge.onAetherStatus('Đang tìm phụ đề từ OpenSubtitles để dịch sang Tiếng Việt...'); } catch(e){}
+                }
+                return false;
+              }
+
+              function syncTranslatedCaptionState(ps){
+                if (!ps || !ps.caption) return;
+                var task = ps.caption.translateTask;
+                if (task && task.targetLanguage === 'vi' && task.done && task.translatedCaption) {
+                  var cur = ps.caption.selected;
+                  if (!cur || String(cur.id) !== String(task.translatedCaption.id)) {
+                    try {
+                      ps.setCaption(task.translatedCaption);
+                      AnPinimeWebBridge.onAetherStatus('Đã bật phụ đề dịch Tiếng Việt');
+                    } catch(e){}
+                  }
+                }
+              }
+
+              function checkAutoSubtitles(){
+                var stores = findAetherStores();
+                if (!stores || !stores.playerStore) return;
+                var ps = stores.playerStore;
+                if (ps.status === 'resume' && typeof ps.setStatus === 'function') {
+                  try { ps.setStatus('scraping'); } catch(e){}
+                  return;
+                }
+                if (ps.status === 'scrapeNotFound') {
+                  if (!scrapeFailReported) {
+                    scrapeFailReported = true;
+                    try { AnPinimeWebBridge.onAetherScrapeFailed(); } catch(e){}
+                  }
+                  return;
+                }
+                if (ps.status !== 'playing') {
+                  if (document.body) document.body.classList.remove('anpinime-playing');
+                  return;
+                }
+                if (document.body && !document.body.classList.contains('anpinime-playing')) {
+                  document.body.classList.add('anpinime-playing');
+                }
+                try {
+                  if (ps.interface && ps.interface.hovering !== 'not_hovering' && typeof ps.updateInterfaceHovering === 'function') {
+                    ps.updateInterfaceHovering('not_hovering');
+                  }
+                } catch(e){}
+                syncTranslatedCaptionState(ps);
+
+                var list = ps.captionList || [];
+                if (!list.length || ps.isLoadingExternalSubtitles) return;
+
+                var selected = ps.caption && ps.caption.selected;
+                var task = ps.caption && ps.caption.translateTask;
+                var viSub = list.find(function(x){ return /^vi/i.test(x.language || ''); });
+
+                if (viSub) {
+                  if (!autoSubProcessed) {
+                    autoSubProcessed = true;
+                    if (!selected || !/^vi/i.test(selected.language || '')) {
+                      selectSubById(stores, viSub.id);
+                      try { AnPinimeWebBridge.onAetherStatus('Đã tự chọn phụ đề Tiếng Việt'); } catch(e){}
+                    }
+                  }
+                  return;
+                }
+
+                var enSub = list.find(function(x){ return /^en/i.test(x.language || ''); }) || list[0];
+                if (!autoSubProcessed && enSub) {
+                  autoSubProcessed = true;
+                  if (!selected) {
+                    selectSubById(stores, enSub.id);
+                  }
+                  if (!autoTranslateTriggered && !task) {
+                    autoTranslateTriggered = true;
+                    translateSpecificCapToVi(ps, enSub);
+                  }
+                }
+              }
+
+              function buildTrackState(v){
+                var stores = findAetherStores();
+                var ps = stores && stores.playerStore;
+                var audio = [];
+                var subs = [
+                  { id: 'off', title: '🚫 Tắt phụ đề' },
+                  { id: '__aether_translate_vi__', title: '🇻🇳 Tự động dịch sang Tiếng Việt (Công cụ dịch Aether)' }
+                ];
+                var qualities = [];
+                var aid = '';
+                var sid = 'off';
+                var qid = '';
+
+                try {
+                  if (ps && Array.isArray(ps.audioTracks) && ps.audioTracks.length) {
+                    ps.audioTracks.forEach(function(t){
+                      var id = String(t.id);
+                      audio.push({ id: id, title: (t.label || langLabel(t.language)) + (t.language ? ' (' + t.language.toUpperCase() + ')' : '') });
+                    });
+                    if (ps.currentAudioTrack && ps.currentAudioTrack.id != null) {
+                      aid = String(ps.currentAudioTrack.id);
+                    }
+                  } else if (v && v.audioTracks) {
+                    Array.from(v.audioTracks).forEach(function(t, i){
+                      audio.push({ id: String(i), title: t.label || langLabel(t.language) || ('Âm thanh ' + (i + 1)) });
+                      if (t.enabled) aid = String(i);
+                    });
+                  }
+
+                  if (ps && Array.isArray(ps.captionList) && ps.captionList.length) {
+                    var selectedId = ps.caption && ps.caption.selected ? String(ps.caption.selected.id) : 'off';
+                    var task = ps.caption && ps.caption.translateTask;
+                    if (selectedId && selectedId !== 'off') sid = selectedId;
+
+                    var sorted = ps.captionList.slice().sort(function(a, b){
+                      var la = String(a.language || '').toLowerCase();
+                      var lb = String(b.language || '').toLowerCase();
+                      var wa = la === 'vi' ? 0 : (la === 'en' ? 1 : 2);
+                      var wb = lb === 'vi' ? 0 : (lb === 'en' ? 1 : 2);
+                      if (wa !== wb) return wa - wb;
+                      return 0;
+                    });
+
+                    // 1. Native Vietnamese subtitles first
+                    sorted.forEach(function(c, idx){
+                      if (!/^vi/i.test(c.language || '')) return;
+                      var cid = String(c.id);
+                      var srcTag = c.opensubtitles ? 'OpenSubtitles' : (c.source || 'Aether');
+                      subs.push({ id: cid, title: '🇻🇳 Tiếng Việt (Gốc) • ' + srcTag + ' #' + (idx + 1) });
+                    });
+
+                    // 2. Direct "Translate this subtitle to Vietnamese" options for foreign subtitles
+                    sorted.slice(0, 10).forEach(function(c, idx){
+                      if (/^vi/i.test(c.language || '')) return;
+                      var cid = String(c.id);
+                      var srcTag = c.opensubtitles ? 'OpenSubtitles' : (c.source || 'Aether');
+                      var trId = '__translate__:' + cid;
+                      var isTranslatingThis = task && task.targetCaption && String(task.targetCaption.id) === cid && task.targetLanguage === 'vi';
+                      var statusSuffix = isTranslatingThis ? (task.done ? ' [Đang bật bản dịch]' : ' [Đang dịch...]') : '';
+                      if (isTranslatingThis) {
+                        sid = trId;
+                      }
+                      subs.push({
+                        id: trId,
+                        title: '🌐 [Dịch sang Tiếng Việt] từ ' + langLabel(c.language) + ' • ' + srcTag + ' #' + (idx + 1) + statusSuffix
+                      });
+                    });
+
+                    // 3. Original foreign subtitles
+                    sorted.forEach(function(c, idx){
+                      if (/^vi/i.test(c.language || '')) return;
+                      var cid = String(c.id);
+                      var srcTag = c.opensubtitles ? 'OpenSubtitles' : (c.source || 'Aether');
+                      subs.push({ id: cid, title: langLabel(c.language) + ' (Gốc) • ' + srcTag + ' #' + (idx + 1) });
+                    });
+                  }
+
+                  if (ps && Array.isArray(ps.qualities) && ps.qualities.length) {
+                    ps.qualities.forEach(function(q){
+                      var qStr = String(q);
+                      qualities.push({ id: qStr, title: qStr === 'unknown' ? 'Mặc định' : (qStr + 'p') });
+                    });
+                    if (ps.currentQuality != null) {
+                      qid = String(ps.currentQuality);
+                    }
+                  }
+                } catch(e){}
+
+                return { audio: audio, subtitles: subs, qualities: qualities, audioID: aid, subtitleID: sid, qualityID: qid };
+              }
+
+              function handleTrackCommand(v, kind, id){
+                var stores = findAetherStores();
+                var ps = stores && stores.playerStore;
+                if (kind === 'subtitles') {
+                  if (id === '__aether_translate_vi__') {
+                    triggerTranslateToVi(true);
+                    return;
+                  }
+                  if (String(id).indexOf('__translate__:') === 0) {
+                    var targetId = String(id).substring('__translate__:'.length);
+                    var targetCap = ps && (ps.captionList || []).find(function(x){ return String(x.id) === targetId; });
+                    if (targetCap) {
+                      translateSpecificCapToVi(ps, targetCap);
+                    } else {
+                      triggerTranslateToVi(true);
+                    }
+                    return;
+                  }
+                  selectSubById(stores, id);
+                } else if (kind === 'audio') {
+                  if (ps && ps.display && typeof ps.display.changeAudioTrack === 'function') {
+                    ps.display.changeAudioTrack(id);
+                  } else if (v && v.audioTracks) {
+                    var idx = Number(id);
+                    Array.from(v.audioTracks).forEach(function(t, i){ t.enabled = (i === idx); });
+                  }
+                } else if (kind === 'quality') {
+                  if (!ps) return;
+                  if (id === 'auto') {
+                    if (typeof ps.enableAutomaticQuality === 'function') ps.enableAutomaticQuality();
+                  } else if (typeof ps.switchQuality === 'function') {
+                    var qMatch = (ps.qualities || []).find(function(q){ return String(q) === String(id); });
+                    ps.switchQuality(qMatch != null ? qMatch : id);
+                  }
+                }
+              }
+
+              function applySubtitleStyle(s){
+                if (!s) return;
+                var sp = Number(s.size) || 26;
+                var scale = sp <= 18 ? 0.85 : (sp <= 22 ? 1.0 : (sp >= 32 ? 1.45 : 1.2));
+                var stores = findAetherStores();
+                if (stores && stores.subStore && typeof stores.subStore.updateStyling === 'function') {
+                  try { stores.subStore.updateStyling({ size: scale }); } catch(e){}
+                }
+              }
+
+              function sendState(){
+                var v = activeVideo || document.querySelector('video');
+                checkAutoSubtitles();
+                try {
+                  AnPinimeWebBridge.onMediaState(JSON.stringify({
+                    time: v && isFinite(v.currentTime) ? v.currentTime : 0,
+                    duration: v && isFinite(v.duration) ? v.duration : 0,
+                    paused: v ? v.paused : true,
+                    buffering: v ? (!v.paused && v.readyState < 3) : true,
+                    rate: v ? (v.playbackRate || 1.0) : 1.0,
+                    tracks: buildTrackState(v)
+                  }));
+                } catch(e){}
+              }
+
+              function bindVideo(v){
+                if (!v) return false;
+                activeVideo = v;
+                v.setAttribute('playsinline', '');
+                if (!v.__anpinimeAetherBound) {
+                  v.__anpinimeAetherBound = true;
+                  v.addEventListener('loadedmetadata', function(){
+                    if (!initialSeekApplied && initialSeekTarget > 2 && isFinite(v.duration) && v.duration > initialSeekTarget) {
+                      initialSeekApplied = true;
+                      v.currentTime = initialSeekTarget;
+                    }
+                    if (v.paused && !v.__aaUserPaused) {
+                      var p = v.play(); if (p && p.catch) p.catch(function(){});
+                    }
+                  });
+                  v.addEventListener('playing', function(){
+                    if (!initialSeekApplied && initialSeekTarget > 2 && isFinite(v.duration) && v.duration > initialSeekTarget) {
+                      initialSeekApplied = true;
+                      v.currentTime = initialSeekTarget;
+                    }
+                    try { AnPinimeWebBridge.onPlayerReady(); } catch(e){}
+                    sendState();
+                  });
+                  ['timeupdate', 'durationchange', 'pause', 'ratechange'].forEach(function(ev){
+                    v.addEventListener(ev, function(){
+                      try { AnPinimeWebBridge.onProgress(v.currentTime || 0, isFinite(v.duration) ? v.duration : 0, v.paused); } catch(e){}
+                      sendState();
+                    });
+                  });
+                }
+                if (v.readyState >= 2) {
+                  if (v.paused && !v.__aaUserPaused) {
+                    var p = v.play(); if (p && p.catch) p.catch(function(){});
+                  }
+                  if (isFinite(v.duration) && v.duration > 0) {
+                    try { AnPinimeWebBridge.onPlayerReady(); } catch(e){}
+                    sendState();
+                  }
+                }
+                return true;
+              }
+
+              window.addEventListener('message', function(event){
+                var c = event.data;
+                if (!c || c.type !== 'AnPinimeCommand') return;
+                var v = activeVideo || document.querySelector('video');
+                try {
+                  switch(c.name){
+                    case 'play':
+                      if (v) { v.__aaUserPaused = false; var p = v.play(); if (p && p.catch) p.catch(function(){}); }
+                      break;
+                    case 'pause':
+                      if (v) { v.__aaUserPaused = true; v.pause(); }
+                      break;
+                    case 'seek':
+                      if (v && isFinite(v.duration)) {
+                        v.currentTime = Math.max(0, Math.min(Number(c.value) || 0, v.duration));
+                      }
+                      break;
+                    case 'rate':
+                      if (v) { v.playbackRate = Math.max(0.25, Math.min(Number(c.value) || 1.0, 2.0)); }
+                      break;
+                    case 'volume':
+                      if (v) { v.volume = Math.max(0, Math.min(Number(c.value) || 1.0, 1.0)); }
+                      break;
+                    case 'fit':
+                      if (v) { v.style.setProperty('object-fit', c.value === 1 ? 'cover' : 'contain', 'important'); }
+                      break;
+                    case 'track':
+                      handleTrackCommand(v, c.kind, c.id);
+                      break;
+                    case 'subtitleStyle':
+                      applySubtitleStyle(c.style);
+                      break;
+                    case 'translateVi':
+                      triggerTranslateToVi(true);
+                      break;
+                  }
+                  sendState();
+                } catch(e){}
+              });
+
+              function getMenuContainer(){
+                return document.querySelector('.popout-location .popout-wrapper') ||
+                       document.querySelector('[data-floating-ui-portal]') ||
+                       document.querySelector('.popout-location');
+              }
+
+              function getMenuFocusables(){
+                var container = getMenuContainer();
+                if (!container) return [];
+                var nodes = Array.from(container.querySelectorAll('button, a, input, select, [tabindex="0"], [role="button"]'));
+                return nodes.filter(function(el){
+                  var r = el.getBoundingClientRect();
+                  return r.width > 8 && r.height > 8 && window.getComputedStyle(el).visibility !== 'hidden' && window.getComputedStyle(el).display !== 'none';
+                });
+              }
+
+              function highlightMenuFocusable(idx){
+                var list = getMenuFocusables();
+                document.querySelectorAll('[data-anpinime-focus]').forEach(function(el){ el.removeAttribute('data-anpinime-focus'); });
+                if (!list.length) return null;
+                menuFocusIndex = ((idx % list.length) + list.length) % list.length;
+                var target = list[menuFocusIndex];
+                target.setAttribute('data-anpinime-focus', '1');
+                try { target.focus(); target.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch(e){}
+                return target;
+              }
+
+              window.__anpinimeOpenAetherMenu = function(route){
+                try {
+                  var buttons = Array.from(document.querySelectorAll('button, [tabindex="0"]'));
+                  var settingsBtn = buttons.find(function(b){
+                    var html = b.innerHTML || '';
+                    return html.indexOf('M19.14 12.94') >= 0 || html.indexOf('M20 4H4c-1.1') >= 0 || (b.className && String(b.className).indexOf('text-2xl') >= 0);
+                  });
+                  if (!getMenuFocusables().length) {
+                    var bottomBtns = buttons.filter(function(b){
+                      var r = b.getBoundingClientRect();
+                      return r.top > window.innerHeight * 0.65 && r.width > 20 && r.height > 20;
+                    });
+                    var targetBtn = bottomBtns[bottomBtns.length - 2] || bottomBtns[bottomBtns.length - 1] || settingsBtn;
+                    if (targetBtn) targetBtn.click();
+                  }
+                  setTimeout(function(){
+                    var items = getMenuFocusables();
+                    if (items.length > 0) {
+                      highlightMenuFocusable(0);
+                      try { AnPinimeWebBridge.onAetherMenuState(true); } catch(e){}
+                    } else {
+                      try {
+                        AnPinimeWebBridge.onAetherMenuState(false);
+                        AnPinimeWebBridge.onAetherStatus('Đang chờ thanh công cụ Aether...');
+                      } catch(e){}
+                    }
+                  }, 250);
+                } catch(e){}
+              };
+
+              window.__anpinimeAetherMenuMove = function(dir){
+                var list = getMenuFocusables();
+                if (!list.length) {
+                  try { AnPinimeWebBridge.onAetherMenuState(false); } catch(e){}
+                  return;
+                }
+                if (dir === 1 || dir === 'down' || dir === 'right') highlightMenuFocusable(menuFocusIndex + 1);
+                else if (dir === -1 || dir === 'up' || dir === 'left') highlightMenuFocusable(menuFocusIndex - 1);
+              };
+
+              window.__anpinimeAetherMenuActivate = function(){
+                var list = getMenuFocusables();
+                if (!list.length) {
+                  try { AnPinimeWebBridge.onAetherMenuState(false); } catch(e){}
+                  return;
+                }
+                var current = list[menuFocusIndex] || list[0];
+                if (current) {
+                  current.click();
+                  setTimeout(function(){
+                    var updated = getMenuFocusables();
+                    if (updated.length) highlightMenuFocusable(0);
+                    sendState();
+                  }, 220);
+                }
+              };
+
+              window.__anpinimeAetherMenuBack = function(){
+                var container = getMenuContainer();
+                if (container) {
+                  var backCandidate = container.querySelector('button svg, [tabindex="0"] svg');
+                  var firstClickable = getMenuFocusables()[0];
+                  if (firstClickable && firstClickable.getBoundingClientRect().width < 48 && firstClickable.querySelector('svg')) {
+                    firstClickable.click();
+                    setTimeout(function(){
+                      if (getMenuFocusables().length) {
+                        highlightMenuFocusable(0);
+                      } else {
+                        try { AnPinimeWebBridge.onAetherMenuState(false); } catch(e){}
+                      }
+                    }, 200);
+                    return;
+                  }
+                }
+                document.querySelectorAll('[data-anpinime-focus]').forEach(function(el){ el.removeAttribute('data-anpinime-focus'); });
+                var backdrop = document.querySelector('video') || document.body;
+                if (backdrop) {
+                  try { backdrop.click(); } catch(e){}
+                }
+                try { AnPinimeWebBridge.onAetherMenuState(false); } catch(e){}
+              };
+
+              function tick(){
+                injectAetherStyles();
+                var v = document.querySelector('video');
+                if (v) bindVideo(v);
+                sendState();
+              }
+
+              tick();
+              setInterval(tick, 1000);
+            })();
+        """.trimIndent()
     }
 
     private fun trySwitchToBackupServer(resumePosMs: Long): Boolean {
+        if (currentEpisode.source == ContentSource.AETHER) {
+            val domains = AetherCatalog.getActiveDomains(this)
+            val currentUrl = lastWebUrl.ifBlank { currentEpisode.url }
+            val currentHost = runCatching { Uri.parse(currentUrl).host?.lowercase().orEmpty() }.getOrDefault("")
+            val currentIdx = domains.indexOfFirst { d ->
+                runCatching { Uri.parse(d).host?.lowercase() == currentHost }.getOrDefault(false)
+            }
+            val nextDomain: String? = if (currentIdx >= 0 && currentIdx + 1 < domains.size) {
+                domains[currentIdx + 1]
+            } else null
+            if (nextDomain != null) {
+                val nextUrl = AetherCatalog.rewriteUrlToDomain(currentUrl, nextDomain)
+                lastWebUrl = nextUrl
+                val hostLabel = runCatching { Uri.parse(nextDomain).host }.getOrNull() ?: nextDomain
+                topServerText.text = "${currentEpisode.title} • Server dự phòng ($hostLabel)"
+                currentEpisode = currentEpisode.copy(
+                    url = nextUrl,
+                    directUrl = nextUrl,
+                    refererUrl = nextDomain
+                )
+                populateServerDrawer()
+                startWebFallback(nextUrl, nextDomain, resumePosMs)
+                return true
+            }
+            return false
+        }
         // Film4K's "Phần" denotes real seasons, not interchangeable servers.
         if (currentEpisode.source == ContentSource.FILM4K && currentEpisode.seasonNum > 0) return false
         val seasons = ArrayList<String>()
@@ -1707,6 +2770,21 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun showQualityPicker() {
         if (exoPlayer == null) {
+            if (fallbackWebView != null && webQualities.isNotEmpty()) {
+                val options = listOf(WebTrackItem("auto", "Tự động (Auto)", webQualities.none { it.selected })) + webQualities
+                val labels = options.map { it.label }
+                val selected = options.indexOfFirst { it.selected }.coerceAtLeast(0)
+                showSelection("Chất lượng video (Aether)", labels, selected) { idx ->
+                    val chosen = options.getOrNull(idx) ?: return@showSelection
+                    sendWebTrackCommand("quality", chosen.id)
+                    qualityBtn.text = if (chosen.id == "auto") "⚙ Chất lượng: Tự động" else "⚙ Chất lượng: ${chosen.label}"
+                }
+                return
+            }
+            if (currentEpisode.source == ContentSource.AETHER && fallbackWebView != null) {
+                showPlayerMessage("Chất lượng video", "Nguồn phát Aether hiện tại đang tự động tối ưu độ phân giải cao nhất (Auto FHD).")
+                return
+            }
             showPlayerMessage("Chất lượng", "Chưa có luồng native. Trình phát web hiện chưa hỗ trợ chọn chất lượng bằng app.")
             return
         }
@@ -1715,6 +2793,46 @@ class PlayerActivity : AppCompatActivity() {
             currentQualityMode = index
             applyQualityMode()
         }
+    }
+
+    private fun showPlaybackSpeedPicker() {
+        val speeds = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
+        val labels = listOf(
+            "0.75x (Chậm)",
+            "1.0x (Chuẩn)",
+            "1.25x (Nhanh vừa)",
+            "1.5x (Nhanh)",
+            "2.0x (Rất nhanh)"
+        )
+        val selected = speeds.indexOfFirst { kotlin.math.abs(it - currentPlaybackSpeed) < 0.05f }.coerceAtLeast(1)
+        showSelection("Tốc độ phát", labels, selected) { idx ->
+            val chosenSpeed = speeds.getOrElse(idx) { 1.0f }
+            currentPlaybackSpeed = chosenSpeed
+            speedBtn.text = String.format(Locale.US, "⏩ Tốc độ: %.2gx", chosenSpeed)
+            exoPlayer?.setPlaybackParameters(androidx.media3.common.PlaybackParameters(chosenSpeed))
+            sendWebCommand("rate", chosenSpeed.toDouble())
+        }
+    }
+
+    private fun triggerAetherVietnameseTranslation() {
+        if (fallbackWebView == null) {
+            showPlayerMessage("Dịch phụ đề", "Trình phát Aether chưa sẵn sàng.")
+            return
+        }
+        val command = JSONObject().put("type", "AnPinimeCommand").put("name", "translateVi")
+        fallbackWebView?.evaluateJavascript("window.postMessage($command, '*');", null)
+    }
+
+    private fun openAetherNativeMenu(route: String) {
+        val wv = fallbackWebView
+        if (wv == null) {
+            showPlayerMessage("Menu Aether", "Trình phát Aether chưa sẵn sàng.")
+            return
+        }
+        hideOsd()
+        wv.visibility = View.VISIBLE
+        wv.requestFocus()
+        wv.evaluateJavascript("window.__anpinimeOpenAetherMenu && window.__anpinimeOpenAetherMenu('$route');", null)
     }
 
     private fun applyQualityMode() {
@@ -1756,29 +2874,37 @@ class PlayerActivity : AppCompatActivity() {
             if (fallbackWebView != null) {
                 if (type == C.TRACK_TYPE_AUDIO) {
                     if (webAudioTracks.isEmpty()) {
-                        showPlayerMessage("Âm thanh", "Trình phát web chưa phát hiện track âm thanh riêng.")
+                        showPlayerMessage("Âm thanh", "Nguồn phát hiện tại chỉ có 1 luồng âm thanh mặc định.")
                         return
                     }
                     val labels = webAudioTracks.map { it.label }
                     val selected = webAudioTracks.indexOfFirst { it.selected }.coerceAtLeast(0)
-                    showSelection("Âm thanh (Trình phát Web)", labels, selected) { idx ->
+                    showSelection("Âm thanh", labels, selected) { idx ->
                         val chosen = webAudioTracks.getOrNull(idx) ?: return@showSelection
                         sendWebTrackCommand("audio", chosen.id)
                     }
                 } else {
-                    if (webSubtitleTracks.isEmpty()) {
+                    val effectiveSubs = webSubtitleTracks.ifEmpty {
+                        if (isAetherEpisode()) {
+                            listOf(
+                                WebTrackItem("off", "🚫 Tắt phụ đề", false),
+                                WebTrackItem("__aether_translate_vi__", "🇻🇳 Tự động dịch sang Tiếng Việt (Công cụ dịch Aether)", true)
+                            )
+                        } else emptyList()
+                    }
+                    if (effectiveSubs.isEmpty()) {
                         showPlayerMessage("Phụ đề", "Trình phát web chưa phát hiện phụ đề rời hoặc phụ đề đã ghi sẵn trong hình.")
                         return
                     }
-                    val labels = webSubtitleTracks.map { it.label }
-                    val selected = webSubtitleTracks.indexOfFirst { it.selected }.coerceAtLeast(0)
-                    showSelection("Phụ đề (Trình phát Web)", labels, selected) { idx ->
-                        val chosen = webSubtitleTracks.getOrNull(idx) ?: return@showSelection
+                    val labels = effectiveSubs.map { it.label }
+                    val selected = effectiveSubs.indexOfFirst { it.selected }.coerceAtLeast(0)
+                    showSelection("Phụ đề & Dịch Tiếng Việt (Aether / OpenSubtitles)", labels, selected) { idx ->
+                        val chosen = effectiveSubs.getOrNull(idx) ?: return@showSelection
                         sendWebTrackCommand("subtitles", chosen.id)
                     }
                 }
             } else {
-                showPlayerMessage(title, "Chưa có danh sách track. Hãy chờ video phát bằng trình phát native.")
+                showPlayerMessage(title, "Chưa có danh sách track. Hãy chờ video phát.")
             }
             return
         }
