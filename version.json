@@ -1,6 +1,6 @@
 {
-  "versionCode": 9,
-  "versionName": "1.6.1",
-  "apkUrl": "https://github.com/thuyan1510/AnPinime-Projector/releases/download/latest/AnPinime-K670Pro.apk",
-  "changelog": "Bản cập nhật v1.6.1: Tối ưu banner vừa vặn máy chiếu, tải phim tự động không cần bấm xem thêm, sửa nguồn Premium VIP, tìm kiếm tức thì và phím Back mở menu nhớ tab."
+  "versionCode": 11,
+  "versionName": "1.7.2",
+  "apkUrl": "https://github.com/thuyan1510/anpinime-dl/releases/download/v1.7.2/AnPinime-K670Pro.apk",
+  "changelog": "Bản cập nhật v1.7.2: Tích hợp nguồn Aether (Nguồn 2), hỗ trợ tự động kiểm tra và cập nhật trực tiếp trong ứng dụng (OTA), sửa lỗi đen hình trên GPU máy chiếu K670 Pro, kích hoạt chọn phụ đề và dịch Tiếng Việt tự động."
 }

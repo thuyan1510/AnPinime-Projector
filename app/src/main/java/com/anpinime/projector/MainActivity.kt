@@ -154,6 +154,7 @@ class MainActivity : AppCompatActivity() {
         loadHomeData()
 
         uiScope.launch {
+            kotlinx.coroutines.delay(2500L)
             AppUpdateManager.checkUpdate(this@MainActivity) { info ->
                 if (!isFinishing && !isDestroyed) {
                     AppUpdateManager.showUpdateDialog(this@MainActivity, info)
@@ -504,6 +505,10 @@ class MainActivity : AppCompatActivity() {
 
         addMenuButton("refresh", "🔄  Làm mới") {
             loadHomeData()
+        }
+
+        addMenuButton("settings_update", "🚀  Cập nhật ứng dụng") {
+            AppUpdateManager.checkUpdateManual(this)
         }
 
         val hintTv = TextView(this).apply {
