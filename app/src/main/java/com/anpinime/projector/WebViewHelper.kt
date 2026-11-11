@@ -40,6 +40,47 @@ import kotlin.coroutines.resume
 object WebViewHelper {
 
     private const val PREFS_COOKIES = "anpinime_cookies"
+    const val MIN_AETHER_CHROME_MAJOR = 80
+
+    data class WebViewCompatibility(
+        val isSupported: Boolean,
+        val chromeMajorVersion: Int,
+        val message: String = ""
+    )
+
+    fun parseChromeMajorVersion(userAgentString: String?): Int {
+        if (userAgentString.isNullOrBlank()) return 0
+        val match = Regex("""Chrome/(\d+)""", RegexOption.IGNORE_CASE).find(userAgentString)
+        return match?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+    }
+
+    fun checkAetherWebViewCompatibility(context: Context): WebViewCompatibility {
+        val rawUa = try {
+            WebSettings.getDefaultUserAgent(context)
+        } catch (_: Throwable) {
+            null
+        }
+        if (rawUa.isNullOrBlank()) {
+            return WebViewCompatibility(
+                isSupported = false,
+                chromeMajorVersion = 0,
+                message = "Không tìm thấy Android System WebView trên thiết bị để chạy trình phát Aether.\nVui lòng cài đặt/bật Android System WebView hoặc đổi sang Nguồn 1 / Nguồn 3."
+            )
+        }
+        val major = parseChromeMajorVersion(rawUa)
+        if (major in 1 until MIN_AETHER_CHROME_MAJOR) {
+            return WebViewCompatibility(
+                isSupported = false,
+                chromeMajorVersion = major,
+                message = "WebView hệ thống trên máy chiếu quá cũ (Chrome $major, cần >= $MIN_AETHER_CHROME_MAJOR) nên không tương thích với JavaScript của Aether.\nVui lòng cập nhật Android System WebView hoặc đổi sang Nguồn 1 / Nguồn 3."
+            )
+        }
+        return WebViewCompatibility(
+            isSupported = true,
+            chromeMajorVersion = major,
+            message = ""
+        )
+    }
 
     @Volatile
     var userAgent: String =

@@ -67,7 +67,20 @@ class MainActivity : AppCompatActivity() {
         WebViewHelper.registerActivity(this)
 
         val prefs = getSharedPreferences("anpinime_projector", Context.MODE_PRIVATE)
-        currentSource = ContentSource.fromId(prefs.getString("source", ContentSource.FILM4K.id))
+        val savedSourceId = prefs.getString("source", ContentSource.FILM4K.id)
+        currentSource = ContentSource.fromId(savedSourceId)
+        if (savedSourceId.equals("phim4k", ignoreCase = true)) {
+            prefs.edit().putString("source", ContentSource.AETHER.id).apply()
+        }
+        val legacyPhim4kHistory = prefs.getString("search_history_phim4k_json", null)
+        if (!legacyPhim4kHistory.isNullOrBlank()) {
+            val aetherHistoryKey = SourceIsolation.historyKey(ContentSource.AETHER)
+            val editor = prefs.edit()
+            if (prefs.getString(aetherHistoryKey, null).isNullOrBlank()) {
+                editor.putString(aetherHistoryKey, legacyPhim4kHistory)
+            }
+            editor.remove("search_history_phim4k_json").apply()
+        }
 
         val root = FrameLayout(this).apply {
             setBackgroundColor(UiHelper.COLOR_BG)
@@ -248,7 +261,7 @@ class MainActivity : AppCompatActivity() {
                 "schedule" -> sidebarButtons["tab_schedule"]
                 else -> when (currentSource) {
                     ContentSource.FILM4K -> sidebarButtons["src_film4k"]
-                    ContentSource.PHIM4K -> sidebarButtons["src_phim4k"]
+                    ContentSource.AETHER -> sidebarButtons["src_aether"]
                     ContentSource.KKPHIM -> sidebarButtons["src_kkphim"]
                     ContentSource.ANIME -> sidebarButtons["src_anime"]
                 }
@@ -473,8 +486,8 @@ class MainActivity : AppCompatActivity() {
             switchSource(ContentSource.FILM4K)
         }
 
-        addMenuButton("src_phim4k", "⚡  Nguồn 2 · Phim4K") {
-            switchSource(ContentSource.PHIM4K)
+        addMenuButton("src_aether", "⚡  Nguồn 2 · Aether") {
+            switchSource(ContentSource.AETHER)
         }
 
         addMenuButton("src_kkphim", "🍿  Nguồn 3 · KKPhim") {
@@ -507,7 +520,7 @@ class MainActivity : AppCompatActivity() {
     private fun switchSource(newSource: ContentSource) {
         val srcKey = when (newSource) {
             ContentSource.FILM4K -> "src_film4k"
-            ContentSource.PHIM4K -> "src_phim4k"
+            ContentSource.AETHER -> "src_aether"
             ContentSource.KKPHIM -> "src_kkphim"
             ContentSource.ANIME -> "src_anime"
         }
@@ -560,7 +573,7 @@ class MainActivity : AppCompatActivity() {
         styleBtn("tab_browse", currentTab == "browse")
         styleBtn("tab_schedule", currentTab == "schedule")
         styleBtn("src_film4k", currentSource == ContentSource.FILM4K)
-        styleBtn("src_phim4k", currentSource == ContentSource.PHIM4K)
+        styleBtn("src_aether", currentSource == ContentSource.AETHER)
         styleBtn("src_kkphim", currentSource == ContentSource.KKPHIM)
         styleBtn("src_anime", currentSource == ContentSource.ANIME)
     }

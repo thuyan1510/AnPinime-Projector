@@ -6,12 +6,17 @@ import java.util.Calendar
 
 enum class ContentSource(val id: String, val title: String, val subtitle: String, val isMovie: Boolean) {
     FILM4K("film4k", "Nguồn phim 1", "Nguồn 1 · NguonC", true),
-    PHIM4K("phim4k", "Nguồn phim 2", "Nguồn 2 · Phim4K", true),
+    AETHER("aether", "Nguồn 2 · Aether", "Nguồn 2 · Aether", true),
     KKPHIM("kkphim", "Nguồn phim 3", "Nguồn 3 · KKPhim", true),
     ANIME("anime", "AnimeVietsub", "AnimeVietsub", false);
 
     companion object {
-        fun fromId(id: String?): ContentSource = entries.firstOrNull { it.id == id } ?: FILM4K
+        fun fromId(id: String?): ContentSource {
+            if (id.isNullOrBlank()) return FILM4K
+            val normalized = id.trim().lowercase()
+            if (normalized == "phim4k" || normalized == "aether") return AETHER
+            return entries.firstOrNull { it.id.equals(normalized, ignoreCase = true) } ?: FILM4K
+        }
     }
 }
 
@@ -117,7 +122,7 @@ data class Episode(
     val season: String,
     val qualityBadge: String = "",
     val source: ContentSource = ContentSource.FILM4K,
-    val playbackKind: String = "phim4k", // "film4k", "phim4k", "phim4k_core", "catalog_episode", "direct", "anime"
+    val playbackKind: String = "aether_web", // "film4k", "aether_web", "catalog_episode", "direct", "anime"
     val slug: String = "",
     val seasonNum: Int = -1,
     val episodeNum: Int = -1,
@@ -171,7 +176,9 @@ data class Episode(
             season = o.optString("season"),
             qualityBadge = o.optString("qualityBadge"),
             source = ContentSource.fromId(o.optString("source")),
-            playbackKind = o.optString("playbackKind", "phim4k"),
+            playbackKind = o.optString("playbackKind", "aether_web").let {
+                if (it == "phim4k" || it == "phim4k_core") "aether_web" else it
+            },
             slug = o.optString("slug"),
             seasonNum = o.optInt("seasonNum", -1),
             episodeNum = o.optInt("episodeNum", -1),

@@ -314,10 +314,11 @@ class DetailActivity : AppCompatActivity() {
         }
         rightCol.addView(playRow)
 
-        // Server Selector Bar
+        // Server / Season Selector Bar
         if (seasons.size > 1) {
+            val isMultiSeasonShow = seasons.any { it.startsWith("Mùa", ignoreCase = true) }
             val svTitle = TextView(this).apply {
-                text = "Chọn Máy Chủ (Server):"
+                text = if (isMultiSeasonShow) "Chọn Mùa Phim (Season):" else "Chọn Máy Chủ (Server):"
                 setTextColor(Color.WHITE)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
                 typeface = Typeface.DEFAULT_BOLD

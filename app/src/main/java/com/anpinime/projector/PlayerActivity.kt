@@ -66,13 +66,27 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import java.net.URLEncoder
 import java.util.Locale
 
 @OptIn(UnstableApi::class)
 class PlayerActivity : AppCompatActivity() {
+
+    companion object {
+        private val aetherJsCache = ConcurrentHashMap<String, String>()
+        private val aetherHttpClient by lazy {
+            OkHttpClient.Builder()
+                .connectTimeout(12, TimeUnit.SECONDS)
+                .readTimeout(15, TimeUnit.SECONDS)
+                .build()
+        }
+    }
 
     private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var resolveJob: Job? = null
@@ -1277,8 +1291,9 @@ class PlayerActivity : AppCompatActivity() {
 
         val wv = try {
             WebView(this).apply {
-                setBackgroundColor(Color.BLACK)
-                visibility = if (aetherMode) View.VISIBLE else View.INVISIBLE
+                setBackgroundColor(Color.TRANSPARENT)
+                setLayerType(View.LAYER_TYPE_HARDWARE, null)
+                visibility = View.INVISIBLE
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1320,8 +1335,6 @@ class PlayerActivity : AppCompatActivity() {
                     // CRITICAL: Never extract/hijack Aether streams into ExoPlayer so Aether's
                     // subtitles, OpenSubtitles scraper, and built-in Vietnamese translator stay active!
                     if (aetherMode) {
-                        wv.visibility = View.VISIBLE
-                        loadingOverlay.visibility = View.GONE
                         return@post
                     }
                     if (streamUrl.startsWith("http", ignoreCase = true) && exoPlayer == null) {
@@ -1387,7 +1400,7 @@ class PlayerActivity : AppCompatActivity() {
                 if (!position.isFinite() || !duration.isFinite()) return
                 mainHandler.post {
                     if (fallbackWebView !== wv) return@post
-                    if (duration > 0.5 && wv.visibility != View.VISIBLE) {
+                    if (duration > 0.5 && position > 0.0 && loadingOverlay.visibility == View.VISIBLE) {
                         wv.visibility = View.VISIBLE
                         loadingOverlay.visibility = View.GONE
                     }
@@ -1420,11 +1433,12 @@ class PlayerActivity : AppCompatActivity() {
                 mainHandler.post {
                     if (fallbackWebView !== wv) return@post
                     aetherStatusNote = statusText.trim()
-                    val baseLabel = "${currentEpisode.title} • ${currentEpisode.season}"
-                    topServerText.text = if (aetherStatusNote.isNotEmpty()) {
-                        "$baseLabel • $aetherStatusNote"
-                    } else {
-                        baseLabel
+                    if (aetherStatusNote.isNotEmpty()) {
+                        if (loadingOverlay.visibility == View.VISIBLE) {
+                            loadingText.text = aetherStatusNote
+                        }
+                        val baseLabel = "${currentEpisode.title} • ${currentEpisode.season}"
+                        topServerText.text = "$baseLabel • $aetherStatusNote"
                     }
                 }
             }
@@ -1872,10 +1886,43 @@ class PlayerActivity : AppCompatActivity() {
                         java.io.ByteArrayInputStream(configAndBridge.toByteArray(Charsets.UTF_8))
                     )
                 }
+
+                // Patch Aether index bundle to expose player, subtitle & preference stores directly to window
+                if (aetherMode && Regex("""assets/index-[^/]+\.js""").containsMatchIn(url)) {
+                    val patchedJs = aetherJsCache[url] ?: run {
+                        try {
+                            val req = Request.Builder()
+                                .url(url)
+                                .header("User-Agent", CatalogService.USER_AGENT)
+                                .build()
+                            val resp = aetherHttpClient.newCall(req).execute()
+                            if (resp.isSuccessful) {
+                                val body = resp.body?.string().orEmpty()
+                                if (body.isNotBlank()) {
+                                    val exportHook = "\n;try{window.__anpinimePlayerStore=I;window.__anpinimeSubStore=ve;window.__anpinimePrefStore=ne;if(ne&&ne.getState&&ne.getState().setEnableThumbnails){ne.getState().setEnableThumbnails(false);ne.getState().setEnableLowPerformanceMode(true);}}catch(e){console.error('AnPinime store injection error:',e);}\n"
+                                    val patched = body + exportHook
+                                    aetherJsCache[url] = patched
+                                    patched
+                                } else null
+                            } else null
+                        } catch (t: Throwable) {
+                            android.util.Log.e("PlayerActivity", "Failed to fetch and patch Aether index.js", t)
+                            null
+                        }
+                    }
+                    if (patchedJs != null) {
+                        return WebResourceResponse(
+                            "application/javascript",
+                            "UTF-8",
+                            java.io.ByteArrayInputStream(patchedJs.toByteArray(Charsets.UTF_8))
+                        )
+                    }
+                }
+
                 // Do NOT hijack Aether streams into ExoPlayer so Aether's subtitles and built-in Vietnamese translator remain intact.
                 if (!aetherMode && request?.method == "GET" && Regex("(?i)\\.(m3u8|mp4)([?#]|$)").containsMatchIn(url) &&
                     !url.contains("/ads/", true)) {
-                    val requestHeaders = request?.requestHeaders.orEmpty()
+                    val requestHeaders = request.requestHeaders.orEmpty()
                     mainHandler.post {
                         if (fallbackWebView === wv && url !in attemptedStreamUrls && exoPlayer == null) {
                             val headers = requestHeaders.filterKeys { it.equals("Referer", true) || it.equals("Origin", true) || it.equals("User-Agent", true) }
@@ -1889,27 +1936,11 @@ class PlayerActivity : AppCompatActivity() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                 super.onPageStarted(view, url, favicon)
                 view?.evaluateJavascript(activeScript, null)
-                if (aetherMode) {
-                    mainHandler.post {
-                        if (fallbackWebView === view) {
-                            wv.visibility = View.VISIBLE
-                            loadingOverlay.visibility = View.GONE
-                        }
-                    }
-                }
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 view?.evaluateJavascript(activeScript, null)
-                if (aetherMode) {
-                    mainHandler.post {
-                        if (fallbackWebView === view) {
-                            wv.visibility = View.VISIBLE
-                            loadingOverlay.visibility = View.GONE
-                        }
-                    }
-                }
                 val timeoutMs = if (aetherMode) 45_000L else 22_000L
                 mainHandler.postDelayed({
                     val notStarted = if (aetherMode) webDurationMs <= 0L else view?.visibility != View.VISIBLE
@@ -1941,7 +1972,8 @@ class PlayerActivity : AppCompatActivity() {
         }
 
         fallbackWebView = wv
-        videoFrame.addView(wv, 0)
+        videoFrame.addView(wv)
+        videoFrame.bringChildToFront(wv)
         if (aetherMode) {
             wv.loadUrl(webUrl)
         } else {
@@ -2006,9 +2038,30 @@ class PlayerActivity : AppCompatActivity() {
                   writable: true,
                   configurable: true
                 });
+
+                // Neutralize secondary <video> elements (such as Aether's seekbar thumbnail generator class o0)
+                // Projector SoC MediaCodec hardware decoders allow only 1 concurrent session; a second video steals the decoder!
+                var _origCreateElement = document.createElement.bind(document);
+                document.createElement = function(tagName, options) {
+                  var el = _origCreateElement(tagName, options);
+                  if (String(tagName).toLowerCase() === 'video') {
+                    setTimeout(function() {
+                      if (el.id !== 'video-element') {
+                        try {
+                          el.pause();
+                          el.removeAttribute('src');
+                          el.src = '';
+                          el.load = function(){};
+                          el.play = function(){ return Promise.resolve(); };
+                        } catch(e){}
+                      }
+                    }, 0);
+                  }
+                  return el;
+                };
               } catch(e){}
 
-              // 2. Seed valid Zustand persist state ({ state: {...}, version: 0 }) for Subtitles & Onboarding
+              // 2. Seed valid Zustand persist state ({ state: {...}, version: 0 }) for Subtitles, Preferences & Onboarding
               try {
                 var subKey = '__MW::subtitles';
                 var rawSub = localStorage.getItem(subKey);
@@ -2039,6 +2092,22 @@ class PlayerActivity : AppCompatActivity() {
                     version: 0
                   }));
                 }
+
+                var prefKey = '__MW::preferences';
+                var rawPref = localStorage.getItem(prefKey);
+                var parsedPref = null;
+                try { parsedPref = rawPref ? JSON.parse(rawPref) : null; } catch(e){}
+                var prefState = (parsedPref && parsedPref.state) || {};
+                prefState.enableThumbnails = false;
+                prefState.enableLowPerformanceMode = true;
+                prefState.videoBrightness = 100;
+                prefState.videoContrast = 100;
+                prefState.videoSaturation = 100;
+                localStorage.setItem(prefKey, JSON.stringify({
+                  state: prefState,
+                  version: 0
+                }));
+
                 localStorage.setItem('__MW::onboarding', JSON.stringify({
                   state: { completed: true },
                   version: 0
@@ -2060,6 +2129,9 @@ class PlayerActivity : AppCompatActivity() {
                 st.textContent =
                   'html, body { background: #000 !important; overflow: hidden !important; margin: 0 !important; padding: 0 !important; user-select: none !important; }' +
                   'a[href="/"], a[href*="/browse"] { opacity: 0 !important; pointer-events: none !important; }' +
+                  '#video-element, video { filter: none !important; -webkit-filter: none !important; background: transparent !important; background-color: transparent !important; position: fixed !important; inset: 0 !important; width: 100vw !important; height: 100vh !important; object-fit: contain !important; z-index: 1 !important; }' +
+                  'body:not(.anpinime-playing) #root { opacity: 0 !important; pointer-events: none !important; visibility: hidden !important; }' +
+                  'body.anpinime-playing #root { opacity: 1 !important; visibility: visible !important; }' +
                   'body.anpinime-playing div.bg-gradient-to-b, ' +
                   'body.anpinime-playing div.bg-gradient-to-t, ' +
                   'body.anpinime-playing div.pointer-events-auto.z-10, ' +
@@ -2070,12 +2142,23 @@ class PlayerActivity : AppCompatActivity() {
                 document.head.appendChild(st);
               }
 
+              function stripVideoFilter(vid){
+                if (!vid) return;
+                try {
+                  vid.style.setProperty('filter', 'none', 'important');
+                  vid.style.setProperty('-webkit-filter', 'none', 'important');
+                  vid.style.setProperty('background', 'transparent', 'important');
+                  vid.style.setProperty('background-color', 'transparent', 'important');
+                } catch(e){}
+              }
+
               var cachedPlayerGetState = null;
               var cachedSubGetState = null;
               var cachedSelectCaptionById = null;
               var moduleImportInFlight = false;
 
               function tryResolveAetherModuleStores(){
+                if (window.__anpinimePlayerStore && window.__anpinimeSubStore) return;
                 if (typeof cachedPlayerGetState === 'function' && typeof cachedSubGetState === 'function') return;
                 if (moduleImportInFlight) return;
                 var scriptEl = document.querySelector('script[type="module"][src*="index-"]') ||
@@ -2145,16 +2228,34 @@ class PlayerActivity : AppCompatActivity() {
               }
 
               function findAetherStores(){
-                tryResolveAetherModuleStores();
-                var playerStore = null;
-                var subStore = null;
+                var pStore = window.__anpinimePlayerStore;
+                var sStore = window.__anpinimeSubStore;
+                if (!pStore || !sStore) {
+                  tryResolveAetherModuleStores();
+                }
+                var playerState = null;
+                var subState = null;
                 try {
-                  if (typeof cachedPlayerGetState === 'function') playerStore = cachedPlayerGetState();
-                  if (typeof cachedSubGetState === 'function') subStore = cachedSubGetState();
+                  if (pStore && typeof pStore.getState === 'function') {
+                    playerState = pStore.getState();
+                  } else if (typeof cachedPlayerGetState === 'function') {
+                    playerState = cachedPlayerGetState();
+                  }
+                  if (sStore && typeof sStore.getState === 'function') {
+                    subState = sStore.getState();
+                  } else if (typeof cachedSubGetState === 'function') {
+                    subState = cachedSubGetState();
+                  }
                 } catch(e){}
-                if (!playerStore && !subStore) return null;
-                var selectCaptionById = (playerStore && playerStore.status === 'playing') ? findSelectCaptionCallback() : cachedSelectCaptionById;
-                return { playerStore: playerStore, subStore: subStore, selectCaptionById: selectCaptionById };
+                if (!playerState && !subState) return null;
+                var selectCaptionById = (playerState && playerState.status === 'playing') ? findSelectCaptionCallback() : cachedSelectCaptionById;
+                return {
+                  playerStore: playerState,
+                  subStore: subState,
+                  rawPlayerStore: pStore,
+                  rawSubStore: sStore,
+                  selectCaptionById: selectCaptionById
+                };
               }
 
               function langLabel(code){
@@ -2174,10 +2275,13 @@ class PlayerActivity : AppCompatActivity() {
               function selectSubById(stores, id){
                 if (!stores || !stores.playerStore) return false;
                 var ps = stores.playerStore;
+                var subState = stores.subStore;
                 if (id === 'off') {
                   try {
                     if (ps.clearTranslateTask) ps.clearTranslateTask();
                     if (ps.setCaption) ps.setCaption(null);
+                    if (subState && subState.setLanguage) subState.setLanguage(null);
+                    if (subState && subState.setLastSelectedCaptionId) subState.setLastSelectedCaptionId(null);
                     try { AnPinimeWebBridge.onAetherStatus('Đã tắt phụ đề'); } catch(e){}
                   } catch(e){}
                   return true;
@@ -2189,11 +2293,24 @@ class PlayerActivity : AppCompatActivity() {
                   } catch(e){}
                 }
                 var item = (ps.captionList || []).find(function(x){ return String(x.id) === String(id); });
-                if (item && item.url && ps.setCaption) {
-                  fetch(item.url).then(function(r){ return r.text(); }).then(function(txt){
-                    ps.setCaption({ id: item.id, language: item.language || 'en', url: item.url, srtData: txt });
-                  }).catch(function(){});
-                  return true;
+                if (item) {
+                  try {
+                    if (subState && subState.setLanguage) subState.setLanguage(item.language);
+                    if (subState && subState.setLastSelectedCaptionId) subState.setLastSelectedCaptionId(item.id);
+                    if (subState && subState.setSource) subState.setSource(item.source || null);
+                  } catch(e){}
+                  if (item.url && ps.setCaption) {
+                    fetch(item.url).then(function(r){ return r.text(); }).then(function(txt){
+                      ps.setCaption({ id: item.id, language: item.language || 'en', url: item.url, srtData: txt });
+                      try { AnPinimeWebBridge.onAetherStatus('Đã chọn phụ đề ' + langLabel(item.language)); } catch(e){}
+                    }).catch(function(){
+                      ps.setCaption({ id: item.id, language: item.language || 'en', url: item.url, srtData: '' });
+                    });
+                    return true;
+                  } else if (ps.setCaption) {
+                    ps.setCaption(item);
+                    return true;
+                  }
                 }
                 return false;
               }
@@ -2265,6 +2382,11 @@ class PlayerActivity : AppCompatActivity() {
                   try { ps.setStatus('scraping'); } catch(e){}
                   return;
                 }
+                if (ps.status === 'scraping' || ps.status === 'indexing') {
+                  if (document.body) document.body.classList.remove('anpinime-playing');
+                  try { AnPinimeWebBridge.onAetherStatus('Đang tìm nguồn phát tốt nhất từ máy chủ Aether...'); } catch(e){}
+                  return;
+                }
                 if (ps.status === 'scrapeNotFound') {
                   if (!scrapeFailReported) {
                     scrapeFailReported = true;
@@ -2287,7 +2409,13 @@ class PlayerActivity : AppCompatActivity() {
                 syncTranslatedCaptionState(ps);
 
                 var list = ps.captionList || [];
-                if (!list.length || ps.isLoadingExternalSubtitles) return;
+                if (!list.length) {
+                  if (typeof ps.addExternalSubtitles === 'function' && !ps.isLoadingExternalSubtitles) {
+                    try { ps.addExternalSubtitles(); } catch(e){}
+                  }
+                  return;
+                }
+                if (ps.isLoadingExternalSubtitles) return;
 
                 var selected = ps.caption && ps.caption.selected;
                 var task = ps.caption && ps.caption.translateTask;
@@ -2474,9 +2602,15 @@ class PlayerActivity : AppCompatActivity() {
                 if (!v) return false;
                 activeVideo = v;
                 v.setAttribute('playsinline', '');
+                stripVideoFilter(v);
                 if (!v.__anpinimeAetherBound) {
                   v.__anpinimeAetherBound = true;
+                  try {
+                    var fObs = new MutationObserver(function(){ stripVideoFilter(v); });
+                    fObs.observe(v, { attributes: true, attributeFilter: ['style', 'class'] });
+                  } catch(e){}
                   v.addEventListener('loadedmetadata', function(){
+                    stripVideoFilter(v);
                     if (!initialSeekApplied && initialSeekTarget > 2 && isFinite(v.duration) && v.duration > initialSeekTarget) {
                       initialSeekApplied = true;
                       v.currentTime = initialSeekTarget;
@@ -2486,6 +2620,7 @@ class PlayerActivity : AppCompatActivity() {
                     }
                   });
                   v.addEventListener('playing', function(){
+                    stripVideoFilter(v);
                     if (!initialSeekApplied && initialSeekTarget > 2 && isFinite(v.duration) && v.duration > initialSeekTarget) {
                       initialSeekApplied = true;
                       v.currentTime = initialSeekTarget;
@@ -2495,6 +2630,7 @@ class PlayerActivity : AppCompatActivity() {
                   });
                   ['timeupdate', 'durationchange', 'pause', 'ratechange'].forEach(function(ev){
                     v.addEventListener(ev, function(){
+                      stripVideoFilter(v);
                       try { AnPinimeWebBridge.onProgress(v.currentTime || 0, isFinite(v.duration) ? v.duration : 0, v.paused); } catch(e){}
                       sendState();
                     });
@@ -2663,8 +2799,11 @@ class PlayerActivity : AppCompatActivity() {
 
               function tick(){
                 injectAetherStyles();
-                var v = document.querySelector('video');
-                if (v) bindVideo(v);
+                var v = document.getElementById('video-element') || document.querySelector('video');
+                if (v) {
+                  stripVideoFilter(v);
+                  bindVideo(v);
+                }
                 sendState();
               }
 
