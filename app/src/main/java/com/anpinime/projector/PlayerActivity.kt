@@ -814,7 +814,7 @@ class PlayerActivity : AppCompatActivity() {
     private fun populateServerDrawer() {
         serverDrawerRow.removeAllViews()
         if (isAetherEpisode()) {
-            // Offer native Aether domain switching chips inside the player drawer for both Movies & TV
+            // Clean, non-duplicated Aether servers drawer: Server 1 (Auto), Server 2 (Backup 1), Server 3 (Backup 2)
             val domains = AetherCatalog.getActiveDomains(this)
             val currentDomain = AetherCatalog.normalizeHttpsDomain(currentEpisode.refererUrl)
                 ?: AetherCatalog.normalizeHttpsDomain(currentEpisode.url)
@@ -823,7 +823,7 @@ class PlayerActivity : AppCompatActivity() {
                 val host = try { java.net.URI(domain).host ?: domain } catch (_: Throwable) { domain }
                 val isCurrentDom = domain.equals(currentDomain, ignoreCase = true)
                 val domChip = TextView(this).apply {
-                    text = "🌐 Domain ${idx + 1} · $host"
+                    text = if (idx == 0) "🖥 Server 1 · Aether Tự động ($host)" else "🖥 Server ${idx + 1} · Aether Dự phòng ($host)"
                     setTextColor(Color.WHITE)
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
                     typeface = Typeface.DEFAULT_BOLD
@@ -853,6 +853,7 @@ class PlayerActivity : AppCompatActivity() {
                 }
                 serverDrawerRow.addView(domChip)
             }
+            return
         }
 
         val seasons = ArrayList<String>()
@@ -946,6 +947,7 @@ class PlayerActivity : AppCompatActivity() {
         destroyWebPlayer()
         updateSourceSpecificOsdButtons()
         surfaceView.visibility = View.VISIBLE
+        if (::subtitleView.isInitialized) subtitleView.visibility = View.VISIBLE
 
         resolveJob?.cancel()
         resolveJob = uiScope.launch {
@@ -1017,6 +1019,7 @@ class PlayerActivity : AppCompatActivity() {
         lastSubtitles = subtitles
         destroyWebPlayer()
         surfaceView.visibility = View.VISIBLE
+        if (::subtitleView.isInitialized) subtitleView.visibility = View.VISIBLE
 
         val selector = DefaultTrackSelector(this).apply {
             parameters = buildUponParameters()
@@ -1274,6 +1277,7 @@ class PlayerActivity : AppCompatActivity() {
         destroyWebPlayer()
         val aetherMode = isAetherEpisode()
         surfaceView.visibility = View.GONE
+        if (::subtitleView.isInitialized) subtitleView.visibility = View.GONE
         loadingOverlay.visibility = View.VISIBLE
 
         if (aetherMode) {
@@ -1867,7 +1871,7 @@ class PlayerActivity : AppCompatActivity() {
                 val url = request?.url?.toString().orEmpty()
                 val path = request?.url?.path.orEmpty()
                 // Inject Aether polyfills & bridge synchronously inside /config.js before any ES module executes
-                if (aetherMode && path == "/config.js") {
+                if (aetherMode && (path == "/config.js" || path.endsWith("/config.js"))) {
                     val configAndBridge = """
                         window.__CONFIG__ = {
                           VITE_CORS_PROXY_URL: "",
@@ -1899,7 +1903,7 @@ class PlayerActivity : AppCompatActivity() {
                             if (resp.isSuccessful) {
                                 val body = resp.body?.string().orEmpty()
                                 if (body.isNotBlank()) {
-                                    val exportHook = "\n;try{window.__anpinimePlayerStore=I;window.__anpinimeSubStore=ve;window.__anpinimePrefStore=ne;if(ne&&ne.getState&&ne.getState().setEnableThumbnails){ne.getState().setEnableThumbnails(false);ne.getState().setEnableLowPerformanceMode(true);}}catch(e){console.error('AnPinime store injection error:',e);}\n"
+                                    val exportHook = "\n;try{window.__anpinimePlayerStore=I;window.__anpinimeSubStore=ve;window.__anpinimePrefStore=ne;if(typeof Cs==='function'){window.__anpinimeCs=Cs;}if(ne&&ne.getState){if(ne.getState().setEnableThumbnails)ne.getState().setEnableThumbnails(false);if(ne.getState().setEnableLowPerformanceMode)ne.getState().setEnableLowPerformanceMode(true);if(ne.getState().setEnableLastSuccessfulSource)ne.getState().setEnableLastSuccessfulSource(true);}}catch(e){console.error('AnPinime store injection error:',e);}\n"
                                     val patched = body + exportHook
                                     aetherJsCache[url] = patched
                                     patched
@@ -1941,7 +1945,7 @@ class PlayerActivity : AppCompatActivity() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 view?.evaluateJavascript(activeScript, null)
-                val timeoutMs = if (aetherMode) 45_000L else 22_000L
+                val timeoutMs = if (aetherMode) 25_000L else 22_000L
                 mainHandler.postDelayed({
                     val notStarted = if (aetherMode) webDurationMs <= 0L else view?.visibility != View.VISIBLE
                     if (fallbackWebView === view && notStarted) {
@@ -2103,6 +2107,13 @@ class PlayerActivity : AppCompatActivity() {
                 prefState.videoBrightness = 100;
                 prefState.videoContrast = 100;
                 prefState.videoSaturation = 100;
+                prefState.enableLastSuccessfulSource = true;
+                prefState.enableSourceOrder = true;
+                var provenSources = ['showbox', 'febbox', 'vidsrc', 'smashystream', 'insertunit'];
+                var existingOrder = Array.isArray(prefState.sourceOrder) ? prefState.sourceOrder : [];
+                var mergedOrder = provenSources.slice();
+                existingOrder.forEach(function(s){ if (mergedOrder.indexOf(s) < 0) mergedOrder.push(s); });
+                prefState.sourceOrder = mergedOrder;
                 localStorage.setItem(prefKey, JSON.stringify({
                   state: prefState,
                   version: 0
@@ -2128,17 +2139,12 @@ class PlayerActivity : AppCompatActivity() {
                 st.id = 'anpinime-aether-style';
                 st.textContent =
                   'html, body { background: #000 !important; overflow: hidden !important; margin: 0 !important; padding: 0 !important; user-select: none !important; }' +
-                  'a[href="/"], a[href*="/browse"] { opacity: 0 !important; pointer-events: none !important; }' +
-                  '#video-element, video { filter: none !important; -webkit-filter: none !important; background: transparent !important; background-color: transparent !important; position: fixed !important; inset: 0 !important; width: 100vw !important; height: 100vh !important; object-fit: contain !important; z-index: 1 !important; }' +
-                  'body:not(.anpinime-playing) #root { opacity: 0 !important; pointer-events: none !important; visibility: hidden !important; }' +
-                  'body.anpinime-playing #root { opacity: 1 !important; visibility: visible !important; }' +
-                  'body.anpinime-playing div.bg-gradient-to-b, ' +
-                  'body.anpinime-playing div.bg-gradient-to-t, ' +
-                  'body.anpinime-playing div.pointer-events-auto.z-10, ' +
-                  'body.anpinime-playing .popout-location, ' +
-                  'body.anpinime-playing [data-floating-ui-portal] { ' +
-                  'opacity: 0 !important; pointer-events: none !important; }' +
-                  'div.text-white.absolute.w-full.flex.flex-col.items-center { bottom: 2.2rem !important; z-index: 40 !important; opacity: 1 !important; }';
+                  '#root { width: 100vw !important; height: 100vh !important; margin: 0 !important; padding: 0 !important; background: transparent !important; }' +
+                  '#video-element, video { display: block !important; visibility: visible !important; opacity: 1 !important; filter: none !important; -webkit-filter: none !important; background: transparent !important; background-color: transparent !important; position: fixed !important; inset: 0 !important; width: 100vw !important; height: 100vh !important; object-fit: contain !important; z-index: 10 !important; }' +
+                  'div.text-white.absolute.w-full.flex.flex-col.items-center { bottom: 2.2rem !important; z-index: 50 !important; opacity: 1 !important; display: flex !important; visibility: visible !important; }' +
+                  'a[href="/"], a[href*="/browse"], div.bg-gradient-to-b, div.bg-gradient-to-t, [class*="bg-gradient-"], div.pointer-events-auto.z-10, div[class*="grid-cols-[1fr,auto]"], div.absolute.right-4, div.pointer-events-none > div.absolute.inset-0.flex.space-x-6, .video-controls { opacity: 0 !important; pointer-events: none !important; }' +
+                  'body[data-anpinime-menu-open="true"] .popout-wrapper { opacity: 1 !important; pointer-events: auto !important; z-index: 999999 !important; }' +
+                  'body:not([data-anpinime-menu-open="true"]) .popout-wrapper { opacity: 0 !important; pointer-events: none !important; }';
                 document.head.appendChild(st);
               }
 
@@ -2149,6 +2155,11 @@ class PlayerActivity : AppCompatActivity() {
                   vid.style.setProperty('-webkit-filter', 'none', 'important');
                   vid.style.setProperty('background', 'transparent', 'important');
                   vid.style.setProperty('background-color', 'transparent', 'important');
+                  vid.style.setProperty('display', 'block', 'important');
+                  vid.style.setProperty('visibility', 'visible', 'important');
+                  vid.style.setProperty('opacity', '1', 'important');
+                  vid.classList.remove('bg-black');
+                  vid.classList.remove('opacity-0');
                 } catch(e){}
               }
 
@@ -2374,6 +2385,18 @@ class PlayerActivity : AppCompatActivity() {
                 }
               }
 
+              function observeScrapingActivity(){
+                try {
+                  var activeSourceEl = document.querySelector('div[data-source-id] [class*="text-white"], .transition-opacity[style*="opacity: 1"] p, [class*="scraping"] p, div.font-bold.text-white');
+                  if (activeSourceEl && activeSourceEl.textContent) {
+                    var txt = activeSourceEl.textContent.trim();
+                    if (txt && txt.length > 1 && txt.length < 50 && txt.indexOf('Finding') < 0 && txt.indexOf('Verifying') < 0) {
+                      AnPinimeWebBridge.onAetherStatus('Đang kiểm tra nguồn: ' + txt + '...');
+                    }
+                  }
+                } catch(e){}
+              }
+
               function checkAutoSubtitles(){
                 var stores = findAetherStores();
                 if (!stores || !stores.playerStore) return;
@@ -2383,8 +2406,7 @@ class PlayerActivity : AppCompatActivity() {
                   return;
                 }
                 if (ps.status === 'scraping' || ps.status === 'indexing') {
-                  if (document.body) document.body.classList.remove('anpinime-playing');
-                  try { AnPinimeWebBridge.onAetherStatus('Đang tìm nguồn phát tốt nhất từ máy chủ Aether...'); } catch(e){}
+                  observeScrapingActivity();
                   return;
                 }
                 if (ps.status === 'scrapeNotFound') {
@@ -2395,7 +2417,6 @@ class PlayerActivity : AppCompatActivity() {
                   return;
                 }
                 if (ps.status !== 'playing') {
-                  if (document.body) document.body.classList.remove('anpinime-playing');
                   return;
                 }
                 if (document.body && !document.body.classList.contains('anpinime-playing')) {
@@ -2733,9 +2754,11 @@ class PlayerActivity : AppCompatActivity() {
                   setTimeout(function(){
                     var items = getMenuFocusables();
                     if (items.length > 0) {
+                      document.body.setAttribute('data-anpinime-menu-open', 'true');
                       highlightMenuFocusable(0);
                       try { AnPinimeWebBridge.onAetherMenuState(true); } catch(e){}
                     } else {
+                      document.body.removeAttribute('data-anpinime-menu-open');
                       try {
                         AnPinimeWebBridge.onAetherMenuState(false);
                         AnPinimeWebBridge.onAetherStatus('Đang chờ thanh công cụ Aether...');
@@ -2783,12 +2806,14 @@ class PlayerActivity : AppCompatActivity() {
                       if (getMenuFocusables().length) {
                         highlightMenuFocusable(0);
                       } else {
+                        document.body.removeAttribute('data-anpinime-menu-open');
                         try { AnPinimeWebBridge.onAetherMenuState(false); } catch(e){}
                       }
                     }, 200);
                     return;
                   }
                 }
+                document.body.removeAttribute('data-anpinime-menu-open');
                 document.querySelectorAll('[data-anpinime-focus]').forEach(function(el){ el.removeAttribute('data-anpinime-focus'); });
                 var backdrop = document.querySelector('video') || document.body;
                 if (backdrop) {

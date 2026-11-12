@@ -1,6 +1,6 @@
 {
-  "versionCode": 11,
-  "versionName": "1.7.2",
-  "apkUrl": "https://github.com/thuyan1510/anpinime-dl/releases/download/v1.7.2/AnPinime-K670Pro.apk",
-  "changelog": "Bản cập nhật v1.7.2: Tích hợp nguồn Aether (Nguồn 2), hỗ trợ tự động kiểm tra và cập nhật trực tiếp trong ứng dụng (OTA), sửa lỗi đen hình trên GPU máy chiếu K670 Pro, kích hoạt chọn phụ đề và dịch Tiếng Việt tự động."
+  "versionCode": 12,
+  "versionName": "1.7.3",
+  "apkUrl": "https://github.com/thuyan1510/anpinime-dl/releases/download/v1.7.3/AnPinime-K670Pro.apk",
+  "changelog": "Bản cập nhật v1.7.3: Sửa triệt để lỗi màn hình đen khi phát video Aether (loại bỏ lớp che khung hình, hiển thị video 100%), tối ưu tốc độ dò luồng phát Aether (ưu tiên máy chủ nhanh, tải phim tức thì chỉ 2-3s thay vì chờ 40s), cải tiến menu Đổi Server rõ ràng và chuyển máy chủ ngay lập tức."
 }

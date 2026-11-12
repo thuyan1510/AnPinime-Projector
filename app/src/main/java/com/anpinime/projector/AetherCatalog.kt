@@ -591,7 +591,7 @@ object AetherCatalog {
                     url = playUrl,
                     number = 1,
                     season = serverLabel,
-                    qualityBadge = "FHD · Auto Sub Việt",
+                    qualityBadge = "FHD · Tự động",
                     source = source,
                     playbackKind = "aether_web",
                     slug = "movie:$idStr",
