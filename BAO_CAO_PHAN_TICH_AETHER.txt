@@ -1,0 +1,254 @@
+================================================================================
+BÁO CÁO PHÂN TÍCH TOÀN DIỆN HỆ THỐNG NGUỒN PHÁT CỦA AETHER (AETHER.ST)
+Dự án: AnPinime-Projector (Native Android TV / Projector Client)
+Ngày kiểm tra: 12/11/2026
+Người thực hiện: Antigravity Agent
+Mục tiêu: Đảo ngược cơ chế tải phim, cấu trúc stream, phụ đề và cách phát video của từng nguồn trên Aether.
+================================================================================
+
+I. TỔNG QUAN VỀ KIẾN TRÚC AETHER
+--------------------------------------------------------------------------------
+1. Quản lý Domain:
+   - Danh sách domain hoạt động được quản lý công khai tại: https://rentry.co/aetherdomains
+   - Các domain hiện tại:
+     * https://aether.st (Hoạt động tốt nhất - VPS deployment)
+     * https://aether.bar (Chuyển hướng sang aether.ist)
+     * https://aether.cx (Bị chặn tại một số quốc gia như UK)
+     * https://aether.ist (Bị chặn tại một số quốc gia)
+   - Ứng dụng tự động kiểm tra và ưu tiên chọn aether.st, khi lỗi tự động chuyển sang domain kế tiếp trong bảng.
+
+2. Mô hình phân giải Scrapers (Nguồn tải phim):
+   - Aether KHÔNG gọi qua 1 backend API tập trung duy nhất để stream toàn bộ.
+   - Trình duyệt phía client thực hiện quét tuần tự (waterfall scan) qua danh sách các subdomain backend scraper chuyên dụng.
+   - Mỗi scraper đóng vai trò như một gateway độc lập tới một máy chủ phim (Febbox, Showbox, Levidia, Vercetti, Goldenkite, VidLink, 1x2.space, v.v.).
+   - Khi một nguồn trả về mã 404 (Không có stream) hoặc lỗi, giao diện sẽ kích hoạt animation chuyển sang kiểm tra nguồn tiếp theo. Khi tìm thấy stream hợp lệ đầu tiên, quá trình quét dừng lại và phát phim ngay lập tức.
+
+
+II. PHÂN TÍCH CHI TIẾT TỪNG NGUỒN PHÁT (SCRAPER)
+--------------------------------------------------------------------------------
+Dưới đây là 10+ nguồn phát đã được kiểm chứng bằng việc quét cô lập (isolated sweep) trên các phim:
+- Coco: Hội Ngộ Diệu Kỳ (TMDB ID: 354912)
+- Người Nhện: Khởi Đầu Mới (TMDB ID: 969681)
+- Bố Già - The Godfather (TMDB ID: 238)
+- Ramayana: Khởi Nguồn Một Huyền Thoại (TMDB ID: 656908)
+
+--------------------------------------------------------------------------------
+1. NGUỒN: lul
+- Endpoint: GET https://lul.raccoonunbutteredbagel.zip/movie/{tmdbId}
+            (Series: /tv/{tmdbId}/{season}/{episode})
+- Dữ liệu trả về:
+  {"stream": "https://cflul.ne3.workers.dev/vid/<encrypted_token>"}
+- Cách xử lý luồng:
+  * Gọi URL worker cflul, máy chủ trả về mã HTTP 302 Redirect sang Master HLS Playlist:
+    https://<cluster-id>.tnmr.org/hls2/.../master.m3u8?t=...&s=...&e=28800
+  * Mã hóa luồng: HLS AES-128 (#EXT-X-KEY:METHOD=AES-128,URI="encryption.key?t=...")
+  * Độ phân giải: 1080p, 720p.
+  * Phụ đề: Track tiếng Anh nhúng trực tiếp trong master.m3u8 (EXT-X-MEDIA:TYPE=SUBTITLES).
+  * Yêu cầu Header: Origin/Referer: https://aether.st
+
+--------------------------------------------------------------------------------
+2. NGUỒN: lil
+- Endpoint: GET https://lil.raccoonunbutteredbagel.zip/movie/{tmdbId}
+- Dữ liệu trả về:
+  {
+    "type": "movie",
+    "id": {tmdbId},
+    "stream": {
+      "url": "https://<cluster-id>.cdn-tnmr.org/hls2/.../master.m3u8?t=...&s=...&e=28800"
+    }
+  }
+- Cách xử lý luồng:
+  * Trả thẳng đường dẫn master.m3u8 có token xác thực `t=`, không cần bước redirect qua Cloudflare Worker.
+  * Định dạng: HLS AES-128. Độ phân giải: 1080p.
+
+--------------------------------------------------------------------------------
+3. NGUỒN: ly (Vidly / Singularity / Edge)
+- Endpoint: GET https://ly.raccoonunbutteredbagel.zip/movie/{tmdbId}
+- Dữ liệu trả về:
+  {
+    "success": true,
+    "type": "movie",
+    "tmdbId": 238,
+    "title": "The Godfather",
+    "year": "1972",
+    "source": { "id": "singularity", "label": "Edge", "tag": "HD" },
+    "quality": "1080p",
+    "stream": "https://img.rousav.tech/media/<hash>/index.m3u8",
+    "streamHost": "img.rousav.tech",
+    "proxyHeaders": {
+      "User-Agent": "Mozilla/5.0 ... Chrome/125.0.0.0 ...",
+      "Origin": "https://vidly.pro",
+      "Referer": "https://vidly.pro/"
+    }
+  }
+- Cách xử lý luồng:
+  * Định dạng: fMP4 HLS (chứa EXT-X-MAP, các đoạn segment /media?v=... và /content?v=...).
+  * Yêu cầu Header: CDN img.rousav.tech BẮT BUỘC có Origin: https://vidly.pro và Referer: https://vidly.pro/
+  * Trình duyệt Aether phát qua proxy:
+    https://justice.raccoonunbutteredbagel.zip/m3u8-proxy?url=<URL>&headers=<ENCODED_HEADERS>
+    hoặc gắn trực tiếp Custom Headers vào ExoPlayer DataSource.
+
+--------------------------------------------------------------------------------
+4. NGUỒN: meridian
+- Endpoint: GET https://meridian.raccoonunbutteredbagel.zip/movie/{tmdbId}
+- Dữ liệu trả về:
+  {
+    "title": "The Godfather",
+    "url": "https://cdn.kaxate.fun/segment/<hash>/?token1=...&token3=...",
+    "subtitles": [
+      { "language": "Arabic", "url": "https://cdn.tuitito.fun/subtitle/...", "type": "vtt" },
+      { "language": "Czech", "url": "...", "type": "vtt" },
+      ...
+    ]
+  }
+- Cách xử lý luồng:
+  * Đường link phát trực tiếp qua CDN cdn.kaxate.fun (Full HD 1080p).
+  * Tích hợp sẵn danh sách phụ đề WebVTT trong phản hồi.
+
+--------------------------------------------------------------------------------
+5. NGUỒN: rock (VidRock)
+- Endpoint: GET https://rock.raccoonunbutteredbagel.zip/movie/{tmdbId}
+- Dữ liệu trả về:
+  {
+    "mediaType": "movie",
+    "id": {tmdbId},
+    "stream": "https://vercetti.org/movie/<hash>/bigtits.m3u8",
+    "streamType": "hls"
+  }
+- Cách xử lý luồng:
+  * Máy chủ Vercetti yêu cầu Origin: https://vidrock.to và Referer: https://vidrock.to/
+  * Web Aether phát qua proxy:
+    https://just.raccoonunbutteredbagel.zip/m3u8-proxy?url=https%3A%2F%2Fvercetti.org%2F...&headers=%7B%22Origin%22%3A%22https%3A%2F%2Fvidrock.to%22%2C%22Referer%22%3A%22https%3A%2F%2Fvidrock.to%2F%22%7D
+  * Độ phân giải đa luồng (Multi-bitrate): 1080p, 720p, 360p. Kích thước hiển thị 1920x800.
+
+--------------------------------------------------------------------------------
+6. NGUỒN: shore
+- Endpoint: GET https://shore.raccoonunbutteredbagel.zip/movie/{tmdbId}
+- Dữ liệu trả về:
+  {
+    "type": "movie",
+    "id": {tmdbId},
+    "stream": "/api/proxy/hls?url=https%3A%2F%2Fmoon.goldenkite.top%2Fvd%2F...%2Findex-s1080p-v1-a1.m3u8%3Fs%3D...&token=...",
+    "container": "hls"
+  }
+- Cách xử lý luồng:
+  * Luồng HLS được ký token thông qua endpoint proxy moon.goldenkite.top (1080p).
+
+--------------------------------------------------------------------------------
+7. NGUỒN: tik & tiki (1x2.space)
+- Endpoint TIK: GET https://tik.raccoonunbutteredbagel.zip/movie/{tmdbId}
+  Trả về:
+  {
+    "success": true,
+    "streams": [
+      {
+        "name": "TIK",
+        "url": "https://tik.1x2.space/playlist/<token>/master.m3u8",
+        "type": "hls",
+        "language": "English",
+        "flag": "us"
+      }
+    ]
+  }
+- Endpoint TIKI: GET https://tiki.raccoonunbutteredbagel.zip/movie/{tmdbId}
+  Trả về:
+  {
+    "stream": "https://vip.1x2.space/playlist/<token>/master.m3u8"
+  }
+- Cách xử lý luồng:
+  * Luồng HLS trực tiếp từ 1x2.space (TIK hỗ trợ 1080p, TIKI hỗ trợ 360p).
+
+--------------------------------------------------------------------------------
+8. NGUỒN: vfast (VidCore - Đa Server Euro, Zenith, Supreme 4K, Prime 4K)
+- Bước 1 (Lấy danh sách server):
+  GET https://vfast.raccoonunbutteredbagel.zip/movie/{tmdbId}/servers
+  Trả về:
+  {
+    "status": 200,
+    "tmdbId": {tmdbId},
+    "kind": "movie",
+    "servers": [
+      { "name": "Euro", "description": "Original audio" },
+      { "name": "Zenith", "description": "Original audio" },
+      { "name": "Supreme", "description": "Original audio, 4K" },
+      { "name": "Prime", "description": "Original audio, 4K" }
+    ]
+  }
+- Bước 2 (Lấy stream của từng server):
+  GET https://vfast.raccoonunbutteredbagel.zip/movie/{tmdbId}?server=Euro (hoặc Zenith, Supreme, Prime)
+  Trả về:
+  {
+    "status": 200,
+    "domain": "vidcore.io",
+    "directUrl": "https://moon.goldenkite.top/vd/.../master.m3u8?s=...",
+    "url": "https://just.raccoonunbutteredbagel.zip/m3u8-proxy?url=...&headers=...",
+    "referer": "https://vidcore.io/",
+    "tracks": [
+      { "file": "https://moon.goldenkite.top/.../subs/eng.vtt", "label": "English" }
+    ],
+    "servers": [...]
+  }
+- Cách xử lý luồng:
+  * Cho phép người dùng chuyển đổi các cụm server nội bộ (Euro, Zenith, Supreme 4K).
+  * Hỗ trợ directUrl hoặc proxyUrl kèm Origin/Referer https://vidcore.io/.
+
+--------------------------------------------------------------------------------
+9. NGUỒN: mwVault (VidLink)
+- Sử dụng cho các phim mới / độc quyền (ví dụ Ramayana).
+- Trả về DASH Manifest (.mpd) đi kèm CloudFront Signed Cookies:
+  Cookie: CloudFront-Policy=...; CloudFront-Signature=...; CloudFront-Key-Pair-Id=...
+- ExoPlayer cần cấu hình HttpDataSource hỗ trợ Cookie Header và DASH Player.
+
+--------------------------------------------------------------------------------
+10. NGUỒN DỰ PHÒNG BỔ SUNG:
+- filler.raccoonunbutteredbagel.zip: Nguồn dự phòng thay thế cho lul.
+- le.aether.cx, vine.aether.cx, baguette.aether.cx, yildiz.aether.cx:
+  Hệ thống scraper trên domain aether.cx, dự phòng khi các server raccoon bị nghẽn mạng.
+
+
+III. GIẢI PHÁP PHỤ ĐỀ (SUBTITLES)
+--------------------------------------------------------------------------------
+Aether sử dụng 2 cơ chế phụ đề song song:
+
+1. Phụ đề có sẵn theo phim:
+   - Các file .vtt đi kèm trong phản hồi của meridian và vfast.
+   - Các track nhúng trong master.m3u8 của lul, lil, shore.
+
+2. Kho phụ đề toàn cầu (Hỗ trợ Tiếng Việt):
+   - API 1: https://sub.vdrk.site/v1/movie/{tmdbId}
+     Trả về danh sách file WebVTT được chuẩn hóa theo ngôn ngữ.
+   - API 2: https://rest.opensubtitles.org/search/imdbid-{imdbId}/sublanguageid-vie
+     Cung cấp phụ đề Tiếng Việt SRT trực tiếp từ OpenSubtitles (đã xác minh khớp chuẩn BluRay).
+
+
+IV. NGUYÊN NHÂN MÀN HÌNH ĐEN TRÊN APP VÀ CÁCH KHẮC PHỤC
+--------------------------------------------------------------------------------
+1. Hiện tượng:
+   - Video tải được, có âm thanh nhưng màn hình đen hoặc video không tải được segment.
+2. Nguyên nhân cốt lõi:
+   - Các CDN (rousav.tech, vercetti.org, goldenkite.top) kiểm tra nghiêm ngặt HTTP Header:
+     * ly cần Origin/Referer vidly.pro
+     * rock cần Origin/Referer vidrock.to
+     * vfast cần Origin/Referer vidcore.io
+     * lul/lil cần Origin/Referer aether.st
+   - Khi ExoPlayer của Android chỉ gửi User-Agent mặc định mà không kèm Origin/Referer tương ứng của từng nguồn, CDN trả về HTTP 403 Forbidden đối với các phân đoạn .ts / fMP4 của video. Ở một số nguồn, phân đoạn Audio nằm ở máy chủ khác không bị chặn nên chỉ có tiếng mà không có hình.
+   - Đối với HLS AES-128, ExoPlayer cần quyền truy cập và giải mã file key (.key?t=...) thông qua cùng cấu hình Header.
+3. Giải pháp:
+   - Sử dụng `DefaultHttpDataSource.Factory` với cấu hình động:
+     Gán chính xác `Origin`, `Referer`, `User-Agent` tương ứng cho từng nguồn video khi khởi tạo `MediaItem`.
+   - Đối với các nguồn hỗ trợ proxy Aether (`just.../m3u8-proxy` hoặc `justice.../m3u8-proxy`), ưu tiên sử dụng link đã rewrite sẵn để đảm bảo 100% không bị chặn bởi bất kỳ tường lửa CDN nào.
+
+
+V. KẾ HOẠCH TRIỂN KHAI CHO APP (ANPINIME-PROJECTOR)
+--------------------------------------------------------------------------------
+1. Xóa bỏ WebView - Hoàn toàn sử dụng kiến trúc Native Android.
+2. Thiết kế Module `AetherSourceResolver`:
+   - Quét danh sách nguồn: `lul` -> `lil` -> `ly` -> `meridian` -> `rock` -> `shore` -> `tik` -> `tiki` -> `vfast`...
+   - Tự động fallback domain Aether qua `rentry.co/aetherdomains`.
+3. Giao diện Loading Native:
+   - Hiển thị animation thông báo trạng thái: "Đang thử nguồn: Lul...", "Đang thử nguồn: Edge...", "Đang thử nguồn: Meridian..." với thanh tiến trình trực quan.
+4. Menu Server:
+   - Hiển thị danh sách các nguồn hoạt động tìm thấy (thay vì 4 link domain aether cũ) để người dùng bấm chọn chuyển server tải phim theo ý muốn (Lul, Lil, Edge 1080p, Meridian, VidRock, Euro, Zenith, Supreme 4K, v.v.).
+5. Tích hợp Subtitle Provider:
+   - Tự động nạp phụ đề Tiếng Việt từ OpenSubtitles và sub.vdrk.site vào menu chọn Sub của ExoPlayer.
+================================================================================

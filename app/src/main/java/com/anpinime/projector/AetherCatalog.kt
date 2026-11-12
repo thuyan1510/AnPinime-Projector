@@ -583,32 +583,36 @@ object AetherCatalog {
                 .ifBlank { "Phim lẻ phát trực tiếp qua nguồn Aether với phụ đề đa ngôn ngữ & dịch tự động sang Tiếng Việt." }
 
             val primaryDomain = domains.firstOrNull { it.isNotBlank() } ?: FALLBACK_DOMAINS.first()
-            val serverLabel = "Aether · Tự động"
             val playUrl = buildMovieUrl(idStr, primaryDomain)
-            val episodes = listOf(
-                Episode(
-                    title = "Full HD",
-                    url = playUrl,
-                    number = 1,
-                    season = serverLabel,
-                    qualityBadge = "FHD · Tự động",
-                    source = source,
-                    playbackKind = "aether_web",
-                    slug = "movie:$idStr",
-                    seasonNum = 1,
-                    episodeNum = 1,
-                    serverIndex = 0,
-                    episodeIndex = 0,
-                    directUrl = playUrl,
-                    refererUrl = primaryDomain,
-                    detailUrl = buildStableItemUrl("movie", idStr),
-                    serverName = serverLabel,
-                    seasonId = "1",
-                    episodeId = idStr,
-                    audioLabel = "Multi Audio",
-                    subtitleLabel = "Vietsub / Dịch tự động"
+            val episodes = ArrayList<Episode>()
+            for ((idx, server) in AetherSourceResolver.SERVERS.withIndex()) {
+                val serverLabel = if (server.id == "auto") "Server 1 · Tự động (Khuyên dùng)" else "Server ${idx + 1} · ${server.name}"
+                episodes.add(
+                    Episode(
+                        title = server.qualityBadge,
+                        url = playUrl,
+                        number = 1,
+                        season = serverLabel,
+                        qualityBadge = server.qualityBadge,
+                        source = source,
+                        playbackKind = "aether_stream",
+                        slug = "movie:$idStr",
+                        seasonNum = 1,
+                        episodeNum = 1,
+                        serverIndex = idx,
+                        episodeIndex = 0,
+                        directUrl = playUrl,
+                        refererUrl = primaryDomain,
+                        detailUrl = buildStableItemUrl("movie", idStr),
+                        serverName = server.name,
+                        episodeKey = server.id,
+                        seasonId = "1",
+                        episodeId = idStr,
+                        audioLabel = "Multi Audio",
+                        subtitleLabel = "Vietsub đa nguồn"
+                    )
                 )
-            )
+            }
 
             AnimeDetail(
                 title = title,

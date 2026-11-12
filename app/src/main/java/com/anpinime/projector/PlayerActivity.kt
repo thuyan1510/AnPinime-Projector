@@ -129,16 +129,9 @@ class PlayerActivity : AppCompatActivity() {
     )
 
     private var currentAetherProviderId: String = "auto"
-    private var availableAetherProviders: List<AetherProvider> = listOf(
-        AetherProvider("auto", "Tự động", "Tự động quét tìm nguồn tốt nhất"),
-        AetherProvider("febbox", "Febbox", "4K / Siêu nét (Nhanh nhất)"),
-        AetherProvider("showbox", "Showbox", "Full HD / Ổn định"),
-        AetherProvider("vidsrc", "VidSrc", "Kho phim phong phú"),
-        AetherProvider("insertunit", "Insertunit", "Dự phòng tốc độ cao"),
-        AetherProvider("smashystream", "SmashyStream", "Nguồn quốc tế"),
-        AetherProvider("gomovies", "GOmovies", "Nguồn phim bổ sung"),
-        AetherProvider("flixhq", "FlixHQ", "Chất lượng cao")
-    )
+    private var availableAetherProviders: List<AetherProvider> = AetherSourceResolver.SERVERS.map {
+        AetherProvider(it.id, it.name, it.description)
+    }
 
     private lateinit var videoFrame: FrameLayout
     private lateinit var headlessWebContainer: FrameLayout
@@ -1011,79 +1004,20 @@ class PlayerActivity : AppCompatActivity() {
         currentAetherProviderId = providerId
         val resumePos = exoPlayer?.currentPosition ?: webPositionMs
         releasePlayer(stopRelay = false)
+        destroyWebPlayer(force = true)
 
         updateScrapingOverlay(providerName, providerId, "Đang chuyển sang nguồn $providerName…", 0)
 
-        if (fallbackWebView == null) {
-            startWebFallback(currentEpisode.url, currentEpisode.refererUrl, resumePos)
-            return
-        }
-
-        val script = """
-            (function(){
-                try {
-                    var target = '$providerId';
-                    var pref = window.__anpinimePrefStore ? window.__anpinimePrefStore.getState() : null;
-                    var player = window.__anpinimePlayerStore ? window.__anpinimePlayerStore.getState() : null;
-                    if (pref) {
-                        if (target === 'auto') {
-                            if (pref.setEnableSourceOrder) pref.setEnableSourceOrder(false);
-                        } else {
-                            if (pref.setEnableSourceOrder) pref.setEnableSourceOrder(true);
-                            var curOrder = pref.sourceOrder || [];
-                            var newOrder = [target].concat(curOrder.filter(function(x){ return x !== target; }));
-                            if (pref.setSourceOrder) pref.setSourceOrder(newOrder);
-                            if (player && player.meta && player.meta.tmdbId && pref.setLastSuccessfulSource) {
-                                pref.setLastSuccessfulSource(player.meta.tmdbId, target);
-                            }
-                        }
-                    }
-                    if (typeof window.__anpinimeScrapeAndPlay === 'function' && target !== 'auto') {
-                        window.__anpinimeScrapeAndPlay(target);
-                    } else if (player && typeof player.setStatus === 'function') {
-                        player.setStatus('scraping');
-                    }
-                } catch(e) {
-                    console.error('AnPinime select provider error:', e);
-                }
-            })();
-        """.trimIndent()
-
-        fallbackWebView?.evaluateJavascript(script, null)
+        val targetEp = currentEpisode.copy(
+            episodeKey = providerId,
+            season = "Server · $providerName",
+            serverName = providerName
+        )
+        startEpisodePlayback(targetEp, resetPosition = false, initialPositionMs = resumePos)
     }
 
     private fun handleAetherSourcesLoaded(sourcesJson: String) {
-        try {
-            val arr = JSONArray(sourcesJson)
-            val list = mutableListOf<AetherProvider>()
-            list.add(AetherProvider("auto", "Tự động", "Tự động quét tìm nguồn tốt nhất"))
-            for (i in 0 until arr.length()) {
-                val obj = arr.optJSONObject(i) ?: continue
-                val id = obj.optString("id")
-                val name = obj.optString("name").ifBlank { id }
-                if (id.isNotBlank() && id != "auto") {
-                    val desc = when (id.lowercase()) {
-                        "febbox" -> "4K / Siêu nét (Nhanh nhất)"
-                        "showbox" -> "Full HD / Ổn định"
-                        "vidsrc" -> "Kho phim phong phú"
-                        "insertunit" -> "Dự phòng tốc độ cao"
-                        "smashystream" -> "Nguồn quốc tế"
-                        "gomovies" -> "Nguồn phim bổ sung"
-                        "flixhq" -> "Chất lượng cao"
-                        else -> "Nguồn trực tuyến"
-                    }
-                    if (list.none { it.id.equals(id, ignoreCase = true) }) {
-                        list.add(AetherProvider(id, name, desc))
-                    }
-                }
-            }
-            if (list.size > 1) {
-                availableAetherProviders = list
-                if (serverDrawer.visibility == View.VISIBLE && isAetherEpisode()) {
-                    populateServerDrawer()
-                }
-            }
-        } catch (_: Throwable) {}
+        // Keep availableAetherProviders aligned with AetherSourceResolver.SERVERS
     }
 
     private fun updateScrapingOverlay(
@@ -1138,8 +1072,37 @@ class PlayerActivity : AppCompatActivity() {
         resolveJob?.cancel()
         resolveJob = uiScope.launch {
             try {
+                val aetherMode = isAetherEpisode(episode)
+                if (aetherMode) {
+                    loadingProviderBadge.visibility = View.VISIBLE
+                    loadingProviderBadge.text = "⚡ Đang khởi tạo máy chủ…"
+                    loadingProgressBar.visibility = View.VISIBLE
+                    loadingProgressBar.isIndeterminate = true
+                    loadingHintText.visibility = View.GONE
+                } else {
+                    loadingProviderBadge.visibility = View.GONE
+                }
+
+                val activeServerId = if (currentAetherProviderId.isNotBlank() && currentAetherProviderId != "auto") {
+                    currentAetherProviderId
+                } else {
+                    episode.episodeKey.takeIf { it.isNotBlank() && it != "auto" } ?: "auto"
+                }
+
                 val resolved = withContext(Dispatchers.IO) {
-                    CatalogService.resolvePlayback(episode)
+                    CatalogService.resolvePlayback(
+                        episode = episode,
+                        preferredServerId = activeServerId,
+                        onProgress = { sourceName, current, total ->
+                            uiScope.launch {
+                                if (generation != playbackGeneration) return@launch
+                                loadingProviderBadge.visibility = View.VISIBLE
+                                loadingProviderBadge.text = "⚡ Đang kiểm tra: $sourceName ($current/$total)"
+                                loadingText.text = "Đang quét nguồn $sourceName…"
+                                loadingProgressBar.visibility = View.VISIBLE
+                            }
+                        }
+                    )
                 }
                 if (generation != playbackGeneration) return@launch
                 lastWebUrl = resolved.webUrl.ifBlank { episode.url }

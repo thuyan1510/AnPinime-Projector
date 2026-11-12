@@ -324,7 +324,11 @@ object CatalogService {
 
     // --- Playback Resolution ---
 
-    fun resolvePlayback(episode: Episode): ResolvedPlayback {
+    fun resolvePlayback(
+        episode: Episode,
+        preferredServerId: String = "auto",
+        onProgress: ((sourceName: String, current: Int, total: Int) -> Unit)? = null
+    ): ResolvedPlayback {
         return when (episode.source) {
             ContentSource.FILM4K -> resolveCatalogEpisodePlayback(
                 episode = episode,
@@ -336,7 +340,7 @@ object CatalogService {
                 defaultReferer = "${MovieSourceDirectory.DEFAULT_KKPHIM_BASE_URL}/",
                 format = MovieCatalogFormat.FREE1
             )
-            ContentSource.AETHER -> resolveAetherPlayback(episode)
+            ContentSource.AETHER -> resolveAetherPlayback(episode, preferredServerId, onProgress)
             ContentSource.ANIME -> resolveAnimePlayback(episode)
         }
     }
@@ -688,56 +692,66 @@ object CatalogService {
         )
     }
 
-    private fun resolveAetherPlayback(episode: Episode): ResolvedPlayback {
-        val domains = refreshAetherDomains(false)
-        val primaryDomain = domains.firstOrNull() ?: AetherCatalog.FALLBACK_DOMAINS.first()
+    private fun resolveAetherPlayback(
+        episode: Episode,
+        preferredServerId: String = "auto",
+        onProgress: ((sourceName: String, current: Int, total: Int) -> Unit)? = null
+    ): ResolvedPlayback {
+        return try {
+            AetherSourceResolver.resolve(
+                episode = episode,
+                preferredServerId = preferredServerId,
+                onProgress = onProgress
+            )
+        } catch (_: Throwable) {
+            val domains = refreshAetherDomains(false)
+            val primaryDomain = domains.firstOrNull() ?: AetherCatalog.FALLBACK_DOMAINS.first()
+            val selectedDomain = AetherCatalog.normalizeHttpsDomain(episode.refererUrl)
+                ?: AetherCatalog.normalizeHttpsDomain(episode.url)
+                ?: primaryDomain
 
-        // Determine target domain: if episode.refererUrl is a valid HTTPS domain, honor it (for server selection)
-        val selectedDomain = AetherCatalog.normalizeHttpsDomain(episode.refererUrl)
-            ?: AetherCatalog.normalizeHttpsDomain(episode.url)
-            ?: primaryDomain
-
-        val targetWebUrl = when {
-            episode.slug.startsWith("tv:", ignoreCase = true) -> {
-                val showId = episode.slug.substringAfter(':')
-                val sId = episode.seasonId.ifEmpty { episode.seasonNum.coerceAtLeast(1).toString() }
-                val eId = episode.episodeId.ifEmpty { episode.episodeNum.coerceAtLeast(1).toString() }
-                AetherCatalog.buildTvEpisodeUrl(showId, sId, eId, selectedDomain)
-            }
-            episode.slug.startsWith("movie:", ignoreCase = true) -> {
-                val movieId = episode.slug.substringAfter(':')
-                AetherCatalog.buildMovieUrl(movieId, selectedDomain)
-            }
-            else -> {
-                val ref = AetherCatalog.parseMediaRef(episode.url.ifBlank { episode.directUrl })
-                if (ref != null) {
-                    if (ref.mediaType == "tv") {
-                        val sId = episode.seasonId.ifEmpty { ref.seasonId.ifEmpty { "1" } }
-                        val eId = episode.episodeId.ifEmpty { ref.episodeId.ifEmpty { "1" } }
-                        AetherCatalog.buildTvEpisodeUrl(ref.tmdbId, sId, eId, selectedDomain)
+            val targetWebUrl = when {
+                episode.slug.startsWith("tv:", ignoreCase = true) -> {
+                    val showId = episode.slug.substringAfter(':')
+                    val sId = episode.seasonId.ifEmpty { episode.seasonNum.coerceAtLeast(1).toString() }
+                    val eId = episode.episodeId.ifEmpty { episode.episodeNum.coerceAtLeast(1).toString() }
+                    AetherCatalog.buildTvEpisodeUrl(showId, sId, eId, selectedDomain)
+                }
+                episode.slug.startsWith("movie:", ignoreCase = true) -> {
+                    val movieId = episode.slug.substringAfter(':')
+                    AetherCatalog.buildMovieUrl(movieId, selectedDomain)
+                }
+                else -> {
+                    val ref = AetherCatalog.parseMediaRef(episode.url.ifBlank { episode.directUrl })
+                    if (ref != null) {
+                        if (ref.mediaType == "tv") {
+                            val sId = episode.seasonId.ifEmpty { ref.seasonId.ifEmpty { "1" } }
+                            val eId = episode.episodeId.ifEmpty { ref.episodeId.ifEmpty { "1" } }
+                            AetherCatalog.buildTvEpisodeUrl(ref.tmdbId, sId, eId, selectedDomain)
+                        } else {
+                            AetherCatalog.buildMovieUrl(ref.tmdbId, selectedDomain)
+                        }
                     } else {
-                        AetherCatalog.buildMovieUrl(ref.tmdbId, selectedDomain)
+                        episode.url.ifBlank { episode.directUrl }
                     }
-                } else {
-                    episode.url.ifBlank { episode.directUrl }
                 }
             }
+
+            val headers = mapOf(
+                "User-Agent" to USER_AGENT,
+                "Referer" to "$selectedDomain/"
+            )
+
+            ResolvedPlayback(
+                url = targetWebUrl,
+                headers = headers,
+                isF4kWrapped = false,
+                isWeb = true,
+                webUrl = targetWebUrl,
+                mediaKind = StreamMediaKind.UNKNOWN,
+                subtitles = emptyList()
+            )
         }
-
-        val headers = mapOf(
-            "User-Agent" to USER_AGENT,
-            "Referer" to "$selectedDomain/"
-        )
-
-        return ResolvedPlayback(
-            url = targetWebUrl,
-            headers = headers,
-            isF4kWrapped = false,
-            isWeb = true,
-            webUrl = targetWebUrl,
-            mediaKind = StreamMediaKind.UNKNOWN,
-            subtitles = emptyList()
-        )
     }
 
     // =========================================================================
