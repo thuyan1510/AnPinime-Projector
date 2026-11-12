@@ -1,6 +1,7 @@
 package com.anpinime.projector
 
 import android.annotation.SuppressLint
+import java.io.File
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -246,7 +247,16 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
-    private fun destroyWebPlayer() {
+    private fun destroyWebPlayer(force: Boolean = true) {
+        if (!force && isAetherEpisode() && fallbackWebView != null) {
+            // Keep the hidden WebView running in background for AI subtitle translation and fast failover
+            fallbackWebView?.visibility = View.GONE
+            fallbackWebView?.evaluateJavascript(
+                "(function(){try{document.querySelectorAll('video,audio').forEach(function(m){m.pause();m.muted=true;m.removeAttribute('src');m.load();});}catch(e){}})();",
+                null
+            )
+            return
+        }
         aetherMenuOpen = false
         val wv = fallbackWebView ?: return
         fallbackWebView = null
@@ -804,7 +814,7 @@ class PlayerActivity : AppCompatActivity() {
         // All Aether settings (Subtitles, Translate to Vietnamese, Audio, Quality, Size, Speed, Server)
         // are now 100% integrated into AnPinime Projector's native dialogs & OSD!
         aetherMenuBtn.visibility = View.GONE
-        audioDecoderBtn.visibility = if (aether) View.GONE else View.VISIBLE
+        audioDecoderBtn.visibility = View.VISIBLE
         if (aether) {
             val activeQ = webQualities.firstOrNull { it.selected }?.label
             qualityBtn.text = if (!activeQ.isNullOrBlank()) "⚙ Chất lượng: $activeQ" else "⚙ Chất lượng: Auto"
@@ -848,7 +858,8 @@ class PlayerActivity : AppCompatActivity() {
                         directUrl = rewrittenUrl,
                         refererUrl = domain
                     )
-                    startEpisodePlayback(updatedEp, resetPosition = false, initialPositionMs = webPositionMs)
+                    val currentPos = exoPlayer?.currentPosition ?: webPositionMs
+                    startEpisodePlayback(updatedEp, resetPosition = false, initialPositionMs = currentPos)
                     playPauseBtn.requestFocus()
                 }
                 serverDrawerRow.addView(domChip)
@@ -1017,7 +1028,7 @@ class PlayerActivity : AppCompatActivity() {
         lastNativeHeaders = headers
         lastMediaKind = mediaKind
         lastSubtitles = subtitles
-        destroyWebPlayer()
+        destroyWebPlayer(force = false)
         surfaceView.visibility = View.VISIBLE
         if (::subtitleView.isInitialized) subtitleView.visibility = View.VISIBLE
 
@@ -1336,15 +1347,11 @@ class PlayerActivity : AppCompatActivity() {
             fun onVideoFound(streamUrl: String, refUrl: String) {
                 mainHandler.post {
                     if (fallbackWebView !== wv) return@post
-                    // CRITICAL: Never extract/hijack Aether streams into ExoPlayer so Aether's
-                    // subtitles, OpenSubtitles scraper, and built-in Vietnamese translator stay active!
-                    if (aetherMode) {
-                        return@post
-                    }
                     if (streamUrl.startsWith("http", ignoreCase = true) && exoPlayer == null) {
                         if (attemptedStreamUrls.contains(streamUrl)) {
                             return@post
                         }
+                        attemptedStreamUrls.add(streamUrl)
                         val origin = try {
                             val u = java.net.URL(refUrl.ifBlank { webUrl })
                             "${u.protocol}://${u.host}"
@@ -1352,12 +1359,189 @@ class PlayerActivity : AppCompatActivity() {
                             ""
                         }
                         val hdrs = HashMap<String, String>()
-                        hdrs["User-Agent"] = "Mozilla/5.0"
+                        hdrs["User-Agent"] = CatalogService.USER_AGENT
                         if (origin.isNotBlank()) {
                             hdrs["Referer"] = "$origin/"
                             hdrs["Origin"] = origin
                         }
-                        prepareExoPlayer(streamUrl, hdrs, 0L, StreamMediaKind.UNKNOWN, emptyList())
+                        val effectiveKind = when {
+                            streamUrl.contains(".m3u8", ignoreCase = true) -> StreamMediaKind.HLS
+                            streamUrl.contains(".mpd", ignoreCase = true) -> StreamMediaKind.DASH
+                            streamUrl.contains(".mp4", ignoreCase = true) -> StreamMediaKind.MP4
+                            streamUrl.contains(".mkv", ignoreCase = true) -> StreamMediaKind.MKV
+                            else -> StreamMediaKind.UNKNOWN
+                        }
+                        prepareExoPlayer(streamUrl, hdrs, webPositionMs, effectiveKind, lastSubtitles)
+                    }
+                }
+            }
+
+            @JavascriptInterface
+            fun onAetherResolved(streamUrl: String, headersJson: String, captionsJson: String, positionSec: Float) {
+                mainHandler.post {
+                    if (fallbackWebView !== wv) return@post
+                    if (isFinishing || isDestroyed) return@post
+                    if (streamUrl.isBlank()) return@post
+                    if (exoPlayer != null && lastNativeUrl == streamUrl) return@post
+
+                    android.util.Log.i("PlayerActivity", "Aether stream extracted: $streamUrl")
+
+                    val hdrs = HashMap<String, String>()
+                    hdrs["User-Agent"] = CatalogService.USER_AGENT
+                    try {
+                        if (headersJson.isNotBlank() && headersJson != "{}") {
+                            val hObj = JSONObject(headersJson)
+                            val it = hObj.keys()
+                            while (it.hasNext()) {
+                                val k = it.next()
+                                val v = hObj.optString(k)
+                                if (v.isNotBlank()) hdrs[k] = v
+                            }
+                        }
+                    } catch (_: Throwable) {}
+                    if (!hdrs.containsKey("Referer") && currentEpisode.refererUrl.isNotBlank()) {
+                        hdrs["Referer"] = currentEpisode.refererUrl
+                    }
+
+                    val subs = mutableListOf<ExternalSubtitleTrack>()
+                    try {
+                        if (captionsJson.isNotBlank() && captionsJson != "[]") {
+                            val arr = JSONArray(captionsJson)
+                            for (i in 0 until arr.length()) {
+                                val c = arr.optJSONObject(i) ?: continue
+                                val cUrl = c.optString("url")
+                                if (cUrl.isBlank()) continue
+                                val cLang = c.optString("language", "vi")
+                                val cLabel = c.optString("label").ifBlank {
+                                    if (cLang.startsWith("vi", ignoreCase = true)) "Tiếng Việt"
+                                    else if (cLang.startsWith("en", ignoreCase = true)) "Tiếng Anh"
+                                    else cLang.uppercase()
+                                }
+                                val mime = when {
+                                    cUrl.contains(".vtt", ignoreCase = true) -> MimeTypes.TEXT_VTT
+                                    cUrl.contains(".ass", ignoreCase = true) || cUrl.contains(".ssa", ignoreCase = true) -> MimeTypes.TEXT_SSA
+                                    else -> MimeTypes.APPLICATION_SUBRIP
+                                }
+                                subs.add(ExternalSubtitleTrack(url = cUrl, language = cLang, label = cLabel, mimeType = mime))
+                            }
+                        }
+                    } catch (_: Throwable) {}
+
+                    subs.sortWith { a, b ->
+                        val aVi = a.language.startsWith("vi", ignoreCase = true)
+                        val bVi = b.language.startsWith("vi", ignoreCase = true)
+                        val aEn = a.language.startsWith("en", ignoreCase = true)
+                        val bEn = b.language.startsWith("en", ignoreCase = true)
+                        when {
+                            aVi && !bVi -> -1
+                            !aVi && bVi -> 1
+                            aEn && !bEn -> -1
+                            !aEn && bEn -> 1
+                            else -> a.label.compareTo(b.label, ignoreCase = true)
+                        }
+                    }
+
+                    // Stop video decoding in background WebView
+                    wv.evaluateJavascript(
+                        "(function(){try{var v=document.getElementById('video-element')||document.querySelector('video');if(v){v.pause();v.muted=true;v.removeAttribute('src');}}catch(e){}})();",
+                        null
+                    )
+                    wv.visibility = View.GONE
+                    loadingOverlay.visibility = View.GONE
+
+                    val effectiveKind = when {
+                        streamUrl.contains(".m3u8", ignoreCase = true) -> StreamMediaKind.HLS
+                        streamUrl.contains(".mpd", ignoreCase = true) -> StreamMediaKind.DASH
+                        streamUrl.contains(".mp4", ignoreCase = true) -> StreamMediaKind.MP4
+                        streamUrl.contains(".mkv", ignoreCase = true) -> StreamMediaKind.MKV
+                        else -> StreamMediaKind.UNKNOWN
+                    }
+
+                    val startSeekMs = (positionSec * 1000).toLong().coerceAtLeast(0L).let {
+                        if (it > 0L) it else webPositionMs.coerceAtLeast(0L)
+                    }
+
+                    prepareExoPlayer(streamUrl, hdrs, startSeekMs, effectiveKind, subs)
+                    updateSourceSpecificOsdButtons()
+                }
+            }
+
+            @JavascriptInterface
+            fun onAetherSubtitlesUpdated(captionsJson: String) {
+                mainHandler.post {
+                    if (fallbackWebView !== wv) return@post
+                    val subs = mutableListOf<ExternalSubtitleTrack>()
+                    try {
+                        if (captionsJson.isNotBlank() && captionsJson != "[]") {
+                            val arr = JSONArray(captionsJson)
+                            for (i in 0 until arr.length()) {
+                                val c = arr.optJSONObject(i) ?: continue
+                                val cUrl = c.optString("url")
+                                if (cUrl.isBlank()) continue
+                                val cLang = c.optString("language", "vi")
+                                val cLabel = c.optString("label").ifBlank {
+                                    if (cLang.startsWith("vi", ignoreCase = true)) "Tiếng Việt"
+                                    else if (cLang.startsWith("en", ignoreCase = true)) "Tiếng Anh"
+                                    else cLang.uppercase()
+                                }
+                                val mime = when {
+                                    cUrl.contains(".vtt", ignoreCase = true) -> MimeTypes.TEXT_VTT
+                                    cUrl.contains(".ass", ignoreCase = true) || cUrl.contains(".ssa", ignoreCase = true) -> MimeTypes.TEXT_SSA
+                                    else -> MimeTypes.APPLICATION_SUBRIP
+                                }
+                                subs.add(ExternalSubtitleTrack(url = cUrl, language = cLang, label = cLabel, mimeType = mime))
+                            }
+                        }
+                    } catch (_: Throwable) {}
+                    if (subs.isEmpty()) return@post
+
+                    val hadVi = lastSubtitles.any { it.language.startsWith("vi", ignoreCase = true) }
+                    val newVi = subs.firstOrNull { it.language.startsWith("vi", ignoreCase = true) }
+                    val merged = lastSubtitles.toMutableList()
+                    var added = 0
+                    for (s in subs) {
+                        if (merged.none { it.url == s.url }) {
+                            merged.add(s)
+                            added++
+                        }
+                    }
+                    if (added > 0) {
+                        lastSubtitles = merged
+                        if (!hadVi && newVi != null && exoPlayer != null) {
+                            val pos = exoPlayer?.currentPosition ?: 0L
+                            prepareExoPlayer(lastNativeUrl, lastNativeHeaders, pos, lastMediaKind, merged)
+                            showPlayerMessage("Phụ đề", "Đã tự động tải phụ đề Tiếng Việt (${newVi.label})")
+                        }
+                    }
+                }
+            }
+
+            @JavascriptInterface
+            fun onAetherTranslatedSubtitle(srtText: String, lang: String, label: String) {
+                mainHandler.post {
+                    if (fallbackWebView !== wv) return@post
+                    if (srtText.isBlank()) return@post
+                    try {
+                        val subFile = File(cacheDir, "aether_translated_${System.currentTimeMillis()}.srt")
+                        subFile.writeText(srtText)
+                        val translatedTrack = ExternalSubtitleTrack(
+                            url = Uri.fromFile(subFile).toString(),
+                            language = lang.ifBlank { "vi" },
+                            label = label.ifBlank { "🇻🇳 Tiếng Việt (Bản dịch AI)" },
+                            mimeType = MimeTypes.APPLICATION_SUBRIP
+                        )
+                        val updated = mutableListOf(translatedTrack)
+                        updated.addAll(lastSubtitles.filterNot { it.label.contains("Bản dịch AI") })
+                        lastSubtitles = updated
+
+                        val player = exoPlayer
+                        if (player != null) {
+                            val curPos = player.currentPosition
+                            prepareExoPlayer(lastNativeUrl, lastNativeHeaders, curPos, lastMediaKind, updated)
+                            showPlayerMessage("Phụ đề", "Đã bật phụ đề Tiếng Việt (Bản dịch AI)!")
+                        }
+                    } catch (t: Throwable) {
+                        android.util.Log.e("PlayerActivity", "Failed to save translated subtitle", t)
                     }
                 }
             }
@@ -1923,14 +2107,19 @@ class PlayerActivity : AppCompatActivity() {
                     }
                 }
 
-                // Do NOT hijack Aether streams into ExoPlayer so Aether's subtitles and built-in Vietnamese translator remain intact.
-                if (!aetherMode && request?.method == "GET" && Regex("(?i)\\.(m3u8|mp4)([?#]|$)").containsMatchIn(url) &&
+                // Fallback stream interception for ExoPlayer
+                if (request?.method == "GET" && Regex("(?i)\\.(m3u8|mp4)([?#]|$)").containsMatchIn(url) &&
                     !url.contains("/ads/", true)) {
                     val requestHeaders = request.requestHeaders.orEmpty()
                     mainHandler.post {
                         if (fallbackWebView === wv && url !in attemptedStreamUrls && exoPlayer == null) {
                             val headers = requestHeaders.filterKeys { it.equals("Referer", true) || it.equals("Origin", true) || it.equals("User-Agent", true) }
-                            prepareExoPlayer(url, headers, webPositionMs, StreamMediaKind.UNKNOWN, emptyList())
+                            val effectiveKind = when {
+                                url.contains(".m3u8", ignoreCase = true) -> StreamMediaKind.HLS
+                                url.contains(".mp4", ignoreCase = true) -> StreamMediaKind.MP4
+                                else -> StreamMediaKind.UNKNOWN
+                            }
+                            prepareExoPlayer(url, headers, webPositionMs, effectiveKind, lastSubtitles)
                         }
                     }
                 }
@@ -1947,7 +2136,7 @@ class PlayerActivity : AppCompatActivity() {
                 view?.evaluateJavascript(activeScript, null)
                 val timeoutMs = if (aetherMode) 25_000L else 22_000L
                 mainHandler.postDelayed({
-                    val notStarted = if (aetherMode) webDurationMs <= 0L else view?.visibility != View.VISIBLE
+                    val notStarted = if (aetherMode) (exoPlayer == null && webDurationMs <= 0L) else view?.visibility != View.VISIBLE
                     if (fallbackWebView === view && notStarted) {
                         if (trySwitchToBackupServer(webPositionMs)) {
                             return@postDelayed
@@ -2375,13 +2564,111 @@ class PlayerActivity : AppCompatActivity() {
                 if (!ps || !ps.caption) return;
                 var task = ps.caption.translateTask;
                 if (task && task.targetLanguage === 'vi' && task.done && task.translatedCaption) {
+                  if (task.translatedCaption.srtData && !task.__anpinimeReported) {
+                    task.__anpinimeReported = true;
+                    try {
+                      AnPinimeWebBridge.onAetherTranslatedSubtitle(
+                        task.translatedCaption.srtData,
+                        'vi',
+                        '🇻🇳 Tiếng Việt (Bản dịch AI)'
+                      );
+                    } catch(e){}
+                  }
                   var cur = ps.caption.selected;
                   if (!cur || String(cur.id) !== String(task.translatedCaption.id)) {
                     try {
                       ps.setCaption(task.translatedCaption);
-                      AnPinimeWebBridge.onAetherStatus('Đã bật phụ đề dịch Tiếng Việt');
+                      AnPinimeWebBridge.onAetherStatus('Đã hoàn tất dịch phụ đề Tiếng Việt');
                     } catch(e){}
                   }
+                }
+              }
+
+              var aetherResolvedSent = false;
+              var aetherResolutionWaitCycles = 0;
+              var lastReportedSubCount = 0;
+
+              function extractAetherStreamData(ps, v) {
+                var streamUrl = '';
+                var headers = {};
+                var qualities = {};
+                if (ps && ps.source) {
+                  var src = ps.source;
+                  if (src.headers && typeof src.headers === 'object') {
+                    Object.assign(headers, src.headers);
+                  }
+                  if (src.type === 'hls' && src.url) {
+                    streamUrl = src.url;
+                  } else if (src.type === 'file' && src.qualities && typeof src.qualities === 'object') {
+                    qualities = src.qualities;
+                    var qKeys = Object.keys(src.qualities);
+                    var preferredOrder = ['1080', '720', '480', '360', 'unknown'];
+                    var bestKey = preferredOrder.find(function(k){ return qKeys.indexOf(k) >= 0; }) || qKeys[0];
+                    if (bestKey && src.qualities[bestKey] && src.qualities[bestKey].url) {
+                      streamUrl = src.qualities[bestKey].url;
+                    }
+                  }
+                }
+                if (!streamUrl && v) {
+                  var cur = v.currentSrc || v.getAttribute('src') || '';
+                  if (cur && !/^blob:/i.test(cur) && !adURL(cur)) {
+                    streamUrl = cur;
+                  }
+                }
+                if (!streamUrl && detectedStreams && detectedStreams.length) {
+                  streamUrl = detectedStreams[detectedStreams.length - 1];
+                }
+                return { url: streamUrl, headers: headers, qualities: qualities };
+              }
+
+              function extractAetherCaptionList(ps) {
+                var list = [];
+                if (!ps || !Array.isArray(ps.captionList)) return list;
+                ps.captionList.forEach(function(c, idx) {
+                  if (!c || !c.url) return;
+                  var lang = String(c.language || 'vi').toLowerCase();
+                  var isVi = /^vi/i.test(lang);
+                  var isEn = /^en/i.test(lang);
+                  var label = (isVi ? '🇻🇳 Tiếng Việt' : (isEn ? '🇬🇧 Tiếng Anh' : langLabel(lang))) +
+                              (c.opensubtitles ? ' (OpenSubtitles #' + (idx + 1) + ')' : ' #' + (idx + 1));
+                  list.push({
+                    id: String(c.id || idx),
+                    language: lang,
+                    label: label,
+                    url: c.url
+                  });
+                });
+                return list;
+              }
+
+              function checkAetherStreamResolution(ps, v) {
+                var streamData = extractAetherStreamData(ps, v);
+                if (!streamData.url) return;
+
+                var captions = extractAetherCaptionList(ps);
+
+                if (!aetherResolvedSent) {
+                  var hasVi = captions.some(function(c){ return /^vi/i.test(c.language); });
+                  var readyToLaunch = hasVi || (!ps.isLoadingExternalSubtitles && captions.length > 0) || aetherResolutionWaitCycles >= 3;
+                  if (!readyToLaunch) {
+                    aetherResolutionWaitCycles++;
+                    return;
+                  }
+                  aetherResolvedSent = true;
+                  lastReportedSubCount = captions.length;
+                  try {
+                    AnPinimeWebBridge.onAetherResolved(
+                      streamData.url,
+                      JSON.stringify(streamData.headers || {}),
+                      JSON.stringify(captions),
+                      (v && isFinite(v.currentTime) ? v.currentTime : 0) || initialSeekTarget || 0
+                    );
+                  } catch(e){}
+                } else if (captions.length !== lastReportedSubCount) {
+                  lastReportedSubCount = captions.length;
+                  try {
+                    AnPinimeWebBridge.onAetherSubtitlesUpdated(JSON.stringify(captions));
+                  } catch(e){}
                 }
               }
 
@@ -2419,6 +2706,7 @@ class PlayerActivity : AppCompatActivity() {
                 if (ps.status !== 'playing') {
                   return;
                 }
+                checkAetherStreamResolution(ps, activeVideo || document.getElementById('video-element') || document.querySelector('video'));
                 if (document.body && !document.body.classList.contains('anpinime-playing')) {
                   document.body.classList.add('anpinime-playing');
                 }
@@ -2826,14 +3114,29 @@ class PlayerActivity : AppCompatActivity() {
                 injectAetherStyles();
                 var v = document.getElementById('video-element') || document.querySelector('video');
                 if (v) {
+                  activeVideo = v;
                   stripVideoFilter(v);
                   bindVideo(v);
                 }
+                var stores = findAetherStores();
+                if (stores && stores.rawPlayerStore && !stores.rawPlayerStore.__anpinimeSubscribed) {
+                  stores.rawPlayerStore.__anpinimeSubscribed = true;
+                  try {
+                    stores.rawPlayerStore.subscribe(function(st) {
+                      if (!st) return;
+                      if (st.status === 'playing') {
+                        checkAetherStreamResolution(st, activeVideo || document.getElementById('video-element') || document.querySelector('video'));
+                      }
+                      syncTranslatedCaptionState(st);
+                    });
+                  } catch(e){}
+                }
+                checkAutoSubtitles();
                 sendState();
               }
 
               tick();
-              setInterval(tick, 1000);
+              setInterval(tick, 500);
             })();
         """.trimIndent()
     }
@@ -3102,7 +3405,11 @@ class PlayerActivity : AppCompatActivity() {
                 labels.add(details.joinToString(" • ").ifBlank { "Track ${options.size}" })
             }
         }
-        if (options.isEmpty()) {
+        val hasAetherTranslate = type == C.TRACK_TYPE_TEXT && isAetherEpisode()
+        if (hasAetherTranslate) {
+            labels.add("🌐 [Dịch sang Tiếng Việt qua Aether AI]")
+        }
+        if (options.isEmpty() && !hasAetherTranslate) {
             showPlayerMessage(
                 title,
                 if (type == C.TRACK_TYPE_TEXT)
@@ -3113,10 +3420,14 @@ class PlayerActivity : AppCompatActivity() {
             return
         }
         showSelection(title, labels, selected) { index ->
+            if (hasAetherTranslate && index == labels.size - 1) {
+                triggerAetherVietnameseTranslation()
+                return@showSelection
+            }
             val builder = player.trackSelectionParameters.buildUpon()
                 .clearOverridesOfType(type)
                 .setTrackTypeDisabled(type, type == C.TRACK_TYPE_TEXT && index == 0)
-            if (index > 0) {
+            if (index > 0 && index <= options.size) {
                 val (group, track) = options[index - 1]
                 builder.setOverrideForType(TrackSelectionOverride(group, track))
             }
