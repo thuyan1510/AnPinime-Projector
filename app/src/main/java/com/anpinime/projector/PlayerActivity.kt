@@ -13,6 +13,7 @@ import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
 import android.view.ViewGroup
@@ -29,6 +30,7 @@ import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.SeekBar
 import android.widget.TextView
 import androidx.annotation.OptIn
@@ -120,7 +122,26 @@ class PlayerActivity : AppCompatActivity() {
     private var aetherMenuOpen = false
     private var aetherStatusNote: String = ""
 
+    data class AetherProvider(
+        val id: String,
+        val name: String,
+        val description: String = ""
+    )
+
+    private var currentAetherProviderId: String = "auto"
+    private var availableAetherProviders: List<AetherProvider> = listOf(
+        AetherProvider("auto", "Tự động", "Tự động quét tìm nguồn tốt nhất"),
+        AetherProvider("febbox", "Febbox", "4K / Siêu nét (Nhanh nhất)"),
+        AetherProvider("showbox", "Showbox", "Full HD / Ổn định"),
+        AetherProvider("vidsrc", "VidSrc", "Kho phim phong phú"),
+        AetherProvider("insertunit", "Insertunit", "Dự phòng tốc độ cao"),
+        AetherProvider("smashystream", "SmashyStream", "Nguồn quốc tế"),
+        AetherProvider("gomovies", "GOmovies", "Nguồn phim bổ sung"),
+        AetherProvider("flixhq", "FlixHQ", "Chất lượng cao")
+    )
+
     private lateinit var videoFrame: FrameLayout
+    private lateinit var headlessWebContainer: FrameLayout
     private lateinit var surfaceView: SurfaceView
     private lateinit var subtitleView: SubtitleView
     private var scrubbing = false
@@ -135,7 +156,10 @@ class PlayerActivity : AppCompatActivity() {
     private var openingFrame = false
     private val visitedFrames = HashSet<String>()
     private lateinit var loadingOverlay: LinearLayout
+    private lateinit var loadingProviderBadge: TextView
     private lateinit var loadingText: TextView
+    private lateinit var loadingProgressBar: ProgressBar
+    private lateinit var loadingHintText: TextView
     private lateinit var osdContainer: FrameLayout
     private lateinit var topTitleText: TextView
     private lateinit var topServerText: TextView
@@ -492,6 +516,13 @@ class PlayerActivity : AppCompatActivity() {
             isFocusable = false
             isFocusableInTouchMode = false
         }
+        surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(holder: SurfaceHolder) {
+                exoPlayer?.setVideoSurfaceView(surfaceView)
+            }
+            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
+            override fun surfaceDestroyed(holder: SurfaceHolder) {}
+        })
         videoFrame.addView(surfaceView)
         subtitleView = SubtitleView(this).apply {
             setUserDefaultStyle()
@@ -502,7 +533,16 @@ class PlayerActivity : AppCompatActivity() {
         videoFrame.addView(subtitleView)
         root.addView(videoFrame)
 
-        // Loading / Status Overlay with iOS Animated Loading GIF
+        // Headless container for background WebView scraper, completely isolated from videoFrame
+        headlessWebContainer = FrameLayout(this).apply {
+            visibility = View.GONE
+            layoutParams = FrameLayout.LayoutParams(1, 1, Gravity.TOP or Gravity.START)
+            isFocusable = false
+            isFocusableInTouchMode = false
+        }
+        root.addView(headlessWebContainer)
+
+        // Loading / Status Overlay with iOS Animated Loading GIF & Real-Time Scraping Animation
         loadingOverlay = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
@@ -514,16 +554,62 @@ class PlayerActivity : AppCompatActivity() {
                 Gravity.CENTER
             )
         }
-        loadingOverlay.addView(UiHelper.createLoadingIndicator(this, sizeDp = 92))
+        loadingOverlay.addView(UiHelper.createLoadingIndicator(this, sizeDp = 88))
+
+        loadingProviderBadge = TextView(this).apply {
+            text = "⚡ Đang kiểm tra: Tự động"
+            setTextColor(Color.parseColor("#38BDF8"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(UiHelper.dp(context, 14), UiHelper.dp(context, 5), UiHelper.dp(context, 14), UiHelper.dp(context, 5))
+            background = UiHelper.roundedBg(Color.parseColor("#2638BDF8"), 14, context, Color.parseColor("#4D38BDF8"), 1)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+                topMargin = UiHelper.dp(context, 10)
+                bottomMargin = UiHelper.dp(context, 4)
+            }
+            visibility = View.GONE
+        }
+        loadingOverlay.addView(loadingProviderBadge)
+
         loadingText = TextView(this).apply {
             text = "Đang kết nối luồng phát…"
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14.5f)
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            setPadding(0, UiHelper.dp(context, 10), 0, 0)
+            setPadding(0, UiHelper.dp(context, 6), 0, 0)
         }
         loadingOverlay.addView(loadingText)
+
+        loadingProgressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            isIndeterminate = true
+            layoutParams = LinearLayout.LayoutParams(
+                UiHelper.dp(context, 260),
+                UiHelper.dp(context, 6)
+            ).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+                topMargin = UiHelper.dp(context, 10)
+                bottomMargin = UiHelper.dp(context, 6)
+            }
+            visibility = View.GONE
+        }
+        loadingOverlay.addView(loadingProgressBar)
+
+        loadingHintText = TextView(this).apply {
+            text = "💡 Có thể bấm [Đổi Server] trên remote để chọn nguồn tải khác"
+            setTextColor(Color.parseColor("#99FFFFFF"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            gravity = Gravity.CENTER
+            setPadding(0, UiHelper.dp(context, 4), 0, 0)
+            visibility = View.GONE
+        }
+        loadingOverlay.addView(loadingHintText)
+
         root.addView(loadingOverlay)
 
         // OSD Controls Container
@@ -824,16 +910,12 @@ class PlayerActivity : AppCompatActivity() {
     private fun populateServerDrawer() {
         serverDrawerRow.removeAllViews()
         if (isAetherEpisode()) {
-            // Clean, non-duplicated Aether servers drawer: Server 1 (Auto), Server 2 (Backup 1), Server 3 (Backup 2)
-            val domains = AetherCatalog.getActiveDomains(this)
-            val currentDomain = AetherCatalog.normalizeHttpsDomain(currentEpisode.refererUrl)
-                ?: AetherCatalog.normalizeHttpsDomain(currentEpisode.url)
-                ?: domains.firstOrNull().orEmpty()
-            domains.forEachIndexed { idx, domain ->
-                val host = try { java.net.URI(domain).host ?: domain } catch (_: Throwable) { domain }
-                val isCurrentDom = domain.equals(currentDomain, ignoreCase = true)
-                val domChip = TextView(this).apply {
-                    text = if (idx == 0) "🖥 Server 1 · Aether Tự động ($host)" else "🖥 Server ${idx + 1} · Aether Dự phòng ($host)"
+            // Display Aether providers/scrapers directly instead of mirror domains (which are auto-managed)
+            availableAetherProviders.forEachIndexed { idx, provider ->
+                val isCurrent = provider.id.equals(currentAetherProviderId, ignoreCase = true)
+                val chip = TextView(this).apply {
+                    text = if (provider.id == "auto") "🖥 Server 1 · ${provider.name} (Khuyên dùng)"
+                           else "🖥 Server ${idx + 1} · ${provider.name}"
                     setTextColor(Color.WHITE)
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
                     typeface = Typeface.DEFAULT_BOLD
@@ -844,25 +926,17 @@ class PlayerActivity : AppCompatActivity() {
                     ).apply { rightMargin = UiHelper.dp(context, 8) }
                 }
                 UiHelper.makeFocusableButton(
-                    view = domChip,
-                    normalBgColor = if (isCurrentDom) UiHelper.COLOR_BLUE else UiHelper.COLOR_CARD,
+                    view = chip,
+                    normalBgColor = if (isCurrent) UiHelper.COLOR_BLUE else UiHelper.COLOR_CARD,
                     focusedBgColor = UiHelper.COLOR_ACCENT,
                     focusedStrokeColor = Color.WHITE,
                     radiusDp = 16
                 ) {
                     serverDrawer.visibility = View.GONE
-                    AetherCatalog.setPreferredDomain(this, domain)
-                    val rewrittenUrl = AetherCatalog.rewriteUrlToDomain(currentEpisode.url, domain)
-                    val updatedEp = currentEpisode.copy(
-                        url = rewrittenUrl,
-                        directUrl = rewrittenUrl,
-                        refererUrl = domain
-                    )
-                    val currentPos = exoPlayer?.currentPosition ?: webPositionMs
-                    startEpisodePlayback(updatedEp, resetPosition = false, initialPositionMs = currentPos)
+                    selectAetherProvider(provider.id, provider.name)
                     playPauseBtn.requestFocus()
                 }
-                serverDrawerRow.addView(domChip)
+                serverDrawerRow.addView(chip)
             }
             return
         }
@@ -931,6 +1005,107 @@ class PlayerActivity : AppCompatActivity() {
             }
             episodeDrawerRow.addView(chip)
         }
+    }
+
+    private fun selectAetherProvider(providerId: String, providerName: String) {
+        currentAetherProviderId = providerId
+        val resumePos = exoPlayer?.currentPosition ?: webPositionMs
+        releasePlayer(stopRelay = false)
+
+        updateScrapingOverlay(providerName, providerId, "Đang chuyển sang nguồn $providerName…", 0)
+
+        if (fallbackWebView == null) {
+            startWebFallback(currentEpisode.url, currentEpisode.refererUrl, resumePos)
+            return
+        }
+
+        val script = """
+            (function(){
+                try {
+                    var target = '$providerId';
+                    var pref = window.__anpinimePrefStore ? window.__anpinimePrefStore.getState() : null;
+                    var player = window.__anpinimePlayerStore ? window.__anpinimePlayerStore.getState() : null;
+                    if (pref) {
+                        if (target === 'auto') {
+                            if (pref.setEnableSourceOrder) pref.setEnableSourceOrder(false);
+                        } else {
+                            if (pref.setEnableSourceOrder) pref.setEnableSourceOrder(true);
+                            var curOrder = pref.sourceOrder || [];
+                            var newOrder = [target].concat(curOrder.filter(function(x){ return x !== target; }));
+                            if (pref.setSourceOrder) pref.setSourceOrder(newOrder);
+                            if (player && player.meta && player.meta.tmdbId && pref.setLastSuccessfulSource) {
+                                pref.setLastSuccessfulSource(player.meta.tmdbId, target);
+                            }
+                        }
+                    }
+                    if (typeof window.__anpinimeScrapeAndPlay === 'function' && target !== 'auto') {
+                        window.__anpinimeScrapeAndPlay(target);
+                    } else if (player && typeof player.setStatus === 'function') {
+                        player.setStatus('scraping');
+                    }
+                } catch(e) {
+                    console.error('AnPinime select provider error:', e);
+                }
+            })();
+        """.trimIndent()
+
+        fallbackWebView?.evaluateJavascript(script, null)
+    }
+
+    private fun handleAetherSourcesLoaded(sourcesJson: String) {
+        try {
+            val arr = JSONArray(sourcesJson)
+            val list = mutableListOf<AetherProvider>()
+            list.add(AetherProvider("auto", "Tự động", "Tự động quét tìm nguồn tốt nhất"))
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val id = obj.optString("id")
+                val name = obj.optString("name").ifBlank { id }
+                if (id.isNotBlank() && id != "auto") {
+                    val desc = when (id.lowercase()) {
+                        "febbox" -> "4K / Siêu nét (Nhanh nhất)"
+                        "showbox" -> "Full HD / Ổn định"
+                        "vidsrc" -> "Kho phim phong phú"
+                        "insertunit" -> "Dự phòng tốc độ cao"
+                        "smashystream" -> "Nguồn quốc tế"
+                        "gomovies" -> "Nguồn phim bổ sung"
+                        "flixhq" -> "Chất lượng cao"
+                        else -> "Nguồn trực tuyến"
+                    }
+                    if (list.none { it.id.equals(id, ignoreCase = true) }) {
+                        list.add(AetherProvider(id, name, desc))
+                    }
+                }
+            }
+            if (list.size > 1) {
+                availableAetherProviders = list
+                if (serverDrawer.visibility == View.VISIBLE && isAetherEpisode()) {
+                    populateServerDrawer()
+                }
+            }
+        } catch (_: Throwable) {}
+    }
+
+    private fun updateScrapingOverlay(
+        providerName: String,
+        providerId: String,
+        statusText: String,
+        percentage: Int
+    ) {
+        if (exoPlayer != null) return
+        loadingOverlay.visibility = View.VISIBLE
+        loadingProviderBadge.visibility = View.VISIBLE
+        val displayName = providerName.ifBlank { providerId }
+        loadingProviderBadge.text = "⚡ Đang kiểm tra: $displayName"
+        loadingText.text = if (statusText.isNotBlank()) statusText else "Đang quét nguồn $displayName…"
+        loadingProgressBar.visibility = View.VISIBLE
+        if (percentage > 0) {
+            loadingProgressBar.isIndeterminate = false
+            loadingProgressBar.progress = percentage
+        } else {
+            loadingProgressBar.isIndeterminate = true
+        }
+        loadingHintText.visibility = View.VISIBLE
     }
 
     // =========================================================================
@@ -1287,8 +1462,9 @@ class PlayerActivity : AppCompatActivity() {
         releasePlayer()
         destroyWebPlayer()
         val aetherMode = isAetherEpisode()
-        surfaceView.visibility = View.GONE
-        if (::subtitleView.isInitialized) subtitleView.visibility = View.GONE
+        // NEVER set surfaceView to GONE - keep it visible so its native Surface is preserved and never black-screens!
+        surfaceView.visibility = View.VISIBLE
+        if (::subtitleView.isInitialized) subtitleView.visibility = View.VISIBLE
         loadingOverlay.visibility = View.VISIBLE
 
         if (aetherMode) {
@@ -1299,8 +1475,17 @@ class PlayerActivity : AppCompatActivity() {
                 showPlayerMessage("WebView không tương thích", compat.message)
                 return
             }
-            loadingText.text = "Đang khởi tạo trình phát Aether (${currentEpisode.title})…"
+            val activeP = availableAetherProviders.firstOrNull { it.id == currentAetherProviderId }?.name ?: "Tự động"
+            loadingProviderBadge.visibility = View.VISIBLE
+            loadingProviderBadge.text = "⚡ Đang kiểm tra: $activeP"
+            loadingText.text = "Đang tìm kiếm luồng phát tốt nhất (${currentEpisode.title})…"
+            loadingProgressBar.visibility = View.VISIBLE
+            loadingProgressBar.isIndeterminate = true
+            loadingHintText.visibility = View.VISIBLE
         } else {
+            loadingProviderBadge.visibility = View.GONE
+            loadingProgressBar.visibility = View.GONE
+            loadingHintText.visibility = View.GONE
             loadingText.text = "Đang mở trình phát dự phòng…"
         }
 
@@ -1377,93 +1562,30 @@ class PlayerActivity : AppCompatActivity() {
             }
 
             @JavascriptInterface
-            fun onAetherResolved(streamUrl: String, headersJson: String, captionsJson: String, positionSec: Float) {
+            fun onAetherSourcesLoaded(sourcesJson: String) {
                 mainHandler.post {
                     if (fallbackWebView !== wv) return@post
-                    if (isFinishing || isDestroyed) return@post
-                    if (streamUrl.isBlank()) return@post
-                    if (exoPlayer != null && lastNativeUrl == streamUrl) return@post
-
-                    android.util.Log.i("PlayerActivity", "Aether stream extracted: $streamUrl")
-
-                    val hdrs = HashMap<String, String>()
-                    hdrs["User-Agent"] = CatalogService.USER_AGENT
-                    try {
-                        if (headersJson.isNotBlank() && headersJson != "{}") {
-                            val hObj = JSONObject(headersJson)
-                            val it = hObj.keys()
-                            while (it.hasNext()) {
-                                val k = it.next()
-                                val v = hObj.optString(k)
-                                if (v.isNotBlank()) hdrs[k] = v
-                            }
-                        }
-                    } catch (_: Throwable) {}
-                    if (!hdrs.containsKey("Referer") && currentEpisode.refererUrl.isNotBlank()) {
-                        hdrs["Referer"] = currentEpisode.refererUrl
-                    }
-
-                    val subs = mutableListOf<ExternalSubtitleTrack>()
-                    try {
-                        if (captionsJson.isNotBlank() && captionsJson != "[]") {
-                            val arr = JSONArray(captionsJson)
-                            for (i in 0 until arr.length()) {
-                                val c = arr.optJSONObject(i) ?: continue
-                                val cUrl = c.optString("url")
-                                if (cUrl.isBlank()) continue
-                                val cLang = c.optString("language", "vi")
-                                val cLabel = c.optString("label").ifBlank {
-                                    if (cLang.startsWith("vi", ignoreCase = true)) "Tiếng Việt"
-                                    else if (cLang.startsWith("en", ignoreCase = true)) "Tiếng Anh"
-                                    else cLang.uppercase()
-                                }
-                                val mime = when {
-                                    cUrl.contains(".vtt", ignoreCase = true) -> MimeTypes.TEXT_VTT
-                                    cUrl.contains(".ass", ignoreCase = true) || cUrl.contains(".ssa", ignoreCase = true) -> MimeTypes.TEXT_SSA
-                                    else -> MimeTypes.APPLICATION_SUBRIP
-                                }
-                                subs.add(ExternalSubtitleTrack(url = cUrl, language = cLang, label = cLabel, mimeType = mime))
-                            }
-                        }
-                    } catch (_: Throwable) {}
-
-                    subs.sortWith { a, b ->
-                        val aVi = a.language.startsWith("vi", ignoreCase = true)
-                        val bVi = b.language.startsWith("vi", ignoreCase = true)
-                        val aEn = a.language.startsWith("en", ignoreCase = true)
-                        val bEn = b.language.startsWith("en", ignoreCase = true)
-                        when {
-                            aVi && !bVi -> -1
-                            !aVi && bVi -> 1
-                            aEn && !bEn -> -1
-                            !aEn && bEn -> 1
-                            else -> a.label.compareTo(b.label, ignoreCase = true)
-                        }
-                    }
-
-                    // Stop video decoding in background WebView
-                    wv.evaluateJavascript(
-                        "(function(){try{var v=document.getElementById('video-element')||document.querySelector('video');if(v){v.pause();v.muted=true;v.removeAttribute('src');}}catch(e){}})();",
-                        null
-                    )
-                    wv.visibility = View.GONE
-                    loadingOverlay.visibility = View.GONE
-
-                    val effectiveKind = when {
-                        streamUrl.contains(".m3u8", ignoreCase = true) -> StreamMediaKind.HLS
-                        streamUrl.contains(".mpd", ignoreCase = true) -> StreamMediaKind.DASH
-                        streamUrl.contains(".mp4", ignoreCase = true) -> StreamMediaKind.MP4
-                        streamUrl.contains(".mkv", ignoreCase = true) -> StreamMediaKind.MKV
-                        else -> StreamMediaKind.UNKNOWN
-                    }
-
-                    val startSeekMs = (positionSec * 1000).toLong().coerceAtLeast(0L).let {
-                        if (it > 0L) it else webPositionMs.coerceAtLeast(0L)
-                    }
-
-                    prepareExoPlayer(streamUrl, hdrs, startSeekMs, effectiveKind, subs)
-                    updateSourceSpecificOsdButtons()
+                    handleAetherSourcesLoaded(sourcesJson)
                 }
+            }
+
+            @JavascriptInterface
+            fun onAetherScrapingProgress(providerName: String, providerId: String, statusText: String, percentage: Int) {
+                mainHandler.post {
+                    if (fallbackWebView !== wv) return@post
+                    if (exoPlayer != null) return@post
+                    updateScrapingOverlay(providerName, providerId, statusText, percentage)
+                }
+            }
+
+            @JavascriptInterface
+            fun onAetherResolved(streamUrl: String, streamType: String, headersJson: String, captionsJson: String, positionSec: Float) {
+                handleAetherResolved(streamUrl, streamType, headersJson, captionsJson, positionSec, wv)
+            }
+
+            @JavascriptInterface
+            fun onAetherResolved(streamUrl: String, headersJson: String, captionsJson: String, positionSec: Float) {
+                handleAetherResolved(streamUrl, "", headersJson, captionsJson, positionSec, wv)
             }
 
             @JavascriptInterface
@@ -2087,8 +2209,70 @@ class PlayerActivity : AppCompatActivity() {
                             if (resp.isSuccessful) {
                                 val body = resp.body?.string().orEmpty()
                                 if (body.isNotBlank()) {
-                                    val exportHook = "\n;try{window.__anpinimePlayerStore=I;window.__anpinimeSubStore=ve;window.__anpinimePrefStore=ne;if(typeof Cs==='function'){window.__anpinimeCs=Cs;}if(ne&&ne.getState){if(ne.getState().setEnableThumbnails)ne.getState().setEnableThumbnails(false);if(ne.getState().setEnableLowPerformanceMode)ne.getState().setEnableLowPerformanceMode(true);if(ne.getState().setEnableLastSuccessfulSource)ne.getState().setEnableLastSuccessfulSource(true);}}catch(e){console.error('AnPinime store injection error:',e);}\n"
-                                    val patched = body + exportHook
+                                    val exportHook = """
+                                        ;try {
+                                            window.__anpinimePlayerStore = I;
+                                            window.__anpinimeSubStore = ve;
+                                            window.__anpinimePrefStore = ne;
+                                            if (typeof Cs === 'function') window.__anpinimeCs = Cs;
+                                            if (typeof Ss === 'function') window.__anpinimeSs = Ss;
+                                            if (typeof g0 === 'function') window.__anpinimeScrapeAndPlay = g0;
+
+                                            function reportAetherSources() {
+                                                try {
+                                                    if (typeof Ss === 'function' && window.AnPinimeWebBridge && AnPinimeWebBridge.onAetherSourcesLoaded) {
+                                                        var sList = Ss().filter(function(x){ return x.type === 'source'; });
+                                                        if (sList && sList.length > 0) {
+                                                            AnPinimeWebBridge.onAetherSourcesLoaded(JSON.stringify(sList));
+                                                            return true;
+                                                        }
+                                                    }
+                                                } catch(e){}
+                                                return false;
+                                            }
+                                            if (!reportAetherSources()) {
+                                                var sTimer = setInterval(function() {
+                                                    if (reportAetherSources()) clearInterval(sTimer);
+                                                }, 500);
+                                                setTimeout(function(){ clearInterval(sTimer); }, 15000);
+                                            }
+
+                                            if (typeof pa === 'function') {
+                                                var _realPa = pa;
+                                                pa = function() {
+                                                    var inst = _realPa.apply(this, arguments);
+                                                    if (inst && !inst.__anpinimeWrapped) {
+                                                        inst.__anpinimeWrapped = true;
+                                                        var origRunSource = inst.runSourceScraper;
+                                                        inst.runSourceScraper = async function(opts) {
+                                                            var res = await origRunSource.apply(this, arguments);
+                                                            if (res && res.embeds && res.embeds.length > 1 && !res.stream) {
+                                                                try {
+                                                                    var emb = res.embeds[0];
+                                                                    var embRes = await inst.runEmbedScraper({ id: emb.embedId, url: emb.url });
+                                                                    if (embRes && embRes.stream) {
+                                                                        res.stream = embRes.stream;
+                                                                    }
+                                                                } catch(e){}
+                                                            }
+                                                            return res;
+                                                        };
+                                                    }
+                                                    return inst;
+                                                };
+                                            }
+
+                                            if (ne && ne.getState) {
+                                                var prefSt = ne.getState();
+                                                if (prefSt.setEnableThumbnails) prefSt.setEnableThumbnails(false);
+                                                if (prefSt.setEnableLowPerformanceMode) prefSt.setEnableLowPerformanceMode(true);
+                                                if (prefSt.setEnableLastSuccessfulSource) prefSt.setEnableLastSuccessfulSource(true);
+                                            }
+                                        } catch(e) {
+                                            console.error('AnPinime store injection error:', e);
+                                        }
+                                    """.trimIndent()
+                                    val patched = body + "\n" + exportHook
                                     aetherJsCache[url] = patched
                                     patched
                                 } else null
@@ -2165,12 +2349,119 @@ class PlayerActivity : AppCompatActivity() {
         }
 
         fallbackWebView = wv
-        videoFrame.addView(wv)
-        videoFrame.bringChildToFront(wv)
+        headlessWebContainer.removeAllViews()
+        headlessWebContainer.addView(wv)
         if (aetherMode) {
             wv.loadUrl(webUrl)
         } else {
             wv.loadUrl(webUrl, mapOf("Referer" to referer, "User-Agent" to "Mozilla/5.0"))
+        }
+    }
+
+    private fun handleAetherResolved(
+        streamUrl: String,
+        streamType: String,
+        headersJson: String,
+        captionsJson: String,
+        positionSec: Float,
+        wv: WebView
+    ) {
+        mainHandler.post {
+            if (fallbackWebView !== wv) return@post
+            if (isFinishing || isDestroyed) return@post
+            if (streamUrl.isBlank()) return@post
+            if (exoPlayer != null && lastNativeUrl == streamUrl) return@post
+
+            android.util.Log.i("PlayerActivity", "Aether stream extracted: $streamUrl (type: $streamType)")
+
+            // Stop background WebView video playback
+            wv.evaluateJavascript(
+                "(function(){try{document.querySelectorAll('video,audio').forEach(function(m){m.pause();m.muted=true;m.removeAttribute('src');});}catch(e){}})();",
+                null
+            )
+            wv.visibility = View.GONE
+            loadingOverlay.visibility = View.GONE
+            loadingProviderBadge.visibility = View.GONE
+            loadingProgressBar.visibility = View.GONE
+            loadingHintText.visibility = View.GONE
+
+            val hdrs = HashMap<String, String>()
+            hdrs["User-Agent"] = CatalogService.USER_AGENT
+            try {
+                if (headersJson.isNotBlank() && headersJson != "{}") {
+                    val hObj = JSONObject(headersJson)
+                    val it = hObj.keys()
+                    while (it.hasNext()) {
+                        val k = it.next()
+                        val v = hObj.optString(k)
+                        if (v.isNotBlank()) hdrs[k] = v
+                    }
+                }
+            } catch (_: Throwable) {}
+            if (!hdrs.containsKey("Referer") && currentEpisode.refererUrl.isNotBlank()) {
+                hdrs["Referer"] = currentEpisode.refererUrl
+            }
+
+            val subs = mutableListOf<ExternalSubtitleTrack>()
+            try {
+                if (captionsJson.isNotBlank() && captionsJson != "[]") {
+                    val arr = JSONArray(captionsJson)
+                    for (i in 0 until arr.length()) {
+                        val c = arr.optJSONObject(i) ?: continue
+                        val cUrl = c.optString("url")
+                        if (cUrl.isBlank()) continue
+                        val cLang = c.optString("language", "vi")
+                        val cLabel = c.optString("label").ifBlank {
+                            if (cLang.startsWith("vi", ignoreCase = true)) "Tiếng Việt"
+                            else if (cLang.startsWith("en", ignoreCase = true)) "Tiếng Anh"
+                            else cLang.uppercase()
+                        }
+                        val mime = when {
+                            cUrl.contains(".vtt", ignoreCase = true) -> MimeTypes.TEXT_VTT
+                            cUrl.contains(".ass", ignoreCase = true) || cUrl.contains(".ssa", ignoreCase = true) -> MimeTypes.TEXT_SSA
+                            else -> MimeTypes.APPLICATION_SUBRIP
+                        }
+                        subs.add(ExternalSubtitleTrack(url = cUrl, language = cLang, label = cLabel, mimeType = mime))
+                    }
+                }
+            } catch (_: Throwable) {}
+
+            subs.sortWith { a, b ->
+                val aVi = a.language.startsWith("vi", ignoreCase = true)
+                val bVi = b.language.startsWith("vi", ignoreCase = true)
+                val aEn = a.language.startsWith("en", ignoreCase = true)
+                val bEn = b.language.startsWith("en", ignoreCase = true)
+                when {
+                    aVi && !bVi -> -1
+                    !aVi && bVi -> 1
+                    aEn && !bEn -> -1
+                    !aEn && bEn -> 1
+                    else -> a.label.compareTo(b.label, ignoreCase = true)
+                }
+            }
+
+            val cleanLower = streamUrl.lowercase()
+            val effectiveKind = when {
+                streamType.equals("hls", ignoreCase = true) -> StreamMediaKind.HLS
+                streamType.equals("file", ignoreCase = true) -> {
+                    when {
+                        cleanLower.contains(".mkv") -> StreamMediaKind.MKV
+                        else -> StreamMediaKind.MP4
+                    }
+                }
+                cleanLower.contains(".m3u8") || cleanLower.contains("/hls/") -> StreamMediaKind.HLS
+                cleanLower.contains(".mpd") -> StreamMediaKind.DASH
+                cleanLower.contains(".mkv") -> StreamMediaKind.MKV
+                cleanLower.contains(".mp4") -> StreamMediaKind.MP4
+                else -> StreamMediaKind.HLS // Default Aether streams to HLS
+            }
+
+            val startSeekMs = (positionSec * 1000).toLong().coerceAtLeast(0L).let {
+                if (it > 0L) it else webPositionMs.coerceAtLeast(0L)
+            }
+
+            prepareExoPlayer(streamUrl, hdrs, startSeekMs, effectiveKind, subs)
+            updateSourceSpecificOsdButtons()
         }
     }
 
@@ -2590,6 +2881,7 @@ class PlayerActivity : AppCompatActivity() {
 
               function extractAetherStreamData(ps, v) {
                 var streamUrl = '';
+                var streamType = '';
                 var headers = {};
                 var qualities = {};
                 if (ps && ps.source) {
@@ -2599,8 +2891,10 @@ class PlayerActivity : AppCompatActivity() {
                   }
                   if (src.type === 'hls' && src.url) {
                     streamUrl = src.url;
+                    streamType = 'hls';
                   } else if (src.type === 'file' && src.qualities && typeof src.qualities === 'object') {
                     qualities = src.qualities;
+                    streamType = 'file';
                     var qKeys = Object.keys(src.qualities);
                     var preferredOrder = ['1080', '720', '480', '360', 'unknown'];
                     var bestKey = preferredOrder.find(function(k){ return qKeys.indexOf(k) >= 0; }) || qKeys[0];
@@ -2613,12 +2907,14 @@ class PlayerActivity : AppCompatActivity() {
                   var cur = v.currentSrc || v.getAttribute('src') || '';
                   if (cur && !/^blob:/i.test(cur) && !adURL(cur)) {
                     streamUrl = cur;
+                    if (/\.m3u8([?#]|$)/i.test(cur)) streamType = 'hls';
                   }
                 }
                 if (!streamUrl && detectedStreams && detectedStreams.length) {
                   streamUrl = detectedStreams[detectedStreams.length - 1];
+                  if (/\.m3u8([?#]|$)/i.test(streamUrl)) streamType = 'hls';
                 }
-                return { url: streamUrl, headers: headers, qualities: qualities };
+                return { url: streamUrl, type: streamType, headers: headers, qualities: qualities };
               }
 
               function extractAetherCaptionList(ps) {
@@ -2659,6 +2955,7 @@ class PlayerActivity : AppCompatActivity() {
                   try {
                     AnPinimeWebBridge.onAetherResolved(
                       streamData.url,
+                      streamData.type || '',
                       JSON.stringify(streamData.headers || {}),
                       JSON.stringify(captions),
                       (v && isFinite(v.currentTime) ? v.currentTime : 0) || initialSeekTarget || 0
@@ -2675,10 +2972,19 @@ class PlayerActivity : AppCompatActivity() {
               function observeScrapingActivity(){
                 try {
                   var activeSourceEl = document.querySelector('div[data-source-id] [class*="text-white"], .transition-opacity[style*="opacity: 1"] p, [class*="scraping"] p, div.font-bold.text-white');
-                  if (activeSourceEl && activeSourceEl.textContent) {
-                    var txt = activeSourceEl.textContent.trim();
-                    if (txt && txt.length > 1 && txt.length < 50 && txt.indexOf('Finding') < 0 && txt.indexOf('Verifying') < 0) {
-                      AnPinimeWebBridge.onAetherStatus('Đang kiểm tra nguồn: ' + txt + '...');
+                  var card = document.querySelector('div[data-source-id]');
+                  var srcId = card ? card.getAttribute('data-source-id') : '';
+                  var sName = '';
+                  if (srcId && typeof window.__anpinimeSs === 'function') {
+                    var sObj = window.__anpinimeSs().find(function(x){ return x.id === srcId; });
+                    if (sObj && sObj.name) sName = sObj.name;
+                  }
+                  if (!sName && activeSourceEl && activeSourceEl.textContent) {
+                    sName = activeSourceEl.textContent.trim();
+                  }
+                  if (sName && sName.length > 1 && sName.length < 50 && sName.indexOf('Finding') < 0 && sName.indexOf('Verifying') < 0) {
+                    if (window.AnPinimeWebBridge && AnPinimeWebBridge.onAetherScrapingProgress) {
+                      AnPinimeWebBridge.onAetherScrapingProgress(sName, srcId || sName, 'Đang kiểm tra: ' + sName + '...', 0);
                     }
                   }
                 } catch(e){}

@@ -11,8 +11,8 @@ android {
         applicationId = "com.anpinime.projector"
         minSdk = 23
         targetSdk = 34
-        versionCode = 13
-        versionName = "1.7.4"
+        versionCode = 14
+        versionName = "1.7.5"
         manifestPlaceholders["appLabel"] = "AnPinime TV"
 
         ndk {

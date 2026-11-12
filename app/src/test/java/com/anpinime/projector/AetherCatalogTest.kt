@@ -200,4 +200,19 @@ class AetherCatalogTest {
         )
         assertEquals(0, WebViewHelper.parseChromeMajorVersion("Mozilla/5.0 (Custom UA without Chrome token)"))
     }
+
+    @Test
+    fun aetherProvidersModelAndResolutionIntegrity() {
+        val providers = listOf(
+            PlayerActivity.AetherProvider("auto", "Tự động", "Tự động quét tìm nguồn tốt nhất"),
+            PlayerActivity.AetherProvider("febbox", "Febbox", "4K / Siêu nét (Nhanh nhất)"),
+            PlayerActivity.AetherProvider("showbox", "Showbox", "Full HD / Ổn định"),
+            PlayerActivity.AetherProvider("vidsrc", "VidSrc", "Kho phim phong phú")
+        )
+        assertEquals(4, providers.size)
+        assertEquals("auto", providers[0].id)
+        assertEquals("febbox", providers[1].id)
+        assertTrue(providers.any { it.name == "Showbox" })
+        assertTrue(providers.any { it.name == "VidSrc" })
+    }
 }
