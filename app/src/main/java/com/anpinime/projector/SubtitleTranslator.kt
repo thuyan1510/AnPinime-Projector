@@ -61,7 +61,10 @@ object SubtitleTranslator {
         var idx = 0
         while (idx < rawLines.size) {
             val trimmed = rawLines[idx].trim()
-            if (trimmed.equals("STYLE", ignoreCase = true) || trimmed.startsWith("NOTE", ignoreCase = true) && !TS_LINE_REGEX.containsMatchIn(trimmed)) {
+            if (trimmed.equals("STYLE", ignoreCase = true) ||
+                trimmed.equals("REGION", ignoreCase = true) ||
+                (trimmed.startsWith("NOTE", ignoreCase = true) && !TS_LINE_REGEX.containsMatchIn(trimmed))
+            ) {
                 idx++
                 while (idx < rawLines.size && rawLines[idx].isNotBlank()) idx++
                 continue
@@ -249,7 +252,8 @@ object SubtitleTranslator {
     fun findActiveCueText(
         cues: List<TimedSubtitleCue>,
         translatedMap: Map<Int, String>,
-        positionMs: Long
+        positionMs: Long,
+        fallbackToOriginal: Boolean = false
     ): String? {
         if (cues.isEmpty()) return null
         var lo = 0
@@ -266,11 +270,12 @@ object SubtitleTranslator {
         }
         val activeLines = ArrayList<String>(2)
         var idx = firstAfter - 1
-        val minStart = (positionMs - 60_000L).coerceAtLeast(0L)
+        val minStart = (positionMs - 120_000L).coerceAtLeast(0L)
         while (idx >= 0 && cues[idx].startMs >= minStart) {
             val cue = cues[idx]
             if (positionMs <= cue.endMs) {
                 val txt = translatedMap[idx]?.takeIf { it.isNotBlank() }
+                    ?: if (fallbackToOriginal) cue.text.trim().takeIf { it.isNotBlank() } else null
                 if (txt != null) activeLines.add(0, txt)
             }
             idx--
@@ -394,6 +399,7 @@ object SubtitleTranslator {
         seedTranslations: Map<Int, String> = emptyMap(),
         translateBatchFn: (List<String>) -> List<String?>,
         onWaveReady: (waveCues: Map<Int, String>) -> Unit = {},
+        onBatchTranslated: (batchCues: Map<Int, String>) -> Unit = {},
         onBatchUpdated: (doneCues: Int, totalCues: Int) -> Unit = { _, _ -> }
     ): Map<Int, String> {
         val translated = ConcurrentHashMap<Int, String>(cues.size)
@@ -423,6 +429,7 @@ object SubtitleTranslator {
         )
 
         fun processRange(range: IntRange) {
+            val batchDelta = HashMap<Int, String>((range.last - range.first + 1).coerceAtLeast(1))
             val missingByPhrase = LinkedHashMap<String, ArrayList<Int>>()
             for (cueIdx in range) {
                 if (translated.containsKey(cueIdx)) continue
@@ -431,27 +438,35 @@ object SubtitleTranslator {
                 val known = phraseCache[norm]
                 if (!known.isNullOrBlank()) {
                     translated[cueIdx] = known
+                    batchDelta[cueIdx] = known
                 } else {
                     missingByPhrase.getOrPut(norm) { ArrayList(1) }.add(cueIdx)
                 }
             }
-            if (missingByPhrase.isEmpty()) return
-            val uniqueTexts = missingByPhrase.keys.toList()
-            val results = runCatching { translateBatchFn(uniqueTexts) }.getOrNull() ?: return
-            for (i in uniqueTexts.indices) {
-                val out = results.getOrNull(i)?.trim()
-                if (!out.isNullOrEmpty()) {
-                    val src = uniqueTexts[i]
-                    phraseCache.putIfAbsent(src, out)
-                    missingByPhrase[src]?.forEach { cueIdx ->
-                        translated[cueIdx] = out
+            if (missingByPhrase.isNotEmpty()) {
+                val uniqueTexts = missingByPhrase.keys.toList()
+                val results = runCatching { translateBatchFn(uniqueTexts) }.getOrNull()
+                if (results != null) {
+                    for (i in uniqueTexts.indices) {
+                        val out = results.getOrNull(i)?.trim()
+                        if (!out.isNullOrEmpty()) {
+                            val src = uniqueTexts[i]
+                            phraseCache.putIfAbsent(src, out)
+                            missingByPhrase[src]?.forEach { cueIdx ->
+                                translated[cueIdx] = out
+                                batchDelta[cueIdx] = out
+                            }
+                        }
                     }
                 }
+            }
+            if (batchDelta.isNotEmpty()) {
+                onBatchTranslated(batchDelta)
             }
         }
 
         processRange(ranges.first())
-        onWaveReady(translated)
+        onWaveReady(HashMap(translated))
         onBatchUpdated(translated.size, cues.size)
 
         if (ranges.size > 1) {

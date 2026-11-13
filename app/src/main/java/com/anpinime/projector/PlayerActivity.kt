@@ -1,6 +1,8 @@
 package com.anpinime.projector
 
 import android.annotation.SuppressLint
+import android.app.Dialog
+import android.content.res.ColorStateList
 import java.io.File
 import android.graphics.Color
 import android.graphics.Typeface
@@ -9,10 +11,13 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.text.Layout
 import android.text.TextUtils
 import android.util.TypedValue
+import android.view.GestureDetector
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
@@ -29,8 +34,10 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
 import androidx.annotation.OptIn
@@ -46,7 +53,6 @@ import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.text.Cue
 import androidx.media3.common.text.CueGroup
 import androidx.media3.ui.SubtitleView
-import androidx.appcompat.app.AlertDialog
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import androidx.media3.common.util.UnstableApi
@@ -103,6 +109,7 @@ class PlayerActivity : AppCompatActivity() {
     private var subPrewarmJob: Job? = null
     private val VI_CUE_UNSET = "\u0000__UNSET__"
     @Volatile private var viLiveSubActive = false
+    @Volatile private var viTranslationCompleted = false
     @Volatile private var viLiveCues: List<TimedSubtitleCue> = emptyList()
     private val viTranslatedMap = ConcurrentHashMap<Int, String>()
     @Volatile private var viLastRenderedCueText: String? = VI_CUE_UNSET
@@ -175,22 +182,41 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var osdContainer: FrameLayout
     private lateinit var topTitleText: TextView
     private lateinit var topServerText: TextView
+    private lateinit var topTranslateBadge: TextView
+    private lateinit var topQualityBadge: TextView
+    private lateinit var controlHintText: TextView
+    private lateinit var seekPreviewBadge: TextView
+    private lateinit var gestureFeedbackPill: TextView
     private lateinit var timeCurrentText: TextView
     private lateinit var timeTotalText: TextView
     private lateinit var seekBar: SeekBar
-    private lateinit var playPauseBtn: TextView
-    private lateinit var qualityBtn: TextView
-    private lateinit var speedBtn: TextView
-    private lateinit var aetherTranslateBtn: TextView
-    private lateinit var aetherMenuBtn: TextView
-    private lateinit var audioDecoderBtn: TextView
+    private lateinit var playPauseBtn: ImageView
+    private lateinit var rewindBtn: ImageView
+    private lateinit var forwardBtn: ImageView
+    private lateinit var nextEpBtn: ImageView
+    private lateinit var episodeBtn: ImageView
+    private lateinit var serverBtn: ImageView
+    private lateinit var subtitleBtn: ImageView
+    private lateinit var aetherTranslateBtn: ImageView
+    private lateinit var audioBtn: ImageView
+    private lateinit var aspectBtn: ImageView
+    private lateinit var settingsBtn: ImageView
+    private lateinit var sidePanelBackdrop: View
+    private lateinit var sidePanelContainer: LinearLayout
+    private lateinit var panelTitleText: TextView
+    private lateinit var panelCountBadge: TextView
     private lateinit var serverDrawer: HorizontalScrollView
     private lateinit var serverDrawerRow: LinearLayout
-    private lateinit var episodeDrawer: HorizontalScrollView
+    private lateinit var episodeDrawer: ScrollView
     private lateinit var episodeDrawerRow: LinearLayout
 
+    private var currentAspectMode = Phim4KPlayerUi.AspectMode.FIT
+    private var lastVideoW = 0
+    private var lastVideoH = 0
+    private var sidePanelVisible = false
+    private var currentFocusedHint: String = ""
     private var osdVisible = true
-    private var selectionDialog: AlertDialog? = null
+    private var selectionDialog: Dialog? = null
 
     private fun isAetherEpisode(ep: Episode = currentEpisode): Boolean {
         return ep.source == ContentSource.AETHER || ep.playbackKind.startsWith("aether", ignoreCase = true)
@@ -200,9 +226,17 @@ class PlayerActivity : AppCompatActivity() {
         commitPendingSeek()
     }
 
+    private val hideGestureFeedbackRunnable = Runnable {
+        if (::gestureFeedbackPill.isInitialized) {
+            gestureFeedbackPill.animate().alpha(0f).setDuration(220).withEndAction {
+                gestureFeedbackPill.visibility = View.GONE
+            }.start()
+        }
+    }
+
     private val hideOsdRunnable = Runnable {
         if (selectionDialog == null && !scrubbing && pendingSeekTargetMs < 0L &&
-            serverDrawer.visibility != View.VISIBLE && episodeDrawer.visibility != View.VISIBLE &&
+            !sidePanelVisible &&
             (exoPlayer?.isPlaying == true || fallbackWebView != null)) {
             hideOsd()
         }
@@ -219,19 +253,39 @@ class PlayerActivity : AppCompatActivity() {
         override fun run() {
             if (!viLiveSubActive) return
             val player = exoPlayer
-            if (player != null && ::subtitleView.isInitialized) {
-                val pos = player.currentPosition.coerceAtLeast(0L)
-                val cueText = SubtitleTranslator.findActiveCueText(viLiveCues, viTranslatedMap, pos)
-                if (cueText != viLastRenderedCueText) {
-                    viLastRenderedCueText = cueText
-                    if (cueText.isNullOrBlank()) {
-                        subtitleView.setCues(emptyList())
-                    } else {
-                        subtitleView.setCues(listOf(Cue.Builder().setText(cueText).build()))
-                    }
-                }
+            if (player != null) {
+                renderLiveSubtitleAt(player.currentPosition.coerceAtLeast(0L))
             }
-            mainHandler.postDelayed(this, 110L)
+            mainHandler.postDelayed(this, 80L)
+        }
+    }
+
+    private fun renderLiveSubtitleAt(positionMs: Long, force: Boolean = false) {
+        if (!viLiveSubActive || !::subtitleView.isInitialized) return
+        val cueText = SubtitleTranslator.findActiveCueText(
+            cues = viLiveCues,
+            translatedMap = viTranslatedMap,
+            positionMs = positionMs,
+            fallbackToOriginal = viTranslationCompleted
+        )
+        if (force || cueText != viLastRenderedCueText) {
+            viLastRenderedCueText = cueText
+            if (cueText.isNullOrBlank()) {
+                subtitleView.setCues(emptyList())
+            } else {
+                subtitleView.setCues(
+                    listOf(
+                        Cue.Builder()
+                            .setText(cueText)
+                            .setTextAlignment(Layout.Alignment.ALIGN_CENTER)
+                            .setLineAnchor(Cue.ANCHOR_TYPE_END)
+                            .setPosition(0.5f)
+                            .setPositionAnchor(Cue.ANCHOR_TYPE_MIDDLE)
+                            .setSize(0.92f)
+                            .build()
+                    )
+                )
+            }
         }
     }
 
@@ -249,8 +303,9 @@ class PlayerActivity : AppCompatActivity() {
             subtitleView.setCues(emptyList())
         }
         if (::aetherTranslateBtn.isInitialized) {
-            aetherTranslateBtn.text = "🌐 Dịch Sub Việt"
+            Phim4KPlayerUi.styleActiveIconButton(aetherTranslateBtn, this, isActive = false)
         }
+        updateTranslateStatusUi(0, 0, completed = false)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -258,6 +313,7 @@ class PlayerActivity : AppCompatActivity() {
         CatalogService.init(this)
         WebViewHelper.registerActivity(this)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        applyImmersiveFullscreen()
 
         movieTitle = intent.getStringExtra("movie_title").orEmpty()
         val epRaw = intent.getStringExtra("episode_json").orEmpty()
@@ -276,8 +332,26 @@ class PlayerActivity : AppCompatActivity() {
         mainHandler.post(progressRunnable)
     }
 
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) applyImmersiveFullscreen()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun applyImmersiveFullscreen() {
+        window.decorView.systemUiVisibility = (
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_FULLSCREEN
+            )
+    }
+
     override fun onResume() {
         super.onResume()
+        applyImmersiveFullscreen()
         WebViewHelper.registerActivity(this)
         fallbackWebView?.onResume()
     }
@@ -304,6 +378,7 @@ class PlayerActivity : AppCompatActivity() {
         mainHandler.removeCallbacks(commitPendingSeekRunnable)
         subPrewarmJob?.cancel()
         translateSubJob?.cancel()
+        viTranslationCompleted = false
         stopLiveViSubtitles(clearView = true)
         viLiveCues = emptyList()
         viTranslatedMap.clear()
@@ -525,11 +600,8 @@ class PlayerActivity : AppCompatActivity() {
                 }
             } else {
                 if (keyCode == KeyEvent.KEYCODE_BACK || keyCode == KeyEvent.KEYCODE_ESCAPE) {
-                    if (serverDrawer.visibility == View.VISIBLE || episodeDrawer.visibility == View.VISIBLE) {
-                        serverDrawer.visibility = View.GONE
-                        episodeDrawer.visibility = View.GONE
-                        playPauseBtn.requestFocus()
-                        scheduleHideOsd()
+                    if (sidePanelVisible) {
+                        closeSidePanel()
                     } else if (exoPlayer?.isPlaying == true || fallbackWebView != null) {
                         hideOsd()
                     } else {
@@ -543,22 +615,23 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     // =========================================================================
-    // UI CONSTRUCTION (Pure Hardware SurfaceView + Animated GIF Loader + OSD)
+    // UI CONSTRUCTION (Pure Hardware SurfaceView + Phim4K Glass HUD & Drawer)
     // =========================================================================
 
+    @SuppressLint("ClickableViewAccessibility")
     private fun buildUi() {
+        val compact = Phim4KPlayerUi.isCompactPhoneScreen(this) || BuildConfig.IS_PHONE_FLAVOR
         val root = FrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
-            setOnClickListener {
-                if (osdVisible) hideOsd() else showOsd(focusPlayButton = true)
-            }
         }
 
         videoFrame = FrameLayout(this).apply {
+            clipChildren = true
+            clipToPadding = true
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -671,7 +744,64 @@ class PlayerActivity : AppCompatActivity() {
 
         root.addView(loadingOverlay)
 
-        // OSD Controls Container
+        // Transparent Touch Gesture Layer (Phone tap OSD / double-tap +/-10s & play/pause, skipped by TV D-pad)
+        val gestureDetector = GestureDetector(
+            this,
+            object : GestureDetector.SimpleOnGestureListener() {
+                override fun onDown(e: MotionEvent): Boolean = true
+
+                override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                    if (sidePanelVisible) {
+                        closeSidePanel()
+                        return true
+                    }
+                    if (osdVisible) hideOsd() else showOsd(focusPlayButton = false)
+                    return true
+                }
+
+                override fun onDoubleTap(e: MotionEvent): Boolean {
+                    if (sidePanelVisible) return false
+                    val w = videoFrame.width.coerceAtLeast(1)
+                    val ratioX = e.x / w.toFloat()
+                    when {
+                        ratioX < 0.35f -> {
+                            seekRelative(-10_000L)
+                            showGestureFeedback("⏪  -10 giây", Gravity.START or Gravity.CENTER_VERTICAL)
+                        }
+                        ratioX > 0.65f -> {
+                            seekRelative(10_000L)
+                            showGestureFeedback("+10 giây  ⏩", Gravity.END or Gravity.CENTER_VERTICAL)
+                        }
+                        else -> {
+                            val willPause = isCurrentlyPlaying()
+                            togglePlayPause()
+                            showGestureFeedback(
+                                if (willPause) "⏸  Tạm dừng" else "▶  Đang phát",
+                                Gravity.CENTER
+                            )
+                        }
+                    }
+                    return true
+                }
+            }
+        )
+        val gestureLayer = View(this).apply {
+            isFocusable = false
+            isFocusableInTouchMode = false
+            isClickable = true
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            setOnTouchListener { _, event -> gestureDetector.onTouchEvent(event) }
+        }
+        root.addView(gestureLayer)
+
+        // OSD Controls Container (Phim4K Layout: Top Bar + Scrubber Above Centered Icon Row)
+        val hPad = Phim4KPlayerUi.dp(this, if (compact) 18 else 28)
+        val vPadTop = Phim4KPlayerUi.dp(this, if (compact) 12 else 18)
+        val vPadBottom = Phim4KPlayerUi.dp(this, if (compact) 10 else 18)
+
         osdContainer = FrameLayout(this).apply {
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -679,14 +809,12 @@ class PlayerActivity : AppCompatActivity() {
             )
         }
 
-        // Top Bar
+        // Top Bar (Back + Title/Meta + Status Badges)
         val topBar = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(UiHelper.dp(context, 24), UiHelper.dp(context, 18), UiHelper.dp(context, 24), UiHelper.dp(context, 28))
-            background = GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(Color.parseColor("#E6000000"), Color.TRANSPARENT)
-            )
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(hPad, vPadTop, hPad, Phim4KPlayerUi.dp(context, 24))
+            background = Phim4KPlayerUi.createTopBottomScrim(isTop = true)
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -694,33 +822,87 @@ class PlayerActivity : AppCompatActivity() {
             )
         }
 
+        val backBtn = Phim4KPlayerUi.createControlIconButton(
+            context = this,
+            iconResId = R.drawable.ic_p4k_back,
+            sizeDp = if (compact) 36 else 42,
+            paddingDp = if (compact) 8 else 10,
+            contentDescriptionText = "Quay lại"
+        ) { hasFocus ->
+            if (hasFocus) updateFocusedHint("Quay lại trang thông tin phim")
+        }.apply {
+            setOnClickListener { finish() }
+        }
+        topBar.addView(backBtn)
+
+        val topTitleCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = Phim4KPlayerUi.dp(context, 12)
+                marginEnd = Phim4KPlayerUi.dp(context, 10)
+            }
+        }
         topTitleText = TextView(this).apply {
             text = movieTitle
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 16f else 19f)
             typeface = Typeface.DEFAULT_BOLD
             setSingleLine(true)
             ellipsize = TextUtils.TruncateAt.END
         }
         topServerText = TextView(this).apply {
             text = "${currentEpisode.title} • ${currentEpisode.season}"
-            setTextColor(UiHelper.COLOR_YELLOW)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(0, UiHelper.dp(context, 4), 0, 0)
+            setTextColor(0xFFB8C7D9.toInt())
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 11.5f else 13f)
+            setSingleLine(true)
+            ellipsize = TextUtils.TruncateAt.END
+            setPadding(0, Phim4KPlayerUi.dp(context, 2), 0, 0)
         }
-        topBar.addView(topTitleText)
-        topBar.addView(topServerText)
+        topTitleCol.addView(topTitleText)
+        topTitleCol.addView(topServerText)
+        topBar.addView(topTitleCol)
+
+        val topBadgesRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        topTranslateBadge = TextView(this).apply {
+            visibility = View.GONE
+            setTextColor(0xFFE1F5FE.toInt())
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(Phim4KPlayerUi.dp(context, 10), Phim4KPlayerUi.dp(context, 5), Phim4KPlayerUi.dp(context, 10), Phim4KPlayerUi.dp(context, 5))
+            background = Phim4KPlayerUi.createGlassPillDrawable(context, fillColor = 0x404FC3F7, strokeColor = 0x994FC3F7.toInt(), cornerDp = 14)
+            isFocusable = false
+            isClickable = true
+            setOnClickListener { triggerAetherVietnameseTranslation() }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { marginEnd = Phim4KPlayerUi.dp(context, 8) }
+        }
+        topBadgesRow.addView(topTranslateBadge)
+
+        topQualityBadge = TextView(this).apply {
+            text = "Auto · 1.0x"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(Phim4KPlayerUi.dp(context, 10), Phim4KPlayerUi.dp(context, 5), Phim4KPlayerUi.dp(context, 10), Phim4KPlayerUi.dp(context, 5))
+            background = Phim4KPlayerUi.createGlassPillDrawable(context, fillColor = 0x7305060A, strokeColor = 0x33FFFFFF, cornerDp = 14)
+            isFocusable = false
+            isClickable = true
+            setOnClickListener { showSettingsMenu() }
+        }
+        topBadgesRow.addView(topQualityBadge)
+        topBar.addView(topBadgesRow)
         osdContainer.addView(topBar)
 
-        // Bottom Control Panel
+        // Bottom Control Panel (Phim4K Order: Hint -> Time Row -> SeekBar -> Centered Icon Row)
         val bottomPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(UiHelper.dp(context, 24), UiHelper.dp(context, 24), UiHelper.dp(context, 24), UiHelper.dp(context, 20))
-            background = GradientDrawable(
-                GradientDrawable.Orientation.BOTTOM_TOP,
-                intArrayOf(Color.parseColor("#F208090E"), Color.parseColor("#B308090E"), Color.TRANSPARENT)
-            )
+            setPadding(hPad, Phim4KPlayerUi.dp(context, 28), hPad, vPadBottom)
+            background = Phim4KPlayerUi.createTopBottomScrim(isTop = false)
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -728,60 +910,98 @@ class PlayerActivity : AppCompatActivity() {
             )
         }
 
-        // Server Drawer (Toggled when user clicks Đổi Server)
-        serverDrawer = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            visibility = View.GONE
+        controlHintText = TextView(this).apply {
+            text = "Chạm video để ẩn/hiện · Chạm đúp trái/phải tua 10s"
+            setTextColor(0xFFA6D8FA.toInt())
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 11f else 12f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            gravity = Gravity.CENTER
+            setSingleLine(true)
+            ellipsize = TextUtils.TruncateAt.END
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { bottomMargin = UiHelper.dp(context, 10) }
+            ).apply { bottomMargin = Phim4KPlayerUi.dp(context, 6) }
         }
-        serverDrawerRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
-        serverDrawer.addView(serverDrawerRow)
-        bottomPanel.addView(serverDrawer)
+        bottomPanel.addView(controlHintText)
 
-        // Episode Drawer (Toggled when user clicks Chọn Tập)
-        episodeDrawer = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            visibility = View.GONE
+        // Time Row ABOVE SeekBar (Phim4K exo_position / exo_duration style)
+        val timeRow = FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { bottomMargin = UiHelper.dp(context, 10) }
+            ).apply { bottomMargin = Phim4KPlayerUi.dp(context, 2) }
         }
-        episodeDrawerRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
-        episodeDrawer.addView(episodeDrawerRow)
-        bottomPanel.addView(episodeDrawer)
-
-        // Timeline Row
-        val timelineRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { bottomMargin = UiHelper.dp(context, 10) }
-        }
-
         timeCurrentText = TextView(this).apply {
             text = "00:00"
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 11.5f else 12.5f)
             typeface = Typeface.DEFAULT_BOLD
+            setPadding(Phim4KPlayerUi.dp(context, 9), Phim4KPlayerUi.dp(context, 3), Phim4KPlayerUi.dp(context, 9), Phim4KPlayerUi.dp(context, 3))
+            background = Phim4KPlayerUi.createGlassPillDrawable(context, cornerDp = 10)
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.START or Gravity.CENTER_VERTICAL
+            )
         }
+        seekPreviewBadge = TextView(this).apply {
+            visibility = View.GONE
+            setTextColor(0xFF06131C.toInt())
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(Phim4KPlayerUi.dp(context, 10), Phim4KPlayerUi.dp(context, 3), Phim4KPlayerUi.dp(context, 10), Phim4KPlayerUi.dp(context, 3))
+            background = Phim4KPlayerUi.createGlassPillDrawable(
+                context,
+                fillColor = Phim4KPlayerUi.COLOR_ACCENT_CYAN,
+                strokeColor = Color.TRANSPARENT,
+                cornerDp = 12
+            )
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER
+            )
+        }
+        timeTotalText = TextView(this).apply {
+            text = "00:00"
+            setTextColor(0xFFD6E2F0.toInt())
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 11.5f else 12.5f)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(Phim4KPlayerUi.dp(context, 9), Phim4KPlayerUi.dp(context, 3), Phim4KPlayerUi.dp(context, 9), Phim4KPlayerUi.dp(context, 3))
+            background = Phim4KPlayerUi.createGlassPillDrawable(context, cornerDp = 10)
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.END or Gravity.CENTER_VERTICAL
+            )
+        }
+        timeRow.addView(timeCurrentText)
+        timeRow.addView(seekPreviewBadge)
+        timeRow.addView(timeTotalText)
+        bottomPanel.addView(timeRow)
+
+        val playPauseId = View.generateViewId()
+        val seekBarId = View.generateViewId()
+
         seekBar = SeekBar(this).apply {
+            id = seekBarId
             max = 1000
             isFocusable = true
-            isFocusableInTouchMode = true
-            contentDescription = "Thời lượng: trái/phải tua nhanh, nhả tay hoặc bấm OK để nhảy tới thời gian mong muốn"
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                leftMargin = UiHelper.dp(context, 10)
-                rightMargin = UiHelper.dp(context, 10)
+            isFocusableInTouchMode = false
+            splitTrack = false
+            progressDrawable = Phim4KPlayerUi.createSeekBarProgressDrawable(this@PlayerActivity)
+            thumb = Phim4KPlayerUi.createSeekBarThumbDrawable(this@PlayerActivity)
+            nextFocusDownId = playPauseId
+            contentDescription = "Thanh thời lượng: trái/phải tua nhanh"
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                Phim4KPlayerUi.dp(context, 24)
+            ).apply {
+                bottomMargin = Phim4KPlayerUi.dp(context, if (compact) 6 else 10)
+            }
+            setOnFocusChangeListener { _, hasFocus ->
+                if (hasFocus) updateFocusedHint("Thanh tua thời lượng · Bấm Trái / Phải để tua")
             }
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
@@ -791,7 +1011,10 @@ class PlayerActivity : AppCompatActivity() {
                         val targetMs = (dur * progress.toLong() / 1000L).coerceIn(0L, dur)
                         pendingSeekTargetMs = targetMs
                         timeCurrentText.text = formatTime(targetMs)
-                        // Do NOT seek on every progress tick during drag; only debounce if not in touch tracking
+                        if (::seekPreviewBadge.isInitialized) {
+                            seekPreviewBadge.text = "⏩  ${formatTime(targetMs)}"
+                            seekPreviewBadge.visibility = View.VISIBLE
+                        }
                         if (!scrubbing) {
                             mainHandler.removeCallbacks(commitPendingSeekRunnable)
                             mainHandler.postDelayed(commitPendingSeekRunnable, 600L)
@@ -811,193 +1034,456 @@ class PlayerActivity : AppCompatActivity() {
                 }
             })
         }
-        timeTotalText = TextView(this).apply {
-            text = "00:00"
-            setTextColor(UiHelper.COLOR_TEXT_SECONDARY)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            typeface = Typeface.DEFAULT_BOLD
-        }
-        timelineRow.addView(timeCurrentText)
-        timelineRow.addView(seekBar)
-        timelineRow.addView(timeTotalText)
-        bottomPanel.addView(timelineRow)
+        bottomPanel.addView(seekBar)
 
-        // Remote Action Buttons Row
+        // Centered Phim4K Single-Row Icon Bar
+        val btnSize = if (compact) 38 else 44
+        val playBtnSize = if (compact) 46 else 54
+        val iconPad = if (compact) 9 else 11
+        val playIconPad = if (compact) 11 else 13
+        val gapPx = Phim4KPlayerUi.dp(this, if (compact) 7 else 10)
+
         val btnRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(Phim4KPlayerUi.dp(context, 4), Phim4KPlayerUi.dp(context, 2), Phim4KPlayerUi.dp(context, 4), Phim4KPlayerUi.dp(context, 2))
         }
 
-        fun makeOsdBtn(label: String, bg: Int = UiHelper.COLOR_CARD, onClick: () -> Unit): TextView {
-            val tv = TextView(this).apply {
-                text = label
-                setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                typeface = Typeface.DEFAULT_BOLD
-                setSingleLine(true)
-                setPadding(UiHelper.dp(context, 14), UiHelper.dp(context, 9), UiHelper.dp(context, 14), UiHelper.dp(context, 9))
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply { rightMargin = UiHelper.dp(context, 8) }
+        fun makeP4kIconBtn(
+            iconResId: Int,
+            hintTitle: String,
+            isCenter: Boolean = false,
+            extraHint: () -> String = { "" },
+            onClick: () -> Unit
+        ): ImageView {
+            val sz = if (isCenter) playBtnSize else btnSize
+            val pad = if (isCenter) playIconPad else iconPad
+            return Phim4KPlayerUi.createControlIconButton(
+                context = this,
+                iconResId = iconResId,
+                sizeDp = sz,
+                paddingDp = pad,
+                contentDescriptionText = hintTitle,
+                isPrimaryCenter = isCenter
+            ) { hasFocus ->
+                if (hasFocus) {
+                    scheduleHideOsd()
+                    val detail = extraHint()
+                    updateFocusedHint(if (detail.isNotBlank()) "$hintTitle · $detail" else hintTitle)
+                }
+            }.apply {
+                nextFocusUpId = seekBarId
+                (layoutParams as LinearLayout.LayoutParams).marginEnd = gapPx
+                setOnClickListener {
+                    scheduleHideOsd()
+                    onClick()
+                }
             }
-            UiHelper.makeFocusableButton(
-                view = tv,
-                normalBgColor = bg,
-                focusedBgColor = UiHelper.COLOR_ACCENT,
-                focusedStrokeColor = Color.WHITE,
-                radiusDp = 18
-            ) {
-                scheduleHideOsd()
-                onClick()
-            }
-            return tv
         }
 
-        playPauseBtn = makeOsdBtn("⏸ Tạm dừng", UiHelper.COLOR_RED) {
-            togglePlayPause()
-        }
-        btnRow.addView(playPauseBtn)
-
-        fun seekButton(label: String, baseDelta: Long): TextView = makeOsdBtn(label) {
-            val step = computeAcceleratedSeekStep(0).coerceAtLeast(kotlin.math.abs(baseDelta))
-            seekRelative(if (baseDelta < 0) -step else step)
-        }.apply {
+        fun attachSeekKeyRepeat(btn: ImageView, baseDelta: Long) {
             var lastRepeatAt = 0L
-            setOnKeyListener { _, code, event ->
+            btn.setOnKeyListener { _, code, event ->
                 if (code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER || code == KeyEvent.KEYCODE_NUMPAD_ENTER) {
                     if (event.action == KeyEvent.ACTION_DOWN && (event.repeatCount == 0 || event.eventTime - lastRepeatAt >= 150L)) {
                         lastRepeatAt = event.eventTime
-                        val step = computeAcceleratedSeekStep(event.repeatCount)
+                        val step = computeAcceleratedSeekStep(event.repeatCount).coerceAtLeast(kotlin.math.abs(baseDelta))
                         seekRelative(if (baseDelta < 0) -step else step)
                     }
                     true
                 } else false
             }
         }
-        btnRow.addView(seekButton("⏪ -10s", -10_000L))
-        btnRow.addView(seekButton("⏩ +10s", 10_000L))
 
-        btnRow.addView(makeOsdBtn("⏭ Tập tiếp") {
+        rewindBtn = makeP4kIconBtn(R.drawable.ic_p4k_rewind, "Tua lùi 10s") {
+            seekRelative(-computeAcceleratedSeekStep(0).coerceAtLeast(10_000L))
+        }.also { attachSeekKeyRepeat(it, -10_000L) }
+        btnRow.addView(rewindBtn)
+
+        playPauseBtn = makeP4kIconBtn(R.drawable.ic_p4k_pause, "Phát / Tạm dừng", isCenter = true) {
+            togglePlayPause()
+        }.apply { id = playPauseId }
+        btnRow.addView(playPauseBtn)
+
+        forwardBtn = makeP4kIconBtn(R.drawable.ic_p4k_forward, "Tua tới 10s") {
+            seekRelative(computeAcceleratedSeekStep(0).coerceAtLeast(10_000L))
+        }.also { attachSeekKeyRepeat(it, 10_000L) }
+        btnRow.addView(forwardBtn)
+
+        nextEpBtn = makeP4kIconBtn(R.drawable.ic_p4k_next, "Tập tiếp theo") {
             playNextEpisode()
-        })
-
-        btnRow.addView(makeOsdBtn("🖥 Đổi Server") {
-            episodeDrawer.visibility = View.GONE
-            if (serverDrawer.visibility == View.VISIBLE) {
-                serverDrawer.visibility = View.GONE
-            } else {
-                populateServerDrawer()
-                serverDrawer.visibility = View.VISIBLE
-                serverDrawerRow.getChildAt(0)?.requestFocus()
-            }
-        })
-
-        btnRow.addView(makeOsdBtn("📋 Chọn Tập") {
-            serverDrawer.visibility = View.GONE
-            if (episodeDrawer.visibility == View.VISIBLE) {
-                episodeDrawer.visibility = View.GONE
-            } else {
-                populateEpisodeDrawer()
-                episodeDrawer.visibility = View.VISIBLE
-                episodeDrawerRow.getChildAt(0)?.requestFocus()
-            }
-        })
-
-        qualityBtn = makeOsdBtn("⚙ Tối đa 1080p") {
-            showQualityPicker()
         }
-        btnRow.addView(qualityBtn)
-        btnRow.addView(makeOsdBtn("🔊 Âm thanh") { showTrackPicker(C.TRACK_TYPE_AUDIO) })
-        btnRow.addView(makeOsdBtn("💬 Phụ đề") { showTrackPicker(C.TRACK_TYPE_TEXT) })
-        aetherTranslateBtn = makeOsdBtn("🌐 Dịch Sub Việt", Color.parseColor("#3B1E6D")) {
+        btnRow.addView(nextEpBtn)
+
+        episodeBtn = makeP4kIconBtn(
+            R.drawable.ic_p4k_playlist,
+            "Danh sách tập",
+            extraHint = { "${allEpisodes.count { it.season == currentEpisode.season }} tập" }
+        ) {
+            openSidePanel(focusServer = false)
+        }
+        btnRow.addView(episodeBtn)
+
+        serverBtn = makeP4kIconBtn(
+            R.drawable.ic_p4k_server,
+            "Đổi nguồn phát / Server",
+            extraHint = { currentEpisode.season }
+        ) {
+            openSidePanel(focusServer = true)
+        }
+        btnRow.addView(serverBtn)
+
+        subtitleBtn = makeP4kIconBtn(
+            R.drawable.ic_p4k_subtitles,
+            "Phụ đề",
+            extraHint = { if (viLiveSubActive) "Tiếng Việt (AI)" else "Chọn hoặc tắt phụ đề" }
+        ) {
+            showTrackPicker(C.TRACK_TYPE_TEXT)
+        }
+        btnRow.addView(subtitleBtn)
+
+        aetherTranslateBtn = makeP4kIconBtn(
+            R.drawable.ic_p4k_translate,
+            "Dịch Sub Việt (AI)",
+            extraHint = { if (viLiveSubActive) "Đang bật" else "Tức thì bằng AI" }
+        ) {
             triggerAetherVietnameseTranslation()
         }
         btnRow.addView(aetherTranslateBtn)
-        btnRow.addView(makeOsdBtn("🔤 Cỡ Sub") { showSubtitleSizePicker() })
-        speedBtn = makeOsdBtn("⏩ Tốc độ: 1.0x") {
-            showPlaybackSpeedPicker()
-        }
-        btnRow.addView(speedBtn)
-        aetherMenuBtn = makeOsdBtn("🎛 Menu Aether") {
-            openAetherNativeMenu("/captionsOverlay")
-        }
-        btnRow.addView(aetherMenuBtn)
-        audioDecoderBtn = makeOsdBtn("🛠 Bộ giải mã Audio") {
-            showSelection("Bộ giải mã âm thanh (Hỗ trợ 5.1 / EAC3 / DTS / AAC)",
-                listOf("Tự động / Thiết bị", "FFmpeg Đa kênh (Khuyên dùng cho 4K/MKV VIP)"),
-                if (preferSoftwareAudio) 1 else 0) { index ->
-                val player = exoPlayer ?: return@showSelection
-                val position = player.currentPosition
-                preferSoftwareAudio = index == 1
-                prepareExoPlayer(lastNativeUrl, lastNativeHeaders, position, lastMediaKind, lastSubtitles)
-            }
-        }
-        btnRow.addView(audioDecoderBtn)
 
-        btnRow.addView(makeOsdBtn("✕ Thoát", Color.parseColor("#381E24")) {
-            finish()
-        })
+        audioBtn = makeP4kIconBtn(R.drawable.ic_p4k_audio, "Âm thanh") {
+            showTrackPicker(C.TRACK_TYPE_AUDIO)
+        }
+        btnRow.addView(audioBtn)
 
-        bottomPanel.addView(HorizontalScrollView(this).apply {
+        aspectBtn = makeP4kIconBtn(
+            R.drawable.ic_p4k_aspect,
+            "Tỉ lệ màn hình",
+            extraHint = { currentAspectMode.label }
+        ) {
+            cycleAspectMode()
+        }
+        btnRow.addView(aspectBtn)
+
+        settingsBtn = makeP4kIconBtn(
+            R.drawable.ic_p4k_settings,
+            "Cài đặt phát",
+            extraHint = { "Chất lượng · Tốc độ · Cỡ Sub · Audio" }
+        ) {
+            showSettingsMenu()
+        }.apply {
+            (layoutParams as LinearLayout.LayoutParams).marginEnd = 0
+        }
+        btnRow.addView(settingsBtn)
+
+        val btnScroll = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
+            isFillViewport = true
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
             addView(btnRow)
-        })
+        }
+        bottomPanel.addView(btnScroll)
         osdContainer.addView(bottomPanel)
         root.addView(osdContainer)
 
+        // Floating Gesture / Action Feedback Pill (above OSD)
+        gestureFeedbackPill = TextView(this).apply {
+            visibility = View.GONE
+            alpha = 0f
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 14f else 16f)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(Phim4KPlayerUi.dp(context, 16), Phim4KPlayerUi.dp(context, 9), Phim4KPlayerUi.dp(context, 16), Phim4KPlayerUi.dp(context, 9))
+            background = Phim4KPlayerUi.createGlassPillDrawable(context, fillColor = 0xCC0B0D12.toInt(), strokeColor = 0x4DFFFFFF, cornerDp = 22)
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER
+            ).apply {
+                marginStart = Phim4KPlayerUi.dp(context, 36)
+                marginEnd = Phim4KPlayerUi.dp(context, 36)
+            }
+        }
+        root.addView(gestureFeedbackPill)
+
+        // Phim4K Right-Side Glass Sliding Drawer Backdrop + Panel
+        sidePanelBackdrop = View(this).apply {
+            visibility = View.GONE
+            setBackgroundColor(0x80000000.toInt())
+            isClickable = true
+            isFocusable = false
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            setOnClickListener { closeSidePanel() }
+        }
+        root.addView(sidePanelBackdrop)
+
+        val dm = resources.displayMetrics
+        val panelWidth = if (compact) {
+            minOf(Phim4KPlayerUi.dp(this, 340), (dm.widthPixels * 0.48f).toInt().coerceAtLeast(Phim4KPlayerUi.dp(this, 270)))
+        } else {
+            minOf(Phim4KPlayerUi.dp(this, 440), (dm.widthPixels * 0.42f).toInt())
+        }
+        sidePanelContainer = LinearLayout(this).apply {
+            visibility = View.GONE
+            orientation = LinearLayout.VERTICAL
+            translationX = panelWidth.toFloat()
+            background = Phim4KPlayerUi.createGlassPanelDrawable(context)
+            setPadding(Phim4KPlayerUi.dp(context, 16), Phim4KPlayerUi.dp(context, 16), Phim4KPlayerUi.dp(context, 16), Phim4KPlayerUi.dp(context, 16))
+            isClickable = true
+            layoutParams = FrameLayout.LayoutParams(
+                panelWidth,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                Gravity.END
+            )
+        }
+
+        val panelHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, Phim4KPlayerUi.dp(context, 10))
+        }
+        val panelHeaderTextCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        panelTitleText = TextView(this).apply {
+            text = "Chọn Tập & Nguồn"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 16f else 18f)
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        panelCountBadge = TextView(this).apply {
+            text = ""
+            setTextColor(Phim4KPlayerUi.COLOR_ACCENT_CYAN)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        panelHeaderTextCol.addView(panelTitleText)
+        panelHeaderTextCol.addView(panelCountBadge)
+        panelHeader.addView(panelHeaderTextCol)
+
+        val panelCloseBtn = Phim4KPlayerUi.createControlIconButton(
+            context = this,
+            iconResId = R.drawable.ic_p4k_close,
+            sizeDp = 34,
+            paddingDp = 8,
+            contentDescriptionText = "Đóng bảng"
+        ).apply {
+            setOnClickListener { closeSidePanel() }
+        }
+        panelHeader.addView(panelCloseBtn)
+        sidePanelContainer.addView(panelHeader)
+
+        sidePanelContainer.addView(TextView(this).apply {
+            text = "NGUỒN PHÁT / SERVER"
+            setTextColor(0xFF9FB0C4.toInt())
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, Phim4KPlayerUi.dp(context, 2), 0, Phim4KPlayerUi.dp(context, 6))
+        })
+
+        serverDrawer = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = Phim4KPlayerUi.dp(context, 10) }
+        }
+        serverDrawerRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        serverDrawer.addView(serverDrawerRow)
+        sidePanelContainer.addView(serverDrawer)
+
+        sidePanelContainer.addView(View(this).apply {
+            setBackgroundColor(0x26FFFFFF)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxOf(1, Phim4KPlayerUi.dp(context, 1))).apply {
+                bottomMargin = Phim4KPlayerUi.dp(context, 10)
+            }
+        })
+
+        sidePanelContainer.addView(TextView(this).apply {
+            text = "DANH SÁCH TẬP"
+            setTextColor(0xFF9FB0C4.toInt())
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, 0, 0, Phim4KPlayerUi.dp(context, 6))
+        })
+
+        episodeDrawer = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = true
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        }
+        episodeDrawerRow = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        episodeDrawer.addView(episodeDrawerRow)
+        sidePanelContainer.addView(episodeDrawer)
+
+        root.addView(sidePanelContainer)
+
         setContentView(root)
         updateSourceSpecificOsdButtons()
+        updateTopStatusBadges()
         playPauseBtn.requestFocus()
         scheduleHideOsd()
+    }
+
+    private fun isCurrentlyPlaying(): Boolean {
+        val player = exoPlayer
+        return if (player != null) player.isPlaying else !webPaused
+    }
+
+    private fun updateFocusedHint(hint: String) {
+        currentFocusedHint = hint
+        if (::controlHintText.isInitialized) {
+            controlHintText.text = hint
+        }
+    }
+
+    private fun updatePlayPauseIcon(isPlaying: Boolean) {
+        if (!::playPauseBtn.isInitialized) return
+        playPauseBtn.setImageResource(if (isPlaying) R.drawable.ic_p4k_pause else R.drawable.ic_p4k_play)
+        playPauseBtn.contentDescription = if (isPlaying) "Tạm dừng" else "Phát tiếp"
+    }
+
+    private fun updateTranslateStatusUi(done: Int, total: Int, completed: Boolean) {
+        if (::aetherTranslateBtn.isInitialized) {
+            Phim4KPlayerUi.styleActiveIconButton(aetherTranslateBtn, this, isActive = viLiveSubActive)
+        }
+        if (::subtitleBtn.isInitialized) {
+            Phim4KPlayerUi.styleActiveIconButton(subtitleBtn, this, isActive = viLiveSubActive)
+        }
+        if (::topTranslateBadge.isInitialized) {
+            if (!viLiveSubActive && done == 0 && total == 0) {
+                topTranslateBadge.visibility = View.GONE
+            } else {
+                topTranslateBadge.visibility = View.VISIBLE
+                topTranslateBadge.text = when {
+                    total <= 0 -> "⚡ Đang tải phụ đề…"
+                    completed || done >= total -> "✓ Việt AI ($done/$total)"
+                    else -> "⚡ Sub Việt ($done/$total)"
+                }
+            }
+        }
+    }
+
+    private fun updateTopStatusBadges() {
+        if (!::topQualityBadge.isInitialized) return
+        val qLabel = if (exoPlayer == null && fallbackWebView != null) {
+            webQualities.firstOrNull { it.selected }?.label ?: "Auto"
+        } else {
+            when (currentQualityMode) {
+                0 -> "1080p"
+                1 -> "720p"
+                else -> "Auto"
+            }
+        }
+        val speedLabel = String.format(Locale.US, "%.2gx", currentPlaybackSpeed)
+        topQualityBadge.text = "$qLabel · $speedLabel · ${currentAspectMode.label}"
+    }
+
+    private fun showGestureFeedback(text: String, gravity: Int = Gravity.CENTER) {
+        if (!::gestureFeedbackPill.isInitialized) return
+        mainHandler.removeCallbacks(hideGestureFeedbackRunnable)
+        val lp = gestureFeedbackPill.layoutParams as FrameLayout.LayoutParams
+        lp.gravity = gravity
+        gestureFeedbackPill.layoutParams = lp
+        gestureFeedbackPill.text = text
+        gestureFeedbackPill.visibility = View.VISIBLE
+        gestureFeedbackPill.animate().cancel()
+        gestureFeedbackPill.alpha = 1f
+        mainHandler.postDelayed(hideGestureFeedbackRunnable, 850L)
+    }
+
+    private fun openSidePanel(focusServer: Boolean = false) {
+        if (!::sidePanelContainer.isInitialized) return
+        mainHandler.removeCallbacks(hideOsdRunnable)
+        val serverFocusView = populateServerDrawer()
+        val epFocusView = populateEpisodeDrawer()
+        val sameServerCount = allEpisodes.count { it.season == currentEpisode.season }
+        panelCountBadge.text = "$sameServerCount tập • ${currentEpisode.season}"
+
+        sidePanelVisible = true
+        sidePanelBackdrop.visibility = View.VISIBLE
+        sidePanelContainer.visibility = View.VISIBLE
+        sidePanelContainer.animate().translationX(0f).setDuration(210).start()
+
+        sidePanelContainer.post {
+            if (focusServer) {
+                (serverFocusView ?: serverDrawerRow.getChildAt(0))?.requestFocus()
+            } else {
+                val target = epFocusView ?: episodeDrawerRow.getChildAt(0)
+                if (target != null) {
+                    episodeDrawer.post {
+                        val offset = (target.top - episodeDrawer.height / 3).coerceAtLeast(0)
+                        episodeDrawer.scrollTo(0, offset)
+                        target.requestFocus()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun closeSidePanel() {
+        if (!::sidePanelContainer.isInitialized) return
+        sidePanelVisible = false
+        sidePanelBackdrop.visibility = View.GONE
+        val slideOutX = sidePanelContainer.width.takeIf { it > 0 }?.toFloat()
+            ?: Phim4KPlayerUi.dp(this, 440).toFloat()
+        sidePanelContainer.animate().translationX(slideOutX).setDuration(180).withEndAction {
+            if (!sidePanelVisible) sidePanelContainer.visibility = View.GONE
+        }.start()
+        if (osdVisible) {
+            playPauseBtn.requestFocus()
+            scheduleHideOsd()
+        }
     }
 
     private fun updateSourceSpecificOsdButtons() {
         if (!::aetherTranslateBtn.isInitialized) return
         val aether = isAetherEpisode()
         aetherTranslateBtn.visibility = if (aether) View.VISIBLE else View.GONE
-        // All Aether settings (Subtitles, Translate to Vietnamese, Audio, Quality, Size, Speed, Server)
-        // are now 100% integrated into AnPinime Projector's native dialogs & OSD!
-        aetherMenuBtn.visibility = View.GONE
-        audioDecoderBtn.visibility = View.VISIBLE
-        if (aether) {
-            val activeQ = webQualities.firstOrNull { it.selected }?.label
-            qualityBtn.text = if (!activeQ.isNullOrBlank()) "⚙ Chất lượng: $activeQ" else "⚙ Chất lượng: Auto"
+        val sameServer = allEpisodes.filter { it.season == currentEpisode.season }
+        val idx = sameServer.indexOfFirst { it.number == currentEpisode.number && it.title == currentEpisode.title }
+        if (::nextEpBtn.isInitialized) {
+            nextEpBtn.visibility = if (idx >= 0 && idx + 1 < sameServer.size) View.VISIBLE else View.GONE
         }
+        updateTopStatusBadges()
     }
 
-    private fun populateServerDrawer() {
+    private fun populateServerDrawer(): View? {
         serverDrawerRow.removeAllViews()
+        var currentChip: View? = null
         if (isAetherEpisode()) {
-            // Display Aether providers/scrapers directly instead of mirror domains (which are auto-managed)
             availableAetherProviders.forEachIndexed { idx, provider ->
                 val isCurrent = provider.id.equals(currentAetherProviderId, ignoreCase = true)
-                val chip = TextView(this).apply {
-                    text = if (provider.id == "auto") "🖥 Server 1 · ${provider.name} (Khuyên dùng)"
-                           else "🖥 Server ${idx + 1} · ${provider.name}"
-                    setTextColor(Color.WHITE)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-                    typeface = Typeface.DEFAULT_BOLD
-                    setPadding(UiHelper.dp(context, 14), UiHelper.dp(context, 8), UiHelper.dp(context, 14), UiHelper.dp(context, 8))
+                val label = if (provider.id == "auto") "${provider.name} (Auto)"
+                else "SV${idx + 1} · ${provider.name}"
+                val chip = Phim4KPlayerUi.createGlassChip(this, label, isSelected = isCurrent) {
+                    closeSidePanel()
+                    selectAetherProvider(provider.id, provider.name)
+                }.apply {
                     layoutParams = LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT
-                    ).apply { rightMargin = UiHelper.dp(context, 8) }
+                    ).apply { marginEnd = Phim4KPlayerUi.dp(this@PlayerActivity, 8) }
                 }
-                UiHelper.makeFocusableButton(
-                    view = chip,
-                    normalBgColor = if (isCurrent) UiHelper.COLOR_BLUE else UiHelper.COLOR_CARD,
-                    focusedBgColor = UiHelper.COLOR_ACCENT,
-                    focusedStrokeColor = Color.WHITE,
-                    radiusDp = 16
-                ) {
-                    serverDrawer.visibility = View.GONE
-                    selectAetherProvider(provider.id, provider.name)
-                    playPauseBtn.requestFocus()
-                }
+                if (isCurrent) currentChip = chip
                 serverDrawerRow.addView(chip)
             }
-            return
+            return currentChip
         }
 
         val seasons = ArrayList<String>()
@@ -1009,61 +1495,109 @@ class PlayerActivity : AppCompatActivity() {
             val matchedEp = allEpisodes.firstOrNull { it.season == sv && it.number == currentEpisode.number }
                 ?: allEpisodes.firstOrNull { it.season == sv } ?: continue
             val badge = matchedEp.qualityBadge
-            val chip = TextView(this).apply {
-                text = if (badge.isNotBlank()) "🖥 $sv [$badge]" else "🖥 $sv"
-                setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-                typeface = Typeface.DEFAULT_BOLD
-                setPadding(UiHelper.dp(context, 14), UiHelper.dp(context, 8), UiHelper.dp(context, 14), UiHelper.dp(context, 8))
+            val label = if (badge.isNotBlank()) "$sv ($badge)" else sv
+            val chip = Phim4KPlayerUi.createGlassChip(this, label, isSelected = isCurrent) {
+                closeSidePanel()
+                val resumePos = exoPlayer?.currentPosition ?: webPositionMs
+                startEpisodePlayback(matchedEp, resetPosition = matchedEp.number != currentEpisode.number, initialPositionMs = resumePos)
+            }.apply {
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply { rightMargin = UiHelper.dp(context, 8) }
+                ).apply { marginEnd = Phim4KPlayerUi.dp(this@PlayerActivity, 8) }
             }
-            UiHelper.makeFocusableButton(
-                view = chip,
-                normalBgColor = if (isCurrent) UiHelper.COLOR_BLUE else UiHelper.COLOR_CARD,
-                focusedBgColor = UiHelper.COLOR_ACCENT,
-                focusedStrokeColor = Color.WHITE,
-                radiusDp = 16
-            ) {
-                serverDrawer.visibility = View.GONE
-                val resumePos = exoPlayer?.currentPosition ?: webPositionMs
-                startEpisodePlayback(matchedEp, resetPosition = matchedEp.number != currentEpisode.number, initialPositionMs = resumePos)
-                playPauseBtn.requestFocus()
-            }
+            if (isCurrent) currentChip = chip
             serverDrawerRow.addView(chip)
         }
+        return currentChip
     }
 
-    private fun populateEpisodeDrawer() {
+    private fun populateEpisodeDrawer(): View? {
         episodeDrawerRow.removeAllViews()
+        var activeRow: View? = null
         val sameServerEps = allEpisodes.filter { it.season == currentEpisode.season }
         for (ep in sameServerEps) {
             val isCurrent = ep.number == currentEpisode.number && ep.title == currentEpisode.title
-            val chip = TextView(this).apply {
-                text = ep.title
-                setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-                typeface = Typeface.DEFAULT_BOLD
-                setPadding(UiHelper.dp(context, 14), UiHelper.dp(context, 8), UiHelper.dp(context, 14), UiHelper.dp(context, 8))
+            val card = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = Phim4KPlayerUi.createGlassCardDrawable(this@PlayerActivity, isActive = isCurrent, cornerDp = 10)
+                setPadding(
+                    Phim4KPlayerUi.dp(this@PlayerActivity, 14),
+                    Phim4KPlayerUi.dp(this@PlayerActivity, 11),
+                    Phim4KPlayerUi.dp(this@PlayerActivity, 14),
+                    Phim4KPlayerUi.dp(this@PlayerActivity, 11)
+                )
+                isFocusable = true
+                isClickable = true
                 layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply { rightMargin = UiHelper.dp(context, 8) }
+                ).apply { bottomMargin = Phim4KPlayerUi.dp(this@PlayerActivity, 8) }
+                setOnFocusChangeListener { v, hasFocus ->
+                    val s = if (hasFocus) 1.015f else 1.0f
+                    v.animate().scaleX(s).scaleY(s).setDuration(80).start()
+                }
+                setOnClickListener {
+                    closeSidePanel()
+                    startEpisodePlayback(ep, resetPosition = true)
+                }
             }
-            UiHelper.makeFocusableButton(
-                view = chip,
-                normalBgColor = if (isCurrent) UiHelper.COLOR_RED else UiHelper.COLOR_CARD,
-                focusedBgColor = UiHelper.COLOR_ACCENT,
-                focusedStrokeColor = Color.WHITE,
-                radiusDp = 16
-            ) {
-                episodeDrawer.visibility = View.GONE
-                startEpisodePlayback(ep, resetPosition = true)
+
+            val titleCol = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             }
-            episodeDrawerRow.addView(chip)
+            titleCol.addView(TextView(this).apply {
+                text = ep.title
+                textSize = 14f
+                typeface = Typeface.create("sans-serif-medium", if (isCurrent) Typeface.BOLD else Typeface.NORMAL)
+                setTextColor(if (isCurrent) Phim4KPlayerUi.COLOR_ACCENT_CYAN else Color.WHITE)
+                setSingleLine(true)
+                ellipsize = TextUtils.TruncateAt.END
+            })
+            val subMeta = buildString {
+                if (ep.season.isNotBlank()) append(ep.season)
+                if (ep.qualityBadge.isNotBlank()) {
+                    if (isNotEmpty()) append(" • ")
+                    append(ep.qualityBadge)
+                }
+            }
+            if (subMeta.isNotEmpty()) {
+                titleCol.addView(TextView(this).apply {
+                    text = subMeta
+                    textSize = 11.5f
+                    setTextColor(0xFF9FB0C4.toInt())
+                    setSingleLine(true)
+                    ellipsize = TextUtils.TruncateAt.END
+                })
+            }
+            card.addView(titleCol)
+
+            if (isCurrent) {
+                card.addView(TextView(this).apply {
+                    text = "ĐANG PHÁT"
+                    textSize = 10f
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextColor(0xFF06131C.toInt())
+                    setPadding(
+                        Phim4KPlayerUi.dp(this@PlayerActivity, 8),
+                        Phim4KPlayerUi.dp(this@PlayerActivity, 3),
+                        Phim4KPlayerUi.dp(this@PlayerActivity, 8),
+                        Phim4KPlayerUi.dp(this@PlayerActivity, 3)
+                    )
+                    background = Phim4KPlayerUi.createGlassPillDrawable(
+                        this@PlayerActivity,
+                        fillColor = Phim4KPlayerUi.COLOR_ACCENT_CYAN,
+                        strokeColor = Color.TRANSPARENT,
+                        cornerDp = 10
+                    )
+                })
+                activeRow = card
+            }
+            episodeDrawerRow.addView(card)
         }
+        return activeRow
     }
 
     private fun selectAetherProvider(
@@ -1269,7 +1803,10 @@ class PlayerActivity : AppCompatActivity() {
         lastSubtitles = subtitles
         destroyWebPlayer(force = false)
         surfaceView.visibility = View.VISIBLE
-        if (::subtitleView.isInitialized) subtitleView.visibility = View.VISIBLE
+        if (::subtitleView.isInitialized) {
+            subtitleView.visibility = View.VISIBLE
+            applySubtitleScale()
+        }
         prewarmSourceSubtitle(subtitles, streamUrl, headers)
 
         val selector = DefaultTrackSelector(this).apply {
@@ -1491,13 +2028,15 @@ class PlayerActivity : AppCompatActivity() {
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 if (exoPlayer !== player) return
-                playPauseBtn.text = if (isPlaying) "⏸ Tạm dừng" else "▶ Phát tiếp"
+                updatePlayPauseIcon(isPlaying)
                 if (isPlaying) {
                     scheduleHideOsd()
                 }
             }
 
             override fun onVideoSizeChanged(videoSize: VideoSize) {
+                lastVideoW = videoSize.width
+                lastVideoH = videoSize.height
                 adjustSurfaceAspectRatio(videoSize.width, videoSize.height)
             }
 
@@ -1860,7 +2399,7 @@ class PlayerActivity : AppCompatActivity() {
                     webPositionMs = (position * 1000).toLong().coerceAtLeast(0)
                     webDurationMs = (duration * 1000).toLong().coerceAtLeast(0)
                     webPaused = paused
-                    playPauseBtn.text = if (paused) "▶ Phát tiếp" else "⏸ Tạm dừng"
+                    updatePlayPauseIcon(!paused)
                     updateProgressUi()
                 }
             }
@@ -1913,7 +2452,7 @@ class PlayerActivity : AppCompatActivity() {
                             webPositionMs = (pos * 1000).toLong().coerceAtLeast(0L)
                             webDurationMs = (dur * 1000).toLong().coerceAtLeast(0L)
                             webPaused = paused
-                            playPauseBtn.text = if (paused) "▶ Phát tiếp" else "⏸ Tạm dừng"
+                            updatePlayPauseIcon(!paused)
                             updateProgressUi()
                         }
                         val tracksObj = root.optJSONObject("tracks")
@@ -3651,8 +4190,85 @@ class PlayerActivity : AppCompatActivity() {
         return false
     }
 
+    private fun cycleAspectMode() {
+        val modes = Phim4KPlayerUi.AspectMode.values()
+        currentAspectMode = modes[(currentAspectMode.ordinal + 1) % modes.size]
+        if (lastVideoW > 0 && lastVideoH > 0) {
+            adjustSurfaceAspectRatio(lastVideoW, lastVideoH)
+        }
+        updateTopStatusBadges()
+        updateFocusedHint("Tỉ lệ màn hình · ${currentAspectMode.label}")
+        showGestureFeedback("📐  ${currentAspectMode.label}", Gravity.CENTER)
+    }
+
+    private fun showAspectModePicker() {
+        val modes = Phim4KPlayerUi.AspectMode.values()
+        showSelection("Tỉ lệ màn hình", modes.map { it.label }, currentAspectMode.ordinal) { idx ->
+            currentAspectMode = modes.getOrElse(idx) { Phim4KPlayerUi.AspectMode.FIT }
+            if (lastVideoW > 0 && lastVideoH > 0) {
+                adjustSurfaceAspectRatio(lastVideoW, lastVideoH)
+            }
+            updateTopStatusBadges()
+            showGestureFeedback("📐  ${currentAspectMode.label}", Gravity.CENTER)
+        }
+    }
+
+    private fun showSettingsMenu() {
+        val qLabel = if (exoPlayer == null && fallbackWebView != null) {
+            webQualities.firstOrNull { it.selected }?.label ?: "Tự động"
+        } else {
+            when (currentQualityMode) {
+                0 -> "1080p"
+                1 -> "720p"
+                else -> "Auto"
+            }
+        }
+        val speedLabel = String.format(Locale.US, "%.2gx", currentPlaybackSpeed)
+        val sizeLabel = when (subtitleScaleMode) {
+            0 -> "Nhỏ (18sp)"
+            1 -> "Vừa (22sp)"
+            3 -> "Rất lớn (32sp)"
+            else -> "Lớn (26sp)"
+        }
+        val decoderLabel = if (preferSoftwareAudio) "FFmpeg Đa kênh" else "Tự động / Thiết bị"
+
+        val items = mutableListOf(
+            "Chất lượng video · $qLabel",
+            "Tốc độ phát · $speedLabel",
+            "Cỡ chữ phụ đề · $sizeLabel",
+            "Tỉ lệ khung hình · ${currentAspectMode.label}",
+            "Bộ giải mã Audio · $decoderLabel"
+        )
+        if (fallbackWebView != null && isAetherEpisode()) {
+            items.add("Menu gốc trình phát Web (Aether)")
+        }
+
+        showSelection("Cài đặt phát", items, -1) { index ->
+            when (index) {
+                0 -> showQualityPicker()
+                1 -> showPlaybackSpeedPicker()
+                2 -> showSubtitleSizePicker()
+                3 -> showAspectModePicker()
+                4 -> showSelection(
+                    "Bộ giải mã âm thanh (Hỗ trợ 5.1 / EAC3 / DTS / AAC)",
+                    listOf("Tự động / Thiết bị", "FFmpeg Đa kênh (Khuyên dùng cho 4K/MKV VIP)"),
+                    if (preferSoftwareAudio) 1 else 0
+                ) { decIdx ->
+                    exoPlayer?.let { player ->
+                        val position = player.currentPosition
+                        preferSoftwareAudio = decIdx == 1
+                        prepareExoPlayer(lastNativeUrl, lastNativeHeaders, position, lastMediaKind, lastSubtitles)
+                    }
+                }
+                5 -> openAetherNativeMenu("/captionsOverlay")
+            }
+        }
+    }
+
     private fun adjustSurfaceAspectRatio(videoW: Int, videoH: Int) {
         if (videoW <= 0 || videoH <= 0) return
+        lastVideoW = videoW
+        lastVideoH = videoH
         val parentW = videoFrame.width
         val parentH = videoFrame.height
         if (parentW <= 0 || parentH <= 0) return
@@ -3660,12 +4276,42 @@ class PlayerActivity : AppCompatActivity() {
         val videoRatio = videoW.toFloat() / videoH.toFloat()
         val screenRatio = parentW.toFloat() / parentH.toFloat()
         val lp = surfaceView.layoutParams as FrameLayout.LayoutParams
-        if (videoRatio > screenRatio) {
-            lp.width = parentW
-            lp.height = (parentW / videoRatio).toInt()
-        } else {
-            lp.height = parentH
-            lp.width = (parentH * videoRatio).toInt()
+        when (currentAspectMode) {
+            Phim4KPlayerUi.AspectMode.FIT -> {
+                if (videoRatio > screenRatio) {
+                    lp.width = parentW
+                    lp.height = (parentW / videoRatio).toInt()
+                } else {
+                    lp.height = parentH
+                    lp.width = (parentH * videoRatio).toInt()
+                }
+            }
+            Phim4KPlayerUi.AspectMode.ZOOM -> {
+                if (videoRatio > screenRatio) {
+                    lp.height = parentH
+                    lp.width = (parentH * videoRatio).toInt()
+                } else {
+                    lp.width = parentW
+                    lp.height = (parentW / videoRatio).toInt()
+                }
+            }
+            Phim4KPlayerUi.AspectMode.FILL -> {
+                lp.width = parentW
+                lp.height = parentH
+            }
+            Phim4KPlayerUi.AspectMode.CINEMA_ZOOM -> {
+                if (videoRatio > screenRatio) {
+                    lp.width = (parentW * 1.12f).toInt()
+                    lp.height = ((parentW / videoRatio) * 1.12f).toInt()
+                } else {
+                    lp.height = (parentH * 1.12f).toInt()
+                    lp.width = ((parentH * videoRatio) * 1.12f).toInt()
+                }
+            }
+            Phim4KPlayerUi.AspectMode.FIXED_WIDTH -> {
+                lp.width = parentW
+                lp.height = (parentW / videoRatio).toInt()
+            }
         }
         lp.gravity = Gravity.CENTER
         surfaceView.layoutParams = lp
@@ -3674,29 +4320,32 @@ class PlayerActivity : AppCompatActivity() {
     private fun showSelection(title: String, labels: List<String>, selected: Int, choose: (Int) -> Unit) {
         selectionDialog?.dismiss()
         mainHandler.removeCallbacks(hideOsdRunnable)
-        selectionDialog = AlertDialog.Builder(this)
-            .setTitle(title)
-            .setSingleChoiceItems(labels.toTypedArray(), selected) { dialog, index ->
-                choose(index)
-                dialog.dismiss()
+        selectionDialog = Phim4KPlayerUi.showGlassListDialog(
+            activity = this,
+            title = title,
+            items = labels,
+            checkedIndex = selected,
+            onDismiss = {
+                selectionDialog = null
+                scheduleHideOsd()
             }
-            .setNegativeButton("Đóng", null)
-            .setOnDismissListener { selectionDialog = null; scheduleHideOsd() }
-            .create()
-        selectionDialog?.show()
-        selectionDialog?.listView?.apply {
-            setSelection(selected.coerceAtLeast(0))
-            requestFocus()
+        ) { index ->
+            choose(index)
         }
     }
 
     private fun showPlayerMessage(title: String, message: String) {
         selectionDialog?.dismiss()
         mainHandler.removeCallbacks(hideOsdRunnable)
-        selectionDialog = AlertDialog.Builder(this).setTitle(title).setMessage(message)
-            .setPositiveButton("Đóng", null)
-            .setOnDismissListener { selectionDialog = null; scheduleHideOsd() }.create()
-        selectionDialog?.show()
+        selectionDialog = Phim4KPlayerUi.showGlassMessageDialog(
+            activity = this,
+            title = title,
+            message = message,
+            onDismiss = {
+                selectionDialog = null
+                scheduleHideOsd()
+            }
+        )
     }
 
     private fun showQualityPicker() {
@@ -3708,7 +4357,7 @@ class PlayerActivity : AppCompatActivity() {
                 showSelection("Chất lượng video (Aether)", labels, selected) { idx ->
                     val chosen = options.getOrNull(idx) ?: return@showSelection
                     sendWebTrackCommand("quality", chosen.id)
-                    qualityBtn.text = if (chosen.id == "auto") "⚙ Chất lượng: Tự động" else "⚙ Chất lượng: ${chosen.label}"
+                    updateTopStatusBadges()
                 }
                 return
             }
@@ -3739,7 +4388,7 @@ class PlayerActivity : AppCompatActivity() {
         showSelection("Tốc độ phát", labels, selected) { idx ->
             val chosenSpeed = speeds.getOrElse(idx) { 1.0f }
             currentPlaybackSpeed = chosenSpeed
-            speedBtn.text = String.format(Locale.US, "⏩ Tốc độ: %.2gx", chosenSpeed)
+            updateTopStatusBadges()
             exoPlayer?.setPlaybackParameters(androidx.media3.common.PlaybackParameters(chosenSpeed))
             sendWebCommand("rate", chosenSpeed.toDouble())
         }
@@ -3873,7 +4522,7 @@ class PlayerActivity : AppCompatActivity() {
 
         if (viLiveSubActive) {
             stopLiveViSubtitles(clearView = true)
-            android.widget.Toast.makeText(this, "Đã tắt phụ đề dịch AI, dùng phụ đề gốc", android.widget.Toast.LENGTH_SHORT).show()
+            showGestureFeedback("Phụ đề AI: Tắt", Gravity.CENTER)
             return
         }
 
@@ -3883,7 +4532,9 @@ class PlayerActivity : AppCompatActivity() {
         val sourceKey = targetSubUrl ?: "${lastNativeUrl}|${activeLang.orEmpty()}"
         val epKey = "${currentEpisode.slug}|$sourceKey"
 
-        if (translatedEpisodeKey == epKey && viLiveCues.isNotEmpty() && viTranslatedMap.isNotEmpty()) {
+        val isMemoryCacheComplete = viTranslatedMap.size >= (viLiveCues.size * 0.90).toInt().coerceAtLeast(1)
+        if (translatedEpisodeKey == epKey && viLiveCues.isNotEmpty() && isMemoryCacheComplete) {
+            viTranslationCompleted = true
             player.trackSelectionParameters = player.trackSelectionParameters
                 .buildUpon()
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
@@ -3891,20 +4542,26 @@ class PlayerActivity : AppCompatActivity() {
             if (::subtitleView.isInitialized) subtitleView.setCues(emptyList())
             viLiveSubActive = true
             viLastRenderedCueText = VI_CUE_UNSET
-            aetherTranslateBtn.text = "✓ Sub Việt (AI)"
+            updateTranslateStatusUi(viTranslatedMap.size, viLiveCues.size, completed = true)
+            renderLiveSubtitleAt(player.currentPosition.coerceAtLeast(0L), force = true)
             mainHandler.removeCallbacks(subtitleTickRunnable)
             mainHandler.post(subtitleTickRunnable)
+            showGestureFeedback("✓ Phụ đề Việt (AI)", Gravity.CENTER)
             return
         }
 
         if (translateSubJob?.isActive == true) {
-            android.widget.Toast.makeText(this, "Đang hoàn tất dịch phụ đề nền…", android.widget.Toast.LENGTH_SHORT).show()
+            showGestureFeedback("⚡ Đang dịch phụ đề nền…", Gravity.CENTER)
             return
         }
 
         val currentPos = player.currentPosition.coerceAtLeast(0L)
-        aetherTranslateBtn.text = "⚡ Đang dịch…"
-        android.widget.Toast.makeText(this, "⚡ Đang dịch sub Việt tại vị trí đang xem…", android.widget.Toast.LENGTH_SHORT).show()
+        viTranslationCompleted = false
+        if (::topTranslateBadge.isInitialized) {
+            topTranslateBadge.visibility = View.VISIBLE
+            topTranslateBadge.text = "⚡ Đang tải phụ đề…"
+        }
+        showGestureFeedback("⚡ Đang dịch sub Việt tại vị trí đang xem…", Gravity.CENTER)
 
         translateSubJob = uiScope.launch {
             try {
@@ -3918,7 +4575,7 @@ class PlayerActivity : AppCompatActivity() {
                     )
                 }
                 if (rawText.isNullOrBlank()) {
-                    aetherTranslateBtn.text = "🌐 Dịch Sub Việt"
+                    updateTranslateStatusUi(0, 0, completed = false)
                     showPlayerMessage("Dịch phụ đề", "Không tìm thấy phụ đề nguồn (SRT/VTT/ASS) để dịch sang Tiếng Việt.")
                     return@launch
                 }
@@ -3926,7 +4583,7 @@ class PlayerActivity : AppCompatActivity() {
                     SubtitleTranslator.parseTimedCues(rawText)
                 }
                 if (parsedCues.isEmpty()) {
-                    aetherTranslateBtn.text = "🌐 Dịch Sub Việt"
+                    updateTranslateStatusUi(0, 0, completed = false)
                     showPlayerMessage("Dịch phụ đề", "Tệp phụ đề không có dòng thoại hợp lệ để dịch.")
                     return@launch
                 }
@@ -3939,10 +4596,13 @@ class PlayerActivity : AppCompatActivity() {
                 withContext(Dispatchers.IO) {
                     val outDir = File(cacheDir, "aether_subs").apply { mkdirs() }
                     val cacheHash = SubtitleTranslator.computeSubCacheKey(sourceKey, parsedCues.size, "vi")
-                    val transCacheFile = File(outDir, "cache_$cacheHash.json")
+                    val transCacheFile = File(outDir, "cache_v2_$cacheHash.json")
                     val seedMap = SubtitleTranslator.loadCachedTranslations(transCacheFile, parsedCues.size)
+                    if (seedMap.isNotEmpty()) {
+                        viTranslatedMap.putAll(seedMap)
+                    }
 
-                    SubtitleTranslator.translateAllProgressiveFast(
+                    val allTranslated = SubtitleTranslator.translateAllProgressiveFast(
                         cues = parsedCues,
                         currentPositionMs = currentPos,
                         workers = 3,
@@ -3965,23 +4625,32 @@ class PlayerActivity : AppCompatActivity() {
                                     .buildUpon()
                                     .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
                                     .build()
-                                if (::subtitleView.isInitialized) {
-                                    subtitleView.setCues(emptyList())
-                                }
                                 viLastRenderedCueText = VI_CUE_UNSET
-                                aetherTranslateBtn.text = "⚡ Sub Việt (${viTranslatedMap.size}/${parsedCues.size})"
+                                updateTranslateStatusUi(viTranslatedMap.size, parsedCues.size, completed = false)
+                                renderLiveSubtitleAt(p.currentPosition.coerceAtLeast(0L), force = true)
                                 mainHandler.removeCallbacks(subtitleTickRunnable)
                                 mainHandler.post(subtitleTickRunnable)
+                            }
+                        },
+                        onBatchTranslated = { batchMap ->
+                            viTranslatedMap.putAll(batchMap)
+                            mainHandler.post {
+                                val p = exoPlayer ?: return@post
+                                if (viLiveSubActive) {
+                                    renderLiveSubtitleAt(p.currentPosition.coerceAtLeast(0L))
+                                }
                             }
                         },
                         onBatchUpdated = { done, total ->
                             mainHandler.post {
                                 if (viLiveSubActive && done < total) {
-                                    aetherTranslateBtn.text = "⚡ Sub Việt ($done/$total)"
+                                    updateTranslateStatusUi(viTranslatedMap.size.coerceAtLeast(done), total, completed = false)
                                 }
                             }
                         }
                     )
+                    viTranslatedMap.putAll(allTranslated)
+                    viTranslationCompleted = true
 
                     if (viTranslatedMap.isEmpty()) {
                         mainHandler.post {
@@ -3993,7 +4662,7 @@ class PlayerActivity : AppCompatActivity() {
                     }
 
                     SubtitleTranslator.saveCachedTranslations(transCacheFile, parsedCues.size, viTranslatedMap)
-                    val outFile = File(outDir, "vi_$cacheHash.vtt")
+                    val outFile = File(outDir, "vi_v2_$cacheHash.vtt")
                     outFile.writeText(SubtitleTranslator.buildVtt(parsedCues, viTranslatedMap), Charsets.UTF_8)
 
                     val newTrack = ExternalSubtitleTrack(
@@ -4005,7 +4674,9 @@ class PlayerActivity : AppCompatActivity() {
                     mainHandler.post {
                         lastSubtitles = listOf(newTrack) + lastSubtitles.filterNot { it.url == newTrack.url }
                         if (viLiveSubActive) {
-                            aetherTranslateBtn.text = "✓ Sub Việt (AI)"
+                            updateTranslateStatusUi(viTranslatedMap.size, parsedCues.size, completed = true)
+                            viLastRenderedCueText = VI_CUE_UNSET
+                            exoPlayer?.let { renderLiveSubtitleAt(it.currentPosition.coerceAtLeast(0L), force = true) }
                             mainHandler.removeCallbacks(subtitleTickRunnable)
                             mainHandler.post(subtitleTickRunnable)
                         }
@@ -4199,12 +4870,7 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun applyQualityMode() {
-        val label = when (currentQualityMode) {
-            0 -> "⚙ Tối đa 1080p"
-            1 -> "⚙ Tối đa 720p"
-            else -> "⚙ Chất lượng: Tự động"
-        }
-        qualityBtn.text = label
+        updateTopStatusBadges()
         trackSelector?.let { selector ->
             selector.parameters = selector.buildUponParameters()
                 .apply {
@@ -4319,7 +4985,11 @@ class PlayerActivity : AppCompatActivity() {
         }
         showSelection(title, labels, selected) { index ->
             if (hasAetherTranslate && index == labels.size - 1) {
-                triggerAetherVietnameseTranslation()
+                if (viLiveSubActive) {
+                    showGestureFeedback("✓ Phụ đề Việt AI đang bật", Gravity.CENTER)
+                } else {
+                    triggerAetherVietnameseTranslation()
+                }
                 return@showSelection
             }
             if (type == C.TRACK_TYPE_TEXT) {
@@ -4437,6 +5107,10 @@ class PlayerActivity : AppCompatActivity() {
             val target = (basePos + deltaMs).coerceIn(0L, dur)
             pendingSeekTargetMs = target
             timeCurrentText.text = formatTime(target)
+            if (::seekPreviewBadge.isInitialized) {
+                seekPreviewBadge.text = "${if (deltaMs >= 0) "+" else "-"}${kotlin.math.abs(deltaMs) / 1000L}s  →  ${formatTime(target)}"
+                seekPreviewBadge.visibility = View.VISIBLE
+            }
             seekBar.progress = ((target * 1000L) / dur).toInt().coerceIn(0, 1000)
             mainHandler.removeCallbacks(commitPendingSeekRunnable)
             mainHandler.postDelayed(commitPendingSeekRunnable, 600L)
@@ -4447,6 +5121,10 @@ class PlayerActivity : AppCompatActivity() {
         val target = (basePos + deltaMs).coerceIn(0L, dur)
         pendingSeekTargetMs = target
         timeCurrentText.text = formatTime(target)
+        if (::seekPreviewBadge.isInitialized) {
+            seekPreviewBadge.text = "${if (deltaMs >= 0) "+" else "-"}${kotlin.math.abs(deltaMs) / 1000L}s  →  ${formatTime(target)}"
+            seekPreviewBadge.visibility = View.VISIBLE
+        }
         seekBar.progress = ((target * 1000L) / dur).toInt().coerceIn(0, 1000)
         mainHandler.removeCallbacks(commitPendingSeekRunnable)
         mainHandler.postDelayed(commitPendingSeekRunnable, 600L)
@@ -4456,6 +5134,9 @@ class PlayerActivity : AppCompatActivity() {
         val target = pendingSeekTargetMs
         pendingSeekTargetMs = -1L
         mainHandler.removeCallbacks(commitPendingSeekRunnable)
+        if (::seekPreviewBadge.isInitialized) {
+            seekPreviewBadge.visibility = View.GONE
+        }
         if (target < 0L) return
         val player = exoPlayer
         if (player != null) {
@@ -4501,14 +5182,17 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun hideOsd() {
         osdVisible = false
-        serverDrawer.visibility = View.GONE
-        episodeDrawer.visibility = View.GONE
+        if (sidePanelVisible) {
+            sidePanelVisible = false
+            sidePanelBackdrop.visibility = View.GONE
+            sidePanelContainer.visibility = View.GONE
+        }
         osdContainer.visibility = View.GONE
     }
 
     private fun scheduleHideOsd() {
         mainHandler.removeCallbacks(hideOsdRunnable)
-        if (selectionDialog == null && !scrubbing && serverDrawer.visibility != View.VISIBLE && episodeDrawer.visibility != View.VISIBLE) {
+        if (selectionDialog == null && !scrubbing && !sidePanelVisible) {
             mainHandler.postDelayed(hideOsdRunnable, 6000L)
         }
     }
@@ -4525,6 +5209,8 @@ class PlayerActivity : AppCompatActivity() {
         timeTotalText.text = formatTime(dur)
         if (dur > 0L && !scrubbing && pendingSeekTargetMs < 0L) {
             seekBar.progress = ((pos * 1000L) / dur).toInt().coerceIn(0, 1000)
+            val buf = player?.bufferedPosition?.coerceAtLeast(pos) ?: pos
+            seekBar.secondaryProgress = ((buf * 1000L) / dur).toInt().coerceIn(0, 1000)
         }
     }
 
