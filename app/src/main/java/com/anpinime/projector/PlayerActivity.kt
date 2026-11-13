@@ -72,6 +72,8 @@ import androidx.media3.exoplayer.source.SingleSampleMediaSource
 import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+import android.provider.OpenableColumns
+import androidx.activity.result.contract.ActivityResultContracts
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -205,9 +207,16 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var sidePanelContainer: LinearLayout
     private lateinit var panelTitleText: TextView
     private lateinit var panelCountBadge: TextView
-    private lateinit var serverDrawer: HorizontalScrollView
-    private lateinit var serverDrawerRow: LinearLayout
+    private lateinit var panelSwitchServerBtn: TextView
     private lateinit var episodeDrawer: ScrollView
+    private var pendingSelectSubtitleUrl: String = ""
+    private val pickLocalSubtitleLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            importLocalSubtitleUri(uri)
+        } else {
+            scheduleHideOsd()
+        }
+    }
     private lateinit var episodeDrawerRow: LinearLayout
 
     private var currentAspectMode = Phim4KPlayerUi.AspectMode.FIT
@@ -1120,7 +1129,7 @@ class PlayerActivity : AppCompatActivity() {
             "Danh sách tập",
             extraHint = { "${allEpisodes.count { it.season == currentEpisode.season }} tập" }
         ) {
-            openSidePanel(focusServer = false)
+            openSidePanel()
         }
         btnRow.addView(episodeBtn)
 
@@ -1129,7 +1138,7 @@ class PlayerActivity : AppCompatActivity() {
             "Đổi nguồn phát / Server",
             extraHint = { currentEpisode.season }
         ) {
-            openSidePanel(focusServer = true)
+            showServerPicker()
         }
         btnRow.addView(serverBtn)
 
@@ -1253,7 +1262,7 @@ class PlayerActivity : AppCompatActivity() {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         panelTitleText = TextView(this).apply {
-            text = "Chọn Tập & Nguồn"
+            text = "Danh sách tập"
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 16f else 18f)
             typeface = Typeface.DEFAULT_BOLD
@@ -1268,6 +1277,18 @@ class PlayerActivity : AppCompatActivity() {
         panelHeaderTextCol.addView(panelCountBadge)
         panelHeader.addView(panelHeaderTextCol)
 
+        panelSwitchServerBtn = Phim4KPlayerUi.createGlassChip(this, "Đổi nguồn", isSelected = false) {
+            closeSidePanel()
+            showServerPicker()
+        }.apply {
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { marginEnd = Phim4KPlayerUi.dp(context, 8) }
+        }
+        panelHeader.addView(panelSwitchServerBtn)
+
         val panelCloseBtn = Phim4KPlayerUi.createControlIconButton(
             context = this,
             iconResId = R.drawable.ic_p4k_close,
@@ -1280,41 +1301,11 @@ class PlayerActivity : AppCompatActivity() {
         panelHeader.addView(panelCloseBtn)
         sidePanelContainer.addView(panelHeader)
 
-        sidePanelContainer.addView(TextView(this).apply {
-            text = "NGUỒN PHÁT / SERVER"
-            setTextColor(0xFF9FB0C4.toInt())
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(0, Phim4KPlayerUi.dp(context, 2), 0, Phim4KPlayerUi.dp(context, 6))
-        })
-
-        serverDrawer = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { bottomMargin = Phim4KPlayerUi.dp(context, 10) }
-        }
-        serverDrawerRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        serverDrawer.addView(serverDrawerRow)
-        sidePanelContainer.addView(serverDrawer)
-
         sidePanelContainer.addView(View(this).apply {
             setBackgroundColor(0x26FFFFFF)
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxOf(1, Phim4KPlayerUi.dp(context, 1))).apply {
                 bottomMargin = Phim4KPlayerUi.dp(context, 10)
             }
-        })
-
-        sidePanelContainer.addView(TextView(this).apply {
-            text = "DANH SÁCH TẬP"
-            setTextColor(0xFF9FB0C4.toInt())
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(0, 0, 0, Phim4KPlayerUi.dp(context, 6))
         })
 
         episodeDrawer = ScrollView(this).apply {
@@ -1407,10 +1398,9 @@ class PlayerActivity : AppCompatActivity() {
         mainHandler.postDelayed(hideGestureFeedbackRunnable, 850L)
     }
 
-    private fun openSidePanel(focusServer: Boolean = false) {
+    private fun openSidePanel() {
         if (!::sidePanelContainer.isInitialized) return
         mainHandler.removeCallbacks(hideOsdRunnable)
-        val serverFocusView = populateServerDrawer()
         val epFocusView = populateEpisodeDrawer()
         val sameServerCount = allEpisodes.count { it.season == currentEpisode.season }
         panelCountBadge.text = "$sameServerCount tập • ${currentEpisode.season}"
@@ -1421,17 +1411,15 @@ class PlayerActivity : AppCompatActivity() {
         sidePanelContainer.animate().translationX(0f).setDuration(210).start()
 
         sidePanelContainer.post {
-            if (focusServer) {
-                (serverFocusView ?: serverDrawerRow.getChildAt(0))?.requestFocus()
-            } else {
-                val target = epFocusView ?: episodeDrawerRow.getChildAt(0)
-                if (target != null) {
-                    episodeDrawer.post {
-                        val offset = (target.top - episodeDrawer.height / 3).coerceAtLeast(0)
-                        episodeDrawer.scrollTo(0, offset)
-                        target.requestFocus()
-                    }
+            val target = epFocusView ?: episodeDrawerRow.getChildAt(0)
+            if (target != null) {
+                episodeDrawer.post {
+                    val offset = (target.top - episodeDrawer.height / 3).coerceAtLeast(0)
+                    episodeDrawer.scrollTo(0, offset)
+                    target.requestFocus()
                 }
+            } else if (::panelSwitchServerBtn.isInitialized) {
+                panelSwitchServerBtn.requestFocus()
             }
         }
     }
@@ -1463,53 +1451,59 @@ class PlayerActivity : AppCompatActivity() {
         updateTopStatusBadges()
     }
 
-    private fun populateServerDrawer(): View? {
-        serverDrawerRow.removeAllViews()
-        var currentChip: View? = null
+    private fun showServerPicker() {
         if (isAetherEpisode()) {
-            availableAetherProviders.forEachIndexed { idx, provider ->
-                val isCurrent = provider.id.equals(currentAetherProviderId, ignoreCase = true)
-                val label = if (provider.id == "auto") "${provider.name} (Auto)"
-                else "SV${idx + 1} · ${provider.name}"
-                val chip = Phim4KPlayerUi.createGlassChip(this, label, isSelected = isCurrent) {
-                    closeSidePanel()
-                    selectAetherProvider(provider.id, provider.name)
-                }.apply {
-                    layoutParams = LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT
-                    ).apply { marginEnd = Phim4KPlayerUi.dp(this@PlayerActivity, 8) }
-                }
-                if (isCurrent) currentChip = chip
-                serverDrawerRow.addView(chip)
+            val providers = availableAetherProviders
+            if (providers.isEmpty()) {
+                showPlayerMessage("Nguồn phát", "Chưa tìm thấy nguồn phát khả dụng cho phim này.")
+                return
             }
-            return currentChip
+            val labels = providers.mapIndexed { idx, provider ->
+                if (provider.id == "auto") {
+                    "⚡ ${provider.name} (Auto) · Khuyên dùng"
+                } else {
+                    val desc = provider.description.takeIf { it.isNotBlank() }?.let { " — $it" }.orEmpty()
+                    "Server ${idx + 1} · ${provider.name}$desc"
+                }
+            }
+            val selected = providers.indexOfFirst { it.id.equals(currentAetherProviderId, ignoreCase = true) }
+                .coerceAtLeast(0)
+            showSelection("Chọn nguồn phát / Server", labels, selected) { idx ->
+                val chosen = providers.getOrNull(idx) ?: return@showSelection
+                selectAetherProvider(chosen.id, chosen.name)
+            }
+            return
         }
 
         val seasons = ArrayList<String>()
         for (ep in allEpisodes) {
-            if (!seasons.contains(ep.season)) seasons.add(ep.season)
+            if (ep.season.isNotBlank() && !seasons.contains(ep.season)) seasons.add(ep.season)
         }
-        for (sv in seasons) {
-            val isCurrent = sv == currentEpisode.season
-            val matchedEp = allEpisodes.firstOrNull { it.season == sv && it.number == currentEpisode.number }
-                ?: allEpisodes.firstOrNull { it.season == sv } ?: continue
-            val badge = matchedEp.qualityBadge
-            val label = if (badge.isNotBlank()) "$sv ($badge)" else sv
-            val chip = Phim4KPlayerUi.createGlassChip(this, label, isSelected = isCurrent) {
-                closeSidePanel()
-                val resumePos = exoPlayer?.currentPosition ?: webPositionMs
-                startEpisodePlayback(matchedEp, resetPosition = matchedEp.number != currentEpisode.number, initialPositionMs = resumePos)
-            }.apply {
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply { marginEnd = Phim4KPlayerUi.dp(this@PlayerActivity, 8) }
-            }
-            if (isCurrent) currentChip = chip
-            serverDrawerRow.addView(chip)
+        if (seasons.isEmpty()) {
+            showPlayerMessage("Nguồn phát", "Nguồn hiện tại: ${currentEpisode.season.ifBlank { "Mặc định" }}")
+            return
         }
-        return currentChip
+        val labels = ArrayList<String>(seasons.size)
+        val matchedEps = ArrayList<Episode>(seasons.size)
+        var selected = 0
+        seasons.forEachIndexed { idx, sv ->
+            if (sv == currentEpisode.season) selected = idx
+            val matched = allEpisodes.firstOrNull { it.season == sv && it.number == currentEpisode.number }
+                ?: allEpisodes.firstOrNull { it.season == sv }!!
+            val count = allEpisodes.count { it.season == sv }
+            val badge = matched.qualityBadge.takeIf { it.isNotBlank() }?.let { " • $it" }.orEmpty()
+            labels.add("$sv$badge · $count tập")
+            matchedEps.add(matched)
+        }
+        showSelection("Chọn nguồn phát / Server", labels, selected) { idx ->
+            val matchedEp = matchedEps.getOrNull(idx) ?: return@showSelection
+            val resumePos = exoPlayer?.currentPosition ?: webPositionMs
+            startEpisodePlayback(
+                matchedEp,
+                resetPosition = matchedEp.number != currentEpisode.number,
+                initialPositionMs = resumePos
+            )
+        }
     }
 
     private fun populateEpisodeDrawer(): View? {
@@ -1862,14 +1856,53 @@ class PlayerActivity : AppCompatActivity() {
             .setAllowCrossProtocolRedirects(true)
             .setDefaultRequestProperties(mergedHeaders)
 
-        // External subtitle sources must NOT inherit video CDN Origin/Referer headers
-        val subHttpFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent(AetherSourceResolver.USER_AGENT)
-            .setConnectTimeoutMs(10_000)
-            .setReadTimeoutMs(15_000)
-            .setAllowCrossProtocolRedirects(true)
-            .setDefaultRequestProperties(mapOf("X-User-Agent" to AetherSourceResolver.OPENSUBTITLES_UA))
-        val subDataSourceFactory = DefaultDataSource.Factory(this, subHttpFactory)
+        // External & local subtitle sources use OkHttp + cookie jar + charset/SRT normalization
+        val subMimeMap = HashMap<String, String>(subtitles.size)
+        val hasPendingSelect = pendingSelectSubtitleUrl.isNotBlank() &&
+            subtitles.any { it.url == pendingSelectSubtitleUrl }
+        val firstVietIdx = subtitles.indexOfFirst {
+            it.language.equals("vi", true) || it.label.contains("Việt", true)
+        }
+        val firstEngIdx = subtitles.indexOfFirst {
+            it.language.equals("en", true) || it.label.contains("English", true) || it.label.contains("Anh", true)
+        }
+        val subtitleConfigs = subtitles.mapIndexed { idx, sub ->
+            val subMime = sub.mimeType ?: SubtitleSupport.detectSubtitleFormat(sub.url)
+            subMimeMap[sub.url] = subMime
+            val isViet = sub.language.lowercase().startsWith("vi") ||
+                sub.label.lowercase().contains("việt") ||
+                sub.label.lowercase().contains("viet")
+            val isEng = sub.language.lowercase().startsWith("en") ||
+                sub.label.lowercase().contains("english")
+            val flags = when {
+                hasPendingSelect && sub.url == pendingSelectSubtitleUrl -> {
+                    C.SELECTION_FLAG_DEFAULT or C.SELECTION_FLAG_FORCED or C.SELECTION_FLAG_AUTOSELECT
+                }
+                !hasPendingSelect && firstVietIdx >= 0 && idx == firstVietIdx -> {
+                    C.SELECTION_FLAG_DEFAULT or C.SELECTION_FLAG_AUTOSELECT
+                }
+                !hasPendingSelect && firstVietIdx < 0 && firstEngIdx >= 0 && idx == firstEngIdx -> {
+                    C.SELECTION_FLAG_DEFAULT or C.SELECTION_FLAG_AUTOSELECT
+                }
+                !hasPendingSelect && (isViet || isEng) -> C.SELECTION_FLAG_AUTOSELECT
+                else -> 0
+            }
+            MediaItem.SubtitleConfiguration.Builder(Uri.parse(sub.url))
+                .setId(sub.url)
+                .setMimeType(subMime)
+                .setLanguage(sub.language)
+                .setLabel(sub.label)
+                .setSelectionFlags(flags)
+                .build()
+        }
+        if (hasPendingSelect) {
+            pendingSelectSubtitleUrl = ""
+        }
+        val subDataSourceFactory = SubtitleSupport.createExoSubtitleDataSourceFactory(
+            context = this,
+            baseClient = aetherHttpClient,
+            mimeByUrl = subMimeMap
+        )
 
         val cleanLower = streamUrl.lowercase()
         val effectiveKind = if (mediaKind != StreamMediaKind.UNKNOWN) {
@@ -1885,41 +1918,6 @@ class PlayerActivity : AppCompatActivity() {
                 cleanLower.contains(".mkv") -> StreamMediaKind.MKV
                 else -> StreamMediaKind.MP4
             }
-        }
-
-        val firstVietIdx = subtitles.indexOfFirst {
-            it.language.lowercase().startsWith("vi") ||
-                it.label.lowercase().contains("việt") ||
-                it.label.lowercase().contains("viet")
-        }
-        val firstEngIdx = subtitles.indexOfFirst {
-            it.language.lowercase().startsWith("en") ||
-                it.label.lowercase().contains("english")
-        }
-        val subtitleConfigs = subtitles.mapIndexed { idx, sub ->
-            val subMime = sub.mimeType ?: when {
-                sub.url.lowercase().contains(".vtt") -> MimeTypes.TEXT_VTT
-                sub.url.lowercase().contains(".ass") || sub.url.lowercase().contains(".ssa") -> MimeTypes.TEXT_SSA
-                else -> MimeTypes.APPLICATION_SUBRIP
-            }
-            val isViet = sub.language.lowercase().startsWith("vi") ||
-                sub.label.lowercase().contains("việt") ||
-                sub.label.lowercase().contains("viet")
-            val isEng = sub.language.lowercase().startsWith("en") ||
-                sub.label.lowercase().contains("english")
-            val flags = when {
-                firstVietIdx >= 0 && idx == firstVietIdx -> C.SELECTION_FLAG_DEFAULT or C.SELECTION_FLAG_AUTOSELECT
-                firstVietIdx < 0 && firstEngIdx >= 0 && idx == firstEngIdx -> C.SELECTION_FLAG_DEFAULT or C.SELECTION_FLAG_AUTOSELECT
-                isViet || isEng -> C.SELECTION_FLAG_AUTOSELECT
-                else -> 0
-            }
-            MediaItem.SubtitleConfiguration.Builder(Uri.parse(sub.url))
-                .setId(sub.url)
-                .setMimeType(subMime)
-                .setLanguage(sub.language)
-                .setLabel(sub.label)
-                .setSelectionFlags(flags)
-                .build()
         }
 
         val mediaItem = MediaItem.Builder()
@@ -4528,7 +4526,8 @@ class PlayerActivity : AppCompatActivity() {
 
         val activeTrack = findActivePlayerSourceTrack(player)
         val activeLang = getSelectedTextLanguage(player)
-        val targetSubUrl = activeTrack?.url ?: selectSubtitleSourceUrl(lastSubtitles, selectedSourceSubUrl)
+        val localPreferredUrl = selectedSourceSubUrl.takeIf { it.contains("/local_subs/") }
+        val targetSubUrl = localPreferredUrl ?: activeTrack?.url ?: selectSubtitleSourceUrl(lastSubtitles, selectedSourceSubUrl)
         val sourceKey = targetSubUrl ?: "${lastNativeUrl}|${activeLang.orEmpty()}"
         val epKey = "${currentEpisode.slug}|$sourceKey"
 
@@ -4566,13 +4565,17 @@ class PlayerActivity : AppCompatActivity() {
         translateSubJob = uiScope.launch {
             try {
                 val rawText = withContext(Dispatchers.IO) {
-                    fetchSourceSubtitleRaw(
-                        subtitles = lastSubtitles,
-                        streamUrl = lastNativeUrl,
-                        headers = lastNativeHeaders,
-                        preferredUrl = targetSubUrl,
-                        preferredLang = activeLang
-                    )
+                    if (localPreferredUrl != null) {
+                        fetchTextUrl(localPreferredUrl, emptyMap())
+                    } else {
+                        fetchSourceSubtitleRaw(
+                            subtitles = lastSubtitles,
+                            streamUrl = lastNativeUrl,
+                            headers = lastNativeHeaders,
+                            preferredUrl = targetSubUrl,
+                            preferredLang = activeLang
+                        )
+                    }
                 }
                 if (rawText.isNullOrBlank()) {
                     updateTranslateStatusUi(0, 0, completed = false)
@@ -4580,7 +4583,15 @@ class PlayerActivity : AppCompatActivity() {
                     return@launch
                 }
                 val parsedCues = withContext(Dispatchers.Default) {
-                    SubtitleTranslator.parseTimedCues(rawText)
+                    val detectedFmt = SubtitleSupport.detectSubtitleFormat(targetSubUrl ?: "", rawText)
+                    val normalizedForParse = if (detectedFmt == MimeTypes.TEXT_SSA) {
+                        rawText
+                    } else {
+                        SubtitleSupport.normalizeToSubRip(rawText)
+                    }
+                    SubtitleTranslator.parseTimedCues(normalizedForParse).ifEmpty {
+                        SubtitleTranslator.parseTimedCues(rawText)
+                    }
                 }
                 if (parsedCues.isEmpty()) {
                     updateTranslateStatusUi(0, 0, completed = false)
@@ -4691,26 +4702,7 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun fetchTextUrl(url: String, headers: Map<String, String>): String? {
-        if (url.startsWith("file://")) {
-            return runCatching { File(Uri.parse(url).path ?: return null).readText(Charsets.UTF_8) }.getOrNull()
-        }
-        val req = Request.Builder().url(url).apply {
-            for ((k, v) in headers) header(k, v)
-            if (headers.keys.none { it.equals("User-Agent", ignoreCase = true) }) {
-                header("User-Agent", AetherSourceResolver.USER_AGENT)
-            }
-        }.build()
-        return runCatching {
-            aetherHttpClient.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return@use null
-                val bytes = resp.body?.bytes() ?: return@use null
-                if (bytes.size >= 2 && bytes[0] == 0x1f.toByte() && bytes[1] == 0x8b.toByte()) {
-                    java.util.zip.GZIPInputStream(bytes.inputStream()).bufferedReader(Charsets.UTF_8).readText()
-                } else {
-                    String(bytes, Charsets.UTF_8)
-                }
-            }
-        }.getOrNull()
+        return SubtitleSupport.readTextUriOrHttp(this, url, headers, aetherHttpClient)
     }
 
     private fun fetchEmbeddedHlsVtt(
@@ -4913,7 +4905,7 @@ class PlayerActivity : AppCompatActivity() {
                         sendWebTrackCommand("audio", chosen.id)
                     }
                 } else {
-                    val effectiveSubs = webSubtitleTracks.ifEmpty {
+                    val baseSubs = webSubtitleTracks.ifEmpty {
                         if (isAetherEpisode()) {
                             listOf(
                                 WebTrackItem("off", "🚫 Tắt phụ đề", false),
@@ -4921,15 +4913,21 @@ class PlayerActivity : AppCompatActivity() {
                             )
                         } else emptyList()
                     }
-                    if (effectiveSubs.isEmpty()) {
-                        showPlayerMessage("Phụ đề", "Trình phát web chưa phát hiện phụ đề rời hoặc phụ đề đã ghi sẵn trong hình.")
-                        return
-                    }
+                    val effectiveSubs = baseSubs + WebTrackItem(
+                        "__local_sub_picker__",
+                        "📂 Chọn file phụ đề (.srt / .vtt / .ass) từ máy",
+                        false
+                    )
                     val labels = effectiveSubs.map { it.label }
                     val selected = effectiveSubs.indexOfFirst { it.selected }.coerceAtLeast(0)
-                    showSelection("Phụ đề & Dịch Tiếng Việt (Aether / OpenSubtitles)", labels, selected) { idx ->
+                    showSelection("Phụ đề & Dịch Tiếng Việt", labels, selected) { idx ->
                         val chosen = effectiveSubs.getOrNull(idx) ?: return@showSelection
-                        sendWebTrackCommand("subtitles", chosen.id)
+                        if (chosen.id == "__local_sub_picker__") {
+                            launchLocalSubtitlePicker()
+                        } else {
+                            if (viLiveSubActive) stopLiveViSubtitles(clearView = true)
+                            sendWebTrackCommand("subtitles", chosen.id)
+                        }
                     }
                 }
             } else {
@@ -4962,29 +4960,36 @@ class PlayerActivity : AppCompatActivity() {
                     }
                     format.sampleMimeType?.substringAfterLast('/')?.uppercase()?.let { details.add(it) }
                 } else {
-                    format.sampleMimeType?.substringAfterLast('/')?.uppercase()?.let { details.add(it) }
+                    SubtitleSupport.formatTrackBadgeLabel(format.sampleMimeType)?.let { details.add(it) }
                 }
                 labels.add(details.joinToString(" • ").ifBlank { "Track ${options.size}" })
             }
         }
         val hasAetherTranslate = type == C.TRACK_TYPE_TEXT && (isAetherEpisode() || lastSubtitles.isNotEmpty())
-        if (hasAetherTranslate) {
-            val aiIdx = labels.size
+        val aiTranslateIdx = if (hasAetherTranslate) {
+            val idx = labels.size
             labels.add(if (viLiveSubActive) "✓ 🇻🇳 Tiếng Việt (AI - Đang bật)" else "🌐 [Dịch sang Tiếng Việt tức thì (AI)]")
-            if (viLiveSubActive) selected = aiIdx
-        }
-        if (options.isEmpty() && !hasAetherTranslate) {
+            if (viLiveSubActive) selected = idx
+            idx
+        } else -1
+        val localPickerIdx = if (type == C.TRACK_TYPE_TEXT) {
+            val idx = labels.size
+            labels.add("📂 Chọn file phụ đề (.srt / .vtt / .ass) từ máy")
+            idx
+        } else -1
+        if (options.isEmpty() && aiTranslateIdx < 0 && localPickerIdx < 0) {
             showPlayerMessage(
                 title,
-                if (type == C.TRACK_TYPE_TEXT)
-                    "Nguồn chưa cung cấp phụ đề rời được hỗ trợ. Phụ đề ghi sẵn trong hình (hardsub) không thể đổi hoặc tắt."
-                else
-                    "Chưa tìm thấy track âm thanh được hỗ trợ. Hãy thử đổi bộ giải mã âm thanh hoặc server khác."
+                "Chưa tìm thấy track âm thanh được hỗ trợ. Hãy thử đổi bộ giải mã âm thanh hoặc server khác."
             )
             return
         }
         showSelection(title, labels, selected) { index ->
-            if (hasAetherTranslate && index == labels.size - 1) {
+            if (localPickerIdx >= 0 && index == localPickerIdx) {
+                launchLocalSubtitlePicker()
+                return@showSelection
+            }
+            if (aiTranslateIdx >= 0 && index == aiTranslateIdx) {
                 if (viLiveSubActive) {
                     showGestureFeedback("✓ Phụ đề Việt AI đang bật", Gravity.CENTER)
                 } else {
@@ -5008,20 +5013,117 @@ class PlayerActivity : AppCompatActivity() {
                 builder.setOverrideForType(TrackSelectionOverride(group, track))
                 if (type == C.TRACK_TYPE_TEXT) {
                     val fmt = group.getFormat(track)
-                    val matched = fmt.id?.takeIf { !it.startsWith("file://") }?.let { idUrl ->
+                    val matched = fmt.id?.takeIf { !it.contains("/aether_subs/") }?.let { idUrl ->
                         lastSubtitles.firstOrNull { it.url == idUrl }
                     } ?: lastSubtitles.firstOrNull { sub ->
-                        !sub.url.startsWith("file://") &&
+                        !sub.url.contains("/aether_subs/") &&
                             (fmt.language.isNullOrBlank() || sub.language.equals(fmt.language, true)) &&
                             (fmt.label.isNullOrBlank() || sub.label.equals(fmt.label, true))
                     }
-                    if (matched != null && !matched.url.startsWith("file://")) {
+                    if (matched != null && !matched.url.contains("/aether_subs/")) {
                         selectedSourceSubUrl = matched.url
                         prewarmSourceSubtitle(lastSubtitles, lastNativeUrl, lastNativeHeaders, matched.url)
                     }
                 }
             }
             player.trackSelectionParameters = builder.build()
+        }
+    }
+
+    private fun launchLocalSubtitlePicker() {
+        mainHandler.removeCallbacks(hideOsdRunnable)
+        runCatching {
+            pickLocalSubtitleLauncher.launch(arrayOf("*/*"))
+        }.onFailure {
+            showPlayerMessage(
+                "Chọn phụ đề",
+                "Thiết bị không hỗ trợ trình chọn tệp hệ thống (SAF)."
+            )
+        }
+    }
+
+    private fun importLocalSubtitleUri(uri: Uri) {
+        runCatching {
+            contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        uiScope.launch {
+            val loaded = withContext(Dispatchers.IO) {
+                val displayName = SubtitleSupport.queryDisplayName(this@PlayerActivity, uri)
+                val rawBytes = SubtitleSupport.fetchRawBytes(this@PlayerActivity, uri.toString(), emptyMap(), aetherHttpClient)
+                    ?: return@withContext null
+                val decoded = SubtitleSupport.decodeSubtitleBytes(rawBytes)
+                if (decoded.isBlank() ||
+                    (!decoded.contains("-->") && !decoded.contains("Dialogue:", ignoreCase = true))
+                ) {
+                    return@withContext Triple(displayName, "", "")
+                }
+                val detectedMime = SubtitleSupport.detectSubtitleFormat(displayName, decoded)
+                val outDir = File(cacheDir, "local_subs").apply { mkdirs() }
+                val ext = when (detectedMime) {
+                    MimeTypes.TEXT_VTT -> "vtt"
+                    MimeTypes.TEXT_SSA -> "ass"
+                    else -> "srt"
+                }
+                val cleanText = when (detectedMime) {
+                    MimeTypes.TEXT_SSA -> decoded
+                    MimeTypes.TEXT_VTT -> SubtitleSupport.normalizeToWebVtt(decoded)
+                    else -> SubtitleSupport.normalizeToSubRip(decoded)
+                }
+                val safeKey = SubtitleTranslator.computeSubCacheKey(uri.toString() + displayName, cleanText.length, "local")
+                val outFile = File(outDir, "sub_$safeKey.$ext")
+                outFile.writeText(cleanText, Charsets.UTF_8)
+                Triple(displayName, Uri.fromFile(outFile).toString(), detectedMime to cleanText)
+            }
+
+            if (loaded == null) {
+                showPlayerMessage("Phụ đề cục bộ", "Không đọc được tệp phụ đề đã chọn.")
+                return@launch
+            }
+            val displayName = loaded.first
+            val fileUrl = loaded.second
+            val metaPair = loaded.third
+            if (fileUrl.isBlank() || metaPair !is Pair<*, *>) {
+                showPlayerMessage("Phụ đề cục bộ", "Tệp \"$displayName\" không đúng định dạng phụ đề (.srt / .vtt / .ass).")
+                return@launch
+            }
+            val detectedMime = metaPair.first as String
+            val cleanText = metaPair.second as String
+
+            val newTrack = ExternalSubtitleTrack(
+                url = fileUrl,
+                language = "vi",
+                label = "📁 $displayName",
+                mimeType = detectedMime
+            )
+            lastSubtitles = listOf(newTrack) + lastSubtitles.filterNot { it.url == fileUrl }
+            selectedSourceSubUrl = fileUrl
+            pendingSelectSubtitleUrl = fileUrl
+
+            if (exoPlayer != null && lastNativeUrl.isNotBlank()) {
+                stopLiveViSubtitles(clearView = true)
+                val resumePos = exoPlayer?.currentPosition?.coerceAtLeast(0L) ?: 0L
+                prepareExoPlayer(lastNativeUrl, lastNativeHeaders, resumePos, lastMediaKind, lastSubtitles)
+                showGestureFeedback("✓ Đã nạp phụ đề: $displayName", Gravity.CENTER)
+            } else {
+                val cues = SubtitleTranslator.parseTimedCues(
+                    if (detectedMime == MimeTypes.TEXT_SSA) cleanText else SubtitleSupport.normalizeToSubRip(cleanText)
+                )
+                if (cues.isEmpty()) {
+                    showPlayerMessage("Phụ đề cục bộ", "Không tìm thấy dòng thoại hợp lệ trong \"$displayName\".")
+                    return@launch
+                }
+                viLiveCues = cues
+                viTranslatedMap.clear()
+                cues.forEachIndexed { idx, cue -> viTranslatedMap[idx] = cue.text }
+                translatedEpisodeKey = "${currentEpisode.slug}|local:$fileUrl"
+                viTranslationCompleted = true
+                viLiveSubActive = true
+                viLastRenderedCueText = VI_CUE_UNSET
+                renderLiveSubtitleAt(webPositionMs.coerceAtLeast(0L), force = true)
+                mainHandler.removeCallbacks(subtitleTickRunnable)
+                mainHandler.post(subtitleTickRunnable)
+                showGestureFeedback("✓ Đã nạp phụ đề: $displayName", Gravity.CENTER)
+            }
         }
     }
 
