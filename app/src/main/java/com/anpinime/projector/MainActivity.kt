@@ -50,12 +50,15 @@ class MainActivity : AppCompatActivity() {
     private var browseItems: MutableList<Anime> = ArrayList()
     private var browsePage: Int = 1
 
+    private var isCompactPortrait = false
     private lateinit var logoImage: ImageView
-    private lateinit var sourceSubtitleText: TextView
+    private var sourceSubtitleText: TextView? = null
+    private var mobileTopSourceText: TextView? = null
+    private var bottomNavHost: FrameLayout? = null
     private lateinit var contentContainer: FrameLayout
-    private lateinit var sidebarOverlay: FrameLayout
-    private lateinit var sidebarPanel: LinearLayout
-    private lateinit var topMenuBadgeText: TextView
+    private var sidebarOverlay: FrameLayout? = null
+    private var sidebarPanel: LinearLayout? = null
+    private var topMenuBadgeText: TextView? = null
     private val sidebarButtons = HashMap<String, TextView>()
     private var isSidebarOpen = false
     private var activeSidebarKey: String = "tab_home"
@@ -65,6 +68,7 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         CatalogService.init(this)
         WebViewHelper.registerActivity(this)
+        isCompactPortrait = UiHelper.isCompactPortrait(this)
 
         val prefs = getSharedPreferences("anpinime_projector", Context.MODE_PRIVATE)
         val savedSourceId = prefs.getString("source", ContentSource.FILM4K.id)
@@ -99,7 +103,19 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
-        val topHeaderBar = buildTopHeaderBar()
+        val topHeaderBar = if (isCompactPortrait) {
+            Phim4KUi.createMobileTopBar(
+                context = this,
+                currentSource = currentSource,
+                onLogoCreated = { logoImage = it },
+                onSourceTextCreated = { mobileTopSourceText = it },
+                onOpenSources = { openMobileSources() },
+                onOpenSearch = { navigateToTab("search") }
+            )
+        } else {
+            buildTopHeaderBar()
+        }
+
         contentContainer = FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -110,43 +126,57 @@ class MainActivity : AppCompatActivity() {
 
         fullScreenCol.addView(topHeaderBar)
         fullScreenCol.addView(contentContainer)
+        if (isCompactPortrait) {
+            val navHost = FrameLayout(this).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            }
+            bottomNavHost = navHost
+            fullScreenCol.addView(navHost)
+        }
         root.addView(fullScreenCol)
 
-        // Left Edge Thin Hint Strip (4dp) so user visually knows left edge opens Sidebar
-        val leftEdgeHint = View(this).apply {
-            background = GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(
-                    Color.TRANSPARENT,
-                    Color.parseColor("#66A855F7"),
-                    Color.TRANSPARENT
+        if (!isCompactPortrait) {
+            // Left Edge Thin Hint Strip (3dp) so TV/Projector user knows left edge opens Sidebar
+            val leftEdgeHint = View(this).apply {
+                background = GradientDrawable(
+                    GradientDrawable.Orientation.TOP_BOTTOM,
+                    intArrayOf(
+                        Color.TRANSPARENT,
+                        Color.parseColor("#88E50914"),
+                        Color.TRANSPARENT
+                    )
                 )
-            )
-            layoutParams = FrameLayout.LayoutParams(
-                UiHelper.dp(this@MainActivity, 3),
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                Gravity.START
-            )
-            setOnClickListener { openSidebar() }
-        }
-        root.addView(leftEdgeHint)
-
-        // Auto-hiding Collapsible Sidebar Overlay (Hidden by default so movies use 100% width)
-        sidebarOverlay = FrameLayout(this).apply {
-            setBackgroundColor(Color.parseColor("#B3000000"))
-            visibility = View.GONE
-            isClickable = true
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-            setOnClickListener {
-                closeSidebar(restoreFocus = true)
+                layoutParams = FrameLayout.LayoutParams(
+                    UiHelper.dp(this@MainActivity, 3),
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    Gravity.START
+                )
+                setOnClickListener { openSidebar() }
             }
+            root.addView(leftEdgeHint)
+
+            // Auto-hiding Collapsible Sidebar Overlay (Hidden by default so movies use 100% width)
+            val overlay = FrameLayout(this).apply {
+                setBackgroundColor(Color.parseColor("#B8040508"))
+                visibility = View.GONE
+                isClickable = true
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+                setOnClickListener {
+                    closeSidebar(restoreFocus = true)
+                }
+            }
+            val panel = buildSidebarPanel()
+            overlay.addView(panel)
+            sidebarOverlay = overlay
+            sidebarPanel = panel
+            root.addView(overlay)
         }
-        sidebarPanel = buildSidebarPanel()
-        sidebarOverlay.addView(sidebarPanel)
-        root.addView(sidebarOverlay)
 
         setContentView(root)
 
@@ -192,6 +222,15 @@ class MainActivity : AppCompatActivity() {
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.action == KeyEvent.ACTION_DOWN) {
             val keyCode = event.keyCode
+            if (isCompactPortrait) {
+                if (keyCode == KeyEvent.KEYCODE_BACK || keyCode == KeyEvent.KEYCODE_ESCAPE) {
+                    if (currentTab != "home") {
+                        navigateToTab("home")
+                        return true
+                    }
+                }
+                return super.dispatchKeyEvent(event)
+            }
 
             if (keyCode == KeyEvent.KEYCODE_MENU) {
                 if (isSidebarOpen) closeSidebar(restoreFocus = true) else openSidebar()
@@ -209,13 +248,10 @@ class MainActivity : AppCompatActivity() {
             } else {
                 if (keyCode == KeyEvent.KEYCODE_BACK || keyCode == KeyEvent.KEYCODE_ESCAPE) {
                     if (currentTab != "home") {
-                        currentTab = "home"
-                        activeSidebarKey = "tab_home"
-                        updateSidebarState()
-                        if (homeSections.isEmpty()) loadHomeData() else renderHome()
+                        navigateToTab("home")
                         return true
                     } else {
-                        // Khi ở màn hình home, ấn nút trở về sẽ mở menu
+                        // Khi ở màn hình home TV/Projector, ấn nút trở về sẽ mở menu
                         openSidebar()
                         return true
                     }
@@ -226,8 +262,9 @@ class MainActivity : AppCompatActivity() {
                     if (focused is EditText && focused.selectionStart > 0) {
                         return super.dispatchKeyEvent(event)
                     }
+                    val overlay = sidebarOverlay
                     val nextLeft = focused?.focusSearch(View.FOCUS_LEFT)
-                    if (focused == null || nextLeft == null || isDescendantOf(nextLeft, sidebarOverlay)) {
+                    if (focused == null || nextLeft == null || (overlay != null && isDescendantOf(nextLeft, overlay))) {
                         openSidebar()
                         return true
                     }
@@ -235,6 +272,38 @@ class MainActivity : AppCompatActivity() {
             }
         }
         return super.dispatchKeyEvent(event)
+    }
+
+    private fun navigateToTab(tab: String) {
+        currentTab = tab
+        activeSidebarKey = when (tab) {
+            "search" -> "tab_search"
+            "browse" -> "tab_browse"
+            "schedule" -> "tab_schedule"
+            else -> "tab_home"
+        }
+        updateSidebarState()
+        when (tab) {
+            "search" -> renderSearch()
+            "browse" -> openCategoryBrowse(null)
+            "schedule" -> renderSchedule(DayOfWeek.today())
+            else -> if (homeSections.isEmpty()) loadHomeData() else renderHome()
+        }
+    }
+
+    private fun openMobileSources() {
+        Phim4KUi.showMobileSourceSheet(
+            context = this,
+            currentSource = currentSource,
+            onSwitchSource = { src -> switchSource(src) },
+            onRefresh = {
+                currentTab = "home"
+                updateSidebarState()
+                loadHomeData()
+            },
+            onAnimeDomain = { showAnimeDomainDialog() },
+            onCheckUpdate = { AppUpdateManager.checkUpdateManual(this) }
+        )
     }
 
     private fun isDescendantOf(view: View?, container: ViewGroup): Boolean {
@@ -247,14 +316,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openSidebar() {
+        val overlay = sidebarOverlay ?: run {
+            openMobileSources()
+            return
+        }
         if (isSidebarOpen) return
         val focused = currentFocus
-        if (focused != null && !isDescendantOf(focused, sidebarOverlay)) {
+        if (focused != null && !isDescendantOf(focused, overlay)) {
             lastContentFocusRef = WeakReference(focused)
         }
         isSidebarOpen = true
         updateSidebarState()
-        sidebarOverlay.visibility = View.VISIBLE
+        overlay.visibility = View.VISIBLE
         val target = sidebarButtons[activeSidebarKey]
             ?: when (currentTab) {
                 "search" -> sidebarButtons["tab_search"]
@@ -274,9 +347,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun closeSidebar(restoreFocus: Boolean) {
+        val overlay = sidebarOverlay ?: return
         if (!isSidebarOpen) return
         isSidebarOpen = false
-        sidebarOverlay.visibility = View.GONE
+        overlay.visibility = View.GONE
         if (restoreFocus) {
             val prev = lastContentFocusRef?.get()
             if (prev != null && prev.isShown && prev.isFocusable) {
@@ -291,7 +365,8 @@ class MainActivity : AppCompatActivity() {
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(UiHelper.dp(context, 18), UiHelper.dp(context, 10), UiHelper.dp(context, 18), UiHelper.dp(context, 4))
+            setBackgroundColor(UiHelper.COLOR_SIDEBAR)
+            setPadding(UiHelper.dp(context, 18), UiHelper.dp(context, 10), UiHelper.dp(context, 18), UiHelper.dp(context, 8))
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -312,7 +387,7 @@ class MainActivity : AppCompatActivity() {
         UiHelper.makeFocusableButton(
             view = menuTriggerBtn,
             normalBgColor = UiHelper.COLOR_CARD,
-            focusedBgColor = UiHelper.COLOR_ACCENT,
+            focusedBgColor = UiHelper.COLOR_RED,
             focusedStrokeColor = Color.WHITE,
             radiusDp = 999
         ) {
@@ -320,7 +395,7 @@ class MainActivity : AppCompatActivity() {
         }
         bar.addView(menuTriggerBtn)
 
-        topMenuBadgeText = TextView(this).apply {
+        val badge = TextView(this).apply {
             text = "${currentSource.title}  •  Ấn ◀ sang trái hết cỡ để mở thanh bên"
             setTextColor(UiHelper.COLOR_TEXT_SECONDARY)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
@@ -328,7 +403,8 @@ class MainActivity : AppCompatActivity() {
             ellipsize = TextUtils.TruncateAt.END
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-        bar.addView(topMenuBadgeText)
+        topMenuBadgeText = badge
+        bar.addView(badge)
 
         val quickSearchBtn = TextView(this).apply {
             text = "🔍 Tìm nhanh"
@@ -340,13 +416,11 @@ class MainActivity : AppCompatActivity() {
         UiHelper.makeFocusableButton(
             view = quickSearchBtn,
             normalBgColor = UiHelper.COLOR_CARD,
-            focusedBgColor = UiHelper.COLOR_ACCENT,
+            focusedBgColor = UiHelper.COLOR_RED,
             focusedStrokeColor = Color.WHITE,
             radiusDp = 999
         ) {
-            currentTab = "search"
-            updateSidebarState()
-            renderSearch()
+            navigateToTab("search")
         }
         bar.addView(quickSearchBtn)
 
@@ -397,15 +471,16 @@ class MainActivity : AppCompatActivity() {
             typeface = Typeface.DEFAULT_BOLD
         }
 
-        sourceSubtitleText = TextView(this).apply {
+        val subView = TextView(this).apply {
             text = currentSource.title
-            setTextColor(UiHelper.COLOR_ACCENT)
+            setTextColor(Phim4KUi.accentFor(currentSource))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             typeface = Typeface.DEFAULT_BOLD
         }
+        sourceSubtitleText = subView
 
         brandTextCol.addView(appTitle)
-        brandTextCol.addView(sourceSubtitleText)
+        brandTextCol.addView(subView)
         brandRow.addView(logoImage)
         brandRow.addView(brandTextCol)
         sidebar.addView(brandRow)
@@ -549,25 +624,45 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateSidebarState() {
         UiHelper.setSourceLogo(logoImage, currentSource.isMovie)
-        sourceSubtitleText.text = currentSource.subtitle
+        val accent = Phim4KUi.accentFor(currentSource)
+        mobileTopSourceText?.text = "${currentSource.subtitle} ▾"
+        bottomNavHost?.let { host ->
+            host.removeAllViews()
+            host.addView(
+                Phim4KUi.createMobileBottomNav(
+                    context = this,
+                    currentTab = currentTab,
+                    currentSource = currentSource,
+                    onSelectTab = { tab -> navigateToTab(tab) },
+                    onOpenSources = { openMobileSources() }
+                )
+            )
+        }
+
+        sourceSubtitleText?.text = currentSource.subtitle
+        sourceSubtitleText?.setTextColor(accent)
         val tabName = when (currentTab) {
             "search" -> "Tìm kiếm"
             "browse" -> "Thể loại"
             "schedule" -> "Lịch chiếu Anime"
             else -> "Trang chủ"
         }
-        topMenuBadgeText.text = "${currentSource.subtitle} • $tabName  (Ấn ◀ sang trái hết cỡ để mở Menu)"
+        topMenuBadgeText?.text = "${currentSource.subtitle} • $tabName  (Ấn ◀ sang trái hết cỡ để mở Menu)"
 
         fun styleBtn(key: String, active: Boolean) {
             val btn = sidebarButtons[key] ?: return
-            val normalColor = if (active) Color.parseColor("#3B1E6D") else UiHelper.COLOR_CARD
+            val normalColor = if (active) {
+                Color.argb(72, Color.red(accent), Color.green(accent), Color.blue(accent))
+            } else {
+                UiHelper.COLOR_CARD
+            }
             btn.setTextColor(if (active) Color.WHITE else Color.parseColor("#DCE0EE"))
             if (!btn.hasFocus()) {
                 btn.background = UiHelper.roundedBg(
                     normalColor,
                     10,
                     this,
-                    if (active) UiHelper.COLOR_ACCENT else Color.parseColor("#26FFFFFF"),
+                    if (active) accent else UiHelper.COLOR_BORDER,
                     1
                 )
             }
@@ -672,9 +767,10 @@ class MainActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         }
+        val padH = UiHelper.dp(this, if (isCompactPortrait) 12 else 18)
         val mainCol = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(UiHelper.dp(context, 18), UiHelper.dp(context, 8), UiHelper.dp(context, 18), UiHelper.dp(context, 28))
+            setPadding(padH, UiHelper.dp(context, 8), padH, UiHelper.dp(context, 24))
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -683,8 +779,26 @@ class MainActivity : AppCompatActivity() {
 
         val featuredPool = homeSections.firstOrNull()?.items?.take(8).orEmpty()
         if (featuredPool.isNotEmpty()) {
-            mainCol.addView(buildFeaturedHero(featuredPool))
+            mainCol.addView(
+                Phim4KUi.createFeaturedHero(
+                    context = this,
+                    featuredItems = featuredPool,
+                    featuredIndex = featuredIndex,
+                    isCompact = isCompactPortrait,
+                    onOpenDetail = { openDetail(it) },
+                    onNextFeatured = {
+                        featuredIndex = (featuredIndex + 1) % featuredPool.size
+                        renderHome()
+                    }
+                )
+            )
         }
+
+        Phim4KUi.createQuickCategoryStrip(this, homeSections, currentSource) { cat ->
+            currentTab = "browse"
+            updateSidebarState()
+            openCategoryBrowse(cat)
+        }?.let { mainCol.addView(it) }
 
         for (section in homeSections) {
             mainCol.addView(buildSectionRow(section))
@@ -694,231 +808,15 @@ class MainActivity : AppCompatActivity() {
         contentContainer.addView(scroll)
     }
 
-    private fun buildFeaturedHero(featuredItems: List<Anime>): View {
-        val current = featuredItems[featuredIndex.coerceIn(0, featuredItems.size - 1)]
-
-        val heroFrame = FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                UiHelper.dp(context, 190)
-            ).apply {
-                bottomMargin = UiHelper.dp(context, 16)
-            }
-            background = UiHelper.roundedBg(UiHelper.COLOR_CARD, 16, context, Color.parseColor("#2AFFFFFF"), 1)
-            clipChildren = true
-        }
-
-        val backdropImage = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            alpha = 0.42f
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-        }
-        ImageLoader.load(backdropImage, current.bannerUrl ?: current.imageUrl, maxWidth = 640, maxHeight = 360)
-        heroFrame.addView(backdropImage)
-
-        val gradientOverlay = View(this).apply {
-            background = GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(
-                    Color.parseColor("#4008090E"),
-                    Color.parseColor("#B808090E"),
-                    Color.parseColor("#F508090E")
-                )
-            ).apply {
-                cornerRadius = UiHelper.dp(context, 16).toFloat()
-            }
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-        }
-        heroFrame.addView(gradientOverlay)
-
-        // Centered Phim4K-style Hero Stack + Left Poster for 16:9 Projector
-        val contentRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(UiHelper.dp(context, 22), UiHelper.dp(context, 14), UiHelper.dp(context, 22), UiHelper.dp(context, 14))
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-        }
-
-        val posterCard = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            background = UiHelper.roundedBg(UiHelper.COLOR_SIDEBAR, 10, context, Color.parseColor("#40FFFFFF"), 1)
-            layoutParams = LinearLayout.LayoutParams(
-                UiHelper.dp(context, 104),
-                UiHelper.dp(context, 152)
-            ).apply {
-                rightMargin = UiHelper.dp(context, 18)
-            }
-        }
-        ImageLoader.load(posterCard, current.imageUrl, maxWidth = 180, maxHeight = 260)
-        contentRow.addView(posterCard)
-
-        val centerStack = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        }
-
-        val titleView = TextView(this).apply {
-            text = current.title
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            maxLines = 2
-            ellipsize = TextUtils.TruncateAt.END
-        }
-        centerStack.addView(titleView)
-
-        val subText = current.subtitle.ifBlank { current.info }
-        if (subText.isNotBlank()) {
-            val subView = TextView(this).apply {
-                text = subText
-                setTextColor(Color.parseColor("#C8CEE0"))
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
-                gravity = Gravity.CENTER
-                setSingleLine(true)
-                ellipsize = TextUtils.TruncateAt.END
-                setPadding(0, UiHelper.dp(context, 4), 0, 0)
-            }
-            centerStack.addView(subView)
-        }
-
-        // Phim4K 3-Pill Row: [Year] [IMDb 9.6] [Full HD (PĐ)]
-        val badgeRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            setPadding(0, UiHelper.dp(context, 10), 0, UiHelper.dp(context, 12))
-        }
-
-        val yearMatch = Regex("""\b(19|20)\d{2}\b""").find(current.info)?.value
-            ?: if (current.source.isMovie) "2026" else "Mới"
-        val yearBadge = UiHelper.createBadge(
-            this,
-            yearMatch,
-            Color.parseColor("#28FFFFFF"),
-            Color.WHITE
-        ).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { rightMargin = UiHelper.dp(context, 8) }
-        }
-        badgeRow.addView(yearBadge)
-
-        if (current.score.isNotBlank()) {
-            val imdbBadge = UiHelper.createBadge(
-                this,
-                "IMDb ${current.score}",
-                UiHelper.COLOR_YELLOW,
-                Color.BLACK
-            ).apply {
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply { rightMargin = UiHelper.dp(context, 8) }
-            }
-            badgeRow.addView(imdbBadge)
-        }
-
-        val qualLabel = buildQualityPillText(current)
-        val qualBadge = UiHelper.createBadge(
-            this,
-            qualLabel,
-            UiHelper.COLOR_BLUE,
-            Color.WHITE
-        )
-        badgeRow.addView(qualBadge)
-        centerStack.addView(badgeRow)
-
-        // Action Buttons: White Capsule [Xem chi tiết] + [Đề cử tiếp ❯]
-        val actionRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-        }
-
-        val detailBtn = TextView(this).apply {
-            text = "Xem chi tiết"
-            setTextColor(Color.BLACK)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(UiHelper.dp(context, 26), UiHelper.dp(context, 10), UiHelper.dp(context, 26), UiHelper.dp(context, 10))
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { rightMargin = UiHelper.dp(context, 10) }
-        }
-        UiHelper.makeFocusableButton(
-            view = detailBtn,
-            normalBgColor = Color.WHITE,
-            focusedBgColor = UiHelper.COLOR_YELLOW,
-            focusedStrokeColor = Color.WHITE,
-            radiusDp = 999,
-            scaleOnFocus = 1.06f
-        ) {
-            openDetail(current)
-        }
-        actionRow.addView(detailBtn)
-
-        if (featuredItems.size > 1) {
-            val nextHeroBtn = TextView(this).apply {
-                text = "Đề cử tiếp (${featuredIndex + 1}/${featuredItems.size}) ❯"
-                setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                typeface = Typeface.DEFAULT_BOLD
-                setPadding(UiHelper.dp(context, 18), UiHelper.dp(context, 10), UiHelper.dp(context, 18), UiHelper.dp(context, 10))
-            }
-            UiHelper.makeFocusableButton(
-                view = nextHeroBtn,
-                normalBgColor = Color.parseColor("#2AFFFFFF"),
-                focusedBgColor = Color.parseColor("#44FFFFFF"),
-                focusedStrokeColor = UiHelper.COLOR_ACCENT,
-                radiusDp = 999,
-                scaleOnFocus = 1.05f
-            ) {
-                featuredIndex = (featuredIndex + 1) % featuredItems.size
-                renderHome()
-            }
-            actionRow.addView(nextHeroBtn)
-        }
-
-        centerStack.addView(actionRow)
-        contentRow.addView(centerStack)
-        heroFrame.addView(contentRow)
-        return heroFrame
-    }
-
-    private fun buildQualityPillText(anime: Anime): String {
-        val q = anime.quality.trim()
-        val ep = anime.episodeText.trim()
-        val normQ = when (q.uppercase()) {
-            "FHD", "1080P", "FULLHD" -> "Full HD"
-            else -> q
-        }
-        return when {
-            normQ.isNotEmpty() && ep.isNotEmpty() && ep != "Phim lẻ" -> "$normQ • $ep"
-            normQ.isNotEmpty() -> "$normQ (PĐ)"
-            ep.isNotEmpty() -> ep
-            else -> "Full HD (PĐ)"
-        }
-    }
-
     private fun buildSectionRow(section: AnimeSection): View {
+        val accent = Phim4KUi.accentFor(currentSource)
         val wrap = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply {
-                bottomMargin = UiHelper.dp(context, 18)
+                bottomMargin = UiHelper.dp(context, if (isCompactPortrait) 14 else 18)
             }
         }
 
@@ -928,10 +826,17 @@ class MainActivity : AppCompatActivity() {
             setPadding(UiHelper.dp(context, 4), 0, UiHelper.dp(context, 4), UiHelper.dp(context, 8))
         }
 
+        headerRow.addView(View(this).apply {
+            background = UiHelper.roundedBg(accent, 4, context)
+            layoutParams = LinearLayout.LayoutParams(UiHelper.dp(context, 4), UiHelper.dp(context, 16)).apply {
+                rightMargin = UiHelper.dp(context, 8)
+            }
+        })
+
         val titleView = TextView(this).apply {
             text = section.title
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17.5f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, if (isCompactPortrait) 16f else 17.5f)
             typeface = Typeface.DEFAULT_BOLD
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
@@ -940,17 +845,17 @@ class MainActivity : AppCompatActivity() {
         if (!section.categoryPath.isNullOrBlank()) {
             val moreBtn = TextView(this).apply {
                 text = "Xem thêm ❯"
-                setTextColor(UiHelper.COLOR_ACCENT)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                 typeface = Typeface.DEFAULT_BOLD
-                setPadding(UiHelper.dp(context, 12), UiHelper.dp(context, 6), UiHelper.dp(context, 12), UiHelper.dp(context, 6))
+                setPadding(UiHelper.dp(context, 11), UiHelper.dp(context, 5), UiHelper.dp(context, 11), UiHelper.dp(context, 5))
             }
             UiHelper.makeFocusableButton(
                 view = moreBtn,
                 normalBgColor = UiHelper.COLOR_CARD,
-                focusedBgColor = Color.parseColor("#352256"),
-                focusedStrokeColor = UiHelper.COLOR_ACCENT,
-                radiusDp = 14
+                focusedBgColor = accent,
+                focusedStrokeColor = Color.WHITE,
+                radiusDp = 999
             ) {
                 currentTab = "browse"
                 updateSidebarState()
@@ -966,9 +871,9 @@ class MainActivity : AppCompatActivity() {
             setItemViewCacheSize(5)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                UiHelper.dp(context, 216)
+                UiHelper.dp(context, if (isCompactPortrait) 204 else 216)
             )
-            adapter = PosterAdapter(section.items) { anime ->
+            adapter = PosterAdapter(section.items, isGrid = false, compactRow = isCompactPortrait) { anime ->
                 openDetail(anime)
             }
         }
@@ -1024,9 +929,10 @@ class MainActivity : AppCompatActivity() {
         loadJob?.cancel()
         val screenSource = currentSource
         contentContainer.removeAllViews()
+        val padH = UiHelper.dp(this, if (isCompactPortrait) 12 else 18)
         val mainCol = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(UiHelper.dp(context, 18), UiHelper.dp(context, 10), UiHelper.dp(context, 18), UiHelper.dp(context, 16))
+            setPadding(padH, UiHelper.dp(context, 10), padH, UiHelper.dp(context, 14))
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -1043,37 +949,37 @@ class MainActivity : AppCompatActivity() {
         }
 
         val input = EditText(this).apply {
-            hint = "Nhập tên phim cần tìm trong ${currentSource.title}…"
+            hint = if (isCompactPortrait) "Tìm phim trong ${currentSource.subtitle}…" else "Nhập tên phim cần tìm trong ${currentSource.title}…"
             setHintTextColor(UiHelper.COLOR_TEXT_SECONDARY)
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, if (isCompactPortrait) 14f else 15f)
             setSingleLine(true)
             imeOptions = EditorInfo.IME_ACTION_SEARCH
-            setPadding(UiHelper.dp(context, 16), UiHelper.dp(context, 10), UiHelper.dp(context, 16), UiHelper.dp(context, 10))
-            background = UiHelper.roundedBg(UiHelper.COLOR_CARD, 10, context, Color.parseColor("#40FFFFFF"), 1)
+            setPadding(UiHelper.dp(context, 14), UiHelper.dp(context, 10), UiHelper.dp(context, 14), UiHelper.dp(context, 10))
+            background = UiHelper.roundedBg(UiHelper.COLOR_CARD, 12, context, Color.parseColor("#30FFFFFF"), 1)
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                rightMargin = UiHelper.dp(context, 10)
+                rightMargin = UiHelper.dp(context, 8)
             }
         }
 
         val searchBtn = TextView(this).apply {
-            text = "Tìm kiếm"
+            text = if (isCompactPortrait) "Tìm" else "Tìm kiếm"
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, if (isCompactPortrait) 13.5f else 14f)
             typeface = Typeface.DEFAULT_BOLD
-            setPadding(UiHelper.dp(context, 22), UiHelper.dp(context, 11), UiHelper.dp(context, 22), UiHelper.dp(context, 11))
+            setPadding(UiHelper.dp(context, if (isCompactPortrait) 16 else 22), UiHelper.dp(context, 10), UiHelper.dp(context, if (isCompactPortrait) 16 else 22), UiHelper.dp(context, 10))
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { rightMargin = UiHelper.dp(context, 8) }
+            ).apply { rightMargin = UiHelper.dp(context, 6) }
         }
 
         val clearBtn = TextView(this).apply {
-            text = "Xoá ô nhập"
+            text = if (isCompactPortrait) "✕" else "Xoá ô nhập"
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, if (isCompactPortrait) 13.5f else 14f)
             typeface = Typeface.DEFAULT_BOLD
-            setPadding(UiHelper.dp(context, 16), UiHelper.dp(context, 11), UiHelper.dp(context, 16), UiHelper.dp(context, 11))
+            setPadding(UiHelper.dp(context, if (isCompactPortrait) 12 else 16), UiHelper.dp(context, 10), UiHelper.dp(context, if (isCompactPortrait) 12 else 16), UiHelper.dp(context, 10))
         }
 
         val historyContainer = LinearLayout(this).apply {
@@ -1228,14 +1134,14 @@ class MainActivity : AppCompatActivity() {
                         resultsFrame.addView(emptyText)
                     } else {
                         val grid = RecyclerView(this@MainActivity).apply {
-                            layoutManager = GridLayoutManager(context, 6)
+                            layoutManager = GridLayoutManager(context, Phim4KUi.gridSpanCount(context))
                             clipToPadding = false
                             setHasFixedSize(true)
                             layoutParams = FrameLayout.LayoutParams(
                                 ViewGroup.LayoutParams.MATCH_PARENT,
                                 ViewGroup.LayoutParams.MATCH_PARENT
                             )
-                            adapter = PosterAdapter(items) { anime -> openDetail(anime) }
+                            adapter = PosterAdapter(items, isGrid = true) { anime -> openDetail(anime) }
                         }
                         resultsFrame.addView(grid)
 
@@ -1296,10 +1202,10 @@ class MainActivity : AppCompatActivity() {
 
         UiHelper.makeFocusableButton(
             view = searchBtn,
-            normalBgColor = UiHelper.COLOR_ACCENT,
-            focusedBgColor = Color.parseColor("#C084FC"),
+            normalBgColor = Phim4KUi.accentFor(screenSource),
+            focusedBgColor = Color.parseColor("#FF2E38"),
             focusedStrokeColor = Color.WHITE,
-            radiusDp = 10
+            radiusDp = 12
         ) {
             debounceSearchJob?.cancel()
             runSearch(input.text.toString(), autoFocusFirst = true, saveToHistory = true)
@@ -1308,9 +1214,9 @@ class MainActivity : AppCompatActivity() {
         UiHelper.makeFocusableButton(
             view = clearBtn,
             normalBgColor = UiHelper.COLOR_CARD,
-            focusedBgColor = Color.parseColor("#352256"),
+            focusedBgColor = UiHelper.COLOR_SURFACE_HIGH,
             focusedStrokeColor = Color.WHITE,
-            radiusDp = 10
+            radiusDp = 12
         ) {
             input.setText("")
         }
@@ -1320,54 +1226,56 @@ class MainActivity : AppCompatActivity() {
         searchBarRow.addView(clearBtn)
         mainCol.addView(searchBarRow)
 
-        // Remote D-Pad Quick Character & Keyword Bar for Projector Remote
-        val quickRowScroll = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { bottomMargin = UiHelper.dp(context, 8) }
-        }
-        val quickRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
-        val chars = "A B C D E G H I K L M N O P Q R S T U V X Y 0 1 2 3 4 5 6 7 8 9".split(" ")
-        for (ch in chars) {
-            val keyBtn = TextView(this).apply {
-                text = ch
+        if (!isCompactPortrait) {
+            // Remote D-Pad Quick Character & Keyword Bar for Projector Remote
+            val quickRowScroll = HorizontalScrollView(this).apply {
+                isHorizontalScrollBarEnabled = false
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = UiHelper.dp(context, 8) }
+            }
+            val quickRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+            }
+            val chars = "A B C D E G H I K L M N O P Q R S T U V X Y 0 1 2 3 4 5 6 7 8 9".split(" ")
+            for (ch in chars) {
+                val keyBtn = TextView(this).apply {
+                    text = ch
+                    setTextColor(Color.WHITE)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                    typeface = Typeface.DEFAULT_BOLD
+                    setPadding(UiHelper.dp(context, 11), UiHelper.dp(context, 6), UiHelper.dp(context, 11), UiHelper.dp(context, 6))
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply { rightMargin = UiHelper.dp(context, 5) }
+                }
+                UiHelper.makeFocusableButton(
+                    view = keyBtn,
+                    normalBgColor = UiHelper.COLOR_CARD,
+                    focusedBgColor = UiHelper.COLOR_ACCENT,
+                    focusedStrokeColor = Color.WHITE,
+                    radiusDp = 8
+                ) {
+                    input.append(ch.lowercase())
+                }
+                quickRow.addView(keyBtn)
+            }
+            val spaceBtn = TextView(this).apply {
+                text = "Dấu cách"
                 setTextColor(Color.WHITE)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
                 typeface = Typeface.DEFAULT_BOLD
-                setPadding(UiHelper.dp(context, 11), UiHelper.dp(context, 6), UiHelper.dp(context, 11), UiHelper.dp(context, 6))
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply { rightMargin = UiHelper.dp(context, 5) }
+                setPadding(UiHelper.dp(context, 12), UiHelper.dp(context, 6), UiHelper.dp(context, 12), UiHelper.dp(context, 6))
             }
-            UiHelper.makeFocusableButton(
-                view = keyBtn,
-                normalBgColor = UiHelper.COLOR_CARD,
-                focusedBgColor = UiHelper.COLOR_ACCENT,
-                focusedStrokeColor = Color.WHITE,
-                radiusDp = 8
-            ) {
-                input.append(ch.lowercase())
+            UiHelper.makeFocusableButton(view = spaceBtn, normalBgColor = UiHelper.COLOR_CARD, radiusDp = 8) {
+                input.append(" ")
             }
-            quickRow.addView(keyBtn)
+            quickRow.addView(spaceBtn)
+            quickRowScroll.addView(quickRow)
+            mainCol.addView(quickRowScroll)
         }
-        val spaceBtn = TextView(this).apply {
-            text = "Dấu cách"
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(UiHelper.dp(context, 12), UiHelper.dp(context, 6), UiHelper.dp(context, 12), UiHelper.dp(context, 6))
-        }
-        UiHelper.makeFocusableButton(view = spaceBtn, normalBgColor = UiHelper.COLOR_CARD, radiusDp = 8) {
-            input.append(" ")
-        }
-        quickRow.addView(spaceBtn)
-        quickRowScroll.addView(quickRow)
-        mainCol.addView(quickRowScroll)
 
         refreshHistoryBar { selectedTerm ->
             input.setText(selectedTerm)
@@ -1377,7 +1285,7 @@ class MainActivity : AppCompatActivity() {
         mainCol.addView(historyContainer)
         mainCol.addView(resultsFrame)
         contentContainer.addView(mainCol)
-        searchBtn.requestFocus()
+        if (isCompactPortrait) input.requestFocus() else searchBtn.requestFocus()
     }
 
     // =========================================================================
@@ -1414,9 +1322,10 @@ class MainActivity : AppCompatActivity() {
             }
 
             contentContainer.removeAllViews()
+            val padH = UiHelper.dp(this@MainActivity, if (isCompactPortrait) 12 else 18)
             val mainCol = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(UiHelper.dp(context, 18), UiHelper.dp(context, 8), UiHelper.dp(context, 18), UiHelper.dp(context, 14))
+                setPadding(padH, UiHelper.dp(context, 8), padH, UiHelper.dp(context, 12))
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT
@@ -1424,6 +1333,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             // Row 1: Group Filter Tabs (Danh mục / Thể loại / Quốc gia / Năm / VIP / Free1)
+            val accent = Phim4KUi.accentFor(screenSource)
             if (groups.size > 1) {
                 val groupScroll = HorizontalScrollView(this@MainActivity).apply {
                     isHorizontalScrollBarEnabled = false
@@ -1439,7 +1349,7 @@ class MainActivity : AppCompatActivity() {
                     val isGrpActive = grp == activeGroup
                     val grpBtn = TextView(this@MainActivity).apply {
                         text = grp
-                        setTextColor(if (isGrpActive) Color.BLACK else Color.WHITE)
+                        setTextColor(Color.WHITE)
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
                         typeface = Typeface.DEFAULT_BOLD
                         setPadding(UiHelper.dp(context, 14), UiHelper.dp(context, 6), UiHelper.dp(context, 14), UiHelper.dp(context, 6))
@@ -1450,10 +1360,10 @@ class MainActivity : AppCompatActivity() {
                     }
                     UiHelper.makeFocusableButton(
                         view = grpBtn,
-                        normalBgColor = if (isGrpActive) UiHelper.COLOR_YELLOW else Color.parseColor("#222638"),
-                        focusedBgColor = UiHelper.COLOR_ACCENT,
+                        normalBgColor = if (isGrpActive) accent else UiHelper.COLOR_CARD,
+                        focusedBgColor = UiHelper.COLOR_SURFACE_HIGH,
                         focusedStrokeColor = Color.WHITE,
-                        radiusDp = 16
+                        radiusDp = 999
                     ) {
                         val firstInGroup = categories.firstOrNull { it.group == grp }
                         if (firstInGroup != null) openCategoryBrowse(firstInGroup)
@@ -1490,10 +1400,10 @@ class MainActivity : AppCompatActivity() {
                 }
                 UiHelper.makeFocusableButton(
                     view = chip,
-                    normalBgColor = if (isSelected) UiHelper.COLOR_ACCENT else UiHelper.COLOR_CARD,
-                    focusedBgColor = Color.parseColor("#C084FC"),
+                    normalBgColor = if (isSelected) accent else UiHelper.COLOR_CARD,
+                    focusedBgColor = UiHelper.COLOR_SURFACE_HIGH,
                     focusedStrokeColor = Color.WHITE,
-                    radiusDp = 18
+                    radiusDp = 999
                 ) {
                     openCategoryBrowse(cat)
                 }
@@ -1589,15 +1499,16 @@ class MainActivity : AppCompatActivity() {
 
                             if (pageToLoad == 1 || gridView == null) {
                                 gridContainer.removeAllViews()
+                                val spanCount = Phim4KUi.gridSpanCount(this@MainActivity)
                                 val grid = RecyclerView(this@MainActivity).apply {
-                                    layoutManager = GridLayoutManager(context, 6)
+                                    layoutManager = GridLayoutManager(context, spanCount)
                                     clipToPadding = false
                                     setHasFixedSize(true)
                                     layoutParams = FrameLayout.LayoutParams(
                                         ViewGroup.LayoutParams.MATCH_PARENT,
                                         ViewGroup.LayoutParams.MATCH_PARENT
                                     )
-                                    val adp = PosterAdapter(items) { anime -> openDetail(anime) }
+                                    val adp = PosterAdapter(items, isGrid = true) { anime -> openDetail(anime) }
                                     posterAdapter = adp
                                     adapter = adp
 
@@ -1607,7 +1518,7 @@ class MainActivity : AppCompatActivity() {
                                             val glm = rv.layoutManager as? GridLayoutManager ?: return
                                             val lastVis = glm.findLastVisibleItemPosition()
                                             val total = glm.itemCount
-                                            if (!isLoadingMore && hasMorePages && total > 0 && lastVis >= total - 12) {
+                                            if (!isLoadingMore && hasMorePages && total > 0 && lastVis >= total - (spanCount * 2)) {
                                                 loadPage(currentPage + 1)
                                             }
                                         }
@@ -1664,9 +1575,10 @@ class MainActivity : AppCompatActivity() {
             if (currentTab != "schedule") return@launch
 
             contentContainer.removeAllViews()
+            val padH = UiHelper.dp(this@MainActivity, if (isCompactPortrait) 12 else 18)
             val mainCol = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(UiHelper.dp(context, 18), UiHelper.dp(context, 10), UiHelper.dp(context, 18), UiHelper.dp(context, 16))
+                setPadding(padH, UiHelper.dp(context, 10), padH, UiHelper.dp(context, 14))
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT
@@ -1684,14 +1596,15 @@ class MainActivity : AppCompatActivity() {
                 orientation = LinearLayout.HORIZONTAL
             }
 
+            val activeColor = UiHelper.COLOR_ACCENT
             for (day in DayOfWeek.entries) {
                 val isSelected = day == selectedDay
                 val chip = TextView(this@MainActivity).apply {
                     text = day.displayName
-                    setTextColor(if (isSelected) Color.BLACK else Color.WHITE)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                    setTextColor(Color.WHITE)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
                     typeface = Typeface.DEFAULT_BOLD
-                    setPadding(UiHelper.dp(context, 16), UiHelper.dp(context, 8), UiHelper.dp(context, 16), UiHelper.dp(context, 8))
+                    setPadding(UiHelper.dp(context, 15), UiHelper.dp(context, 8), UiHelper.dp(context, 15), UiHelper.dp(context, 8))
                     layoutParams = LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT
@@ -1699,10 +1612,10 @@ class MainActivity : AppCompatActivity() {
                 }
                 UiHelper.makeFocusableButton(
                     view = chip,
-                    normalBgColor = if (isSelected) UiHelper.COLOR_YELLOW else UiHelper.COLOR_CARD,
-                    focusedBgColor = UiHelper.COLOR_ACCENT,
+                    normalBgColor = if (isSelected) activeColor else UiHelper.COLOR_CARD,
+                    focusedBgColor = UiHelper.COLOR_RED,
                     focusedStrokeColor = Color.WHITE,
-                    radiusDp = 18
+                    radiusDp = 999
                 ) {
                     renderSchedule(day)
                 }
@@ -1737,7 +1650,7 @@ class MainActivity : AppCompatActivity() {
                 })
             } else {
                 val grid = RecyclerView(this@MainActivity).apply {
-                    layoutManager = GridLayoutManager(context, 6)
+                    layoutManager = GridLayoutManager(context, Phim4KUi.gridSpanCount(context))
                     clipToPadding = false
                     setHasFixedSize(true)
                     layoutParams = LinearLayout.LayoutParams(
@@ -1745,7 +1658,7 @@ class MainActivity : AppCompatActivity() {
                         0,
                         1f
                     )
-                    adapter = PosterAdapter(animeCards) { anime ->
+                    adapter = PosterAdapter(animeCards, isGrid = true) { anime ->
                         currentSource = ContentSource.ANIME
                         updateSidebarState()
                         openDetail(anime)
@@ -1804,13 +1717,22 @@ class MainActivity : AppCompatActivity() {
 
     private class PosterAdapter(
         private val items: List<Anime>,
+        private val isGrid: Boolean = false,
+        private val compactRow: Boolean = false,
         private val onClick: (Anime) -> Unit
     ) : RecyclerView.Adapter<PosterAdapter.Holder>() {
 
         class Holder(val card: FrameLayout) : RecyclerView.ViewHolder(card)
 
-        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder =
-            Holder(UiHelper.createPosterCard(parent.context))
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {
+            val ctx = parent.context
+            val card = when {
+                isGrid -> Phim4KUi.createGridPosterCard(ctx, Phim4KUi.gridSpanCount(ctx))
+                compactRow -> UiHelper.createPosterCard(ctx, widthDp = 108, heightDp = 156)
+                else -> UiHelper.createPosterCard(ctx)
+            }
+            return Holder(card)
+        }
 
         override fun onBindViewHolder(holder: Holder, position: Int) {
             UiHelper.bindPosterCard(holder.card, items[position], onClick)

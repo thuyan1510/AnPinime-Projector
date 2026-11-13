@@ -43,6 +43,7 @@ import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.common.Tracks
 import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.text.Cue
 import androidx.media3.common.text.CueGroup
 import androidx.media3.ui.SubtitleView
 import androidx.appcompat.app.AlertDialog
@@ -99,6 +100,14 @@ class PlayerActivity : AppCompatActivity() {
     private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var resolveJob: Job? = null
     private var translateSubJob: Job? = null
+    private var subPrewarmJob: Job? = null
+    @Volatile private var viLiveSubActive = false
+    @Volatile private var viLiveCues: List<TimedSubtitleCue> = emptyList()
+    private val viTranslatedMap = ConcurrentHashMap<Int, String>()
+    @Volatile private var viLastRenderedCueText: String? = null
+    @Volatile private var cachedSubKey: String = ""
+    @Volatile private var cachedSubRawText: String = ""
+    @Volatile private var translatedEpisodeKey: String = ""
     private val mainHandler = Handler(Looper.getMainLooper())
     private val attemptedStreamUrls = HashSet<String>()
     private val triedAetherScrapers = HashSet<String>()
@@ -203,6 +212,38 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
+    private val subtitleTickRunnable = object : Runnable {
+        override fun run() {
+            if (!viLiveSubActive) return
+            val player = exoPlayer
+            if (player != null && ::subtitleView.isInitialized) {
+                val pos = player.currentPosition.coerceAtLeast(0L)
+                val cueText = SubtitleTranslator.findActiveCueText(viLiveCues, viTranslatedMap, pos)
+                if (cueText != viLastRenderedCueText) {
+                    viLastRenderedCueText = cueText
+                    if (cueText.isNullOrBlank()) {
+                        subtitleView.setCues(emptyList())
+                    } else {
+                        subtitleView.setCues(listOf(Cue.Builder().setText(cueText).build()))
+                    }
+                }
+            }
+            mainHandler.postDelayed(this, 110L)
+        }
+    }
+
+    private fun stopLiveViSubtitles(clearView: Boolean = true) {
+        viLiveSubActive = false
+        viLastRenderedCueText = null
+        mainHandler.removeCallbacks(subtitleTickRunnable)
+        if (clearView && ::subtitleView.isInitialized) {
+            subtitleView.setCues(emptyList())
+        }
+        if (::aetherTranslateBtn.isInitialized) {
+            aetherTranslateBtn.text = "🌐 Dịch Sub Việt"
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         CatalogService.init(this)
@@ -252,6 +293,14 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun releasePlayer(stopRelay: Boolean = true) {
         mainHandler.removeCallbacks(commitPendingSeekRunnable)
+        subPrewarmJob?.cancel()
+        translateSubJob?.cancel()
+        stopLiveViSubtitles(clearView = true)
+        viLiveCues = emptyList()
+        viTranslatedMap.clear()
+        translatedEpisodeKey = ""
+        cachedSubKey = ""
+        cachedSubRawText = ""
         pendingSeekTargetMs = -1L
         consecutiveSeekKeyCount = 0
         try {
@@ -1145,13 +1194,18 @@ class PlayerActivity : AppCompatActivity() {
                 }
                 val needsRelay = resolved.isF4kWrapped ||
                     resolved.url.contains("/stream/hls", ignoreCase = true) ||
+                    resolved.url.contains("streamc.xyz", ignoreCase = true) ||
                     (resolved.url.substringBefore('?').lowercase().endsWith(".m3u8") && resolved.url.contains("film4k", ignoreCase = true))
+                val hlsHint = resolved.mediaKind == StreamMediaKind.HLS ||
+                    resolved.url.contains(".m3u8", true) ||
+                    resolved.url.contains("streamc.xyz", true)
+                val ua = resolved.headers["User-Agent"] ?: CatalogService.USER_AGENT
                 val playUrl = if (needsRelay) {
                     filmRelay?.stop()
-                    val relay = FilmMediaRelay(resolved.headers)
+                    val relay = FilmMediaRelay(resolved.headers, ua)
                     filmRelay = relay
                     withContext(Dispatchers.IO) {
-                        relay.start(resolved.url)
+                        relay.start(resolved.url, isHlsHint = hlsHint)
                     }
                 } else {
                     filmRelay?.stop()
@@ -1200,6 +1254,7 @@ class PlayerActivity : AppCompatActivity() {
         destroyWebPlayer(force = false)
         surfaceView.visibility = View.VISIBLE
         if (::subtitleView.isInitialized) subtitleView.visibility = View.VISIBLE
+        prewarmSourceSubtitle(subtitles, streamUrl, headers)
 
         val selector = DefaultTrackSelector(this).apply {
             parameters = buildUponParameters()
@@ -1326,9 +1381,10 @@ class PlayerActivity : AppCompatActivity() {
             .build()
 
         val aetherStream = isAetherEpisode()
+        val smoothHlsStream = aetherStream || currentEpisode.source == ContentSource.FILM4K || streamUrl.contains("127.0.0.1")
         val videoMediaSource: MediaSource = when (effectiveKind) {
             StreamMediaKind.HLS -> {
-                val hlsExtractorFactory = if (aetherStream) {
+                val hlsExtractorFactory = if (smoothHlsStream) {
                     DefaultHlsExtractorFactory(0, true)
                 } else {
                     DefaultHlsExtractorFactory(
@@ -1339,7 +1395,7 @@ class PlayerActivity : AppCompatActivity() {
                 }
                 HlsMediaSource.Factory(httpFactory)
                     .setExtractorFactory(hlsExtractorFactory)
-                    .setAllowChunklessPreparation(aetherStream)
+                    .setAllowChunklessPreparation(smoothHlsStream)
                     .createMediaSource(mediaItem)
             }
             StreamMediaKind.DASH -> {
@@ -1381,7 +1437,7 @@ class PlayerActivity : AppCompatActivity() {
 
         player.addListener(object : Player.Listener {
             override fun onCues(cueGroup: CueGroup) {
-                if (exoPlayer === player) subtitleView.setCues(cueGroup.cues)
+                if (exoPlayer === player && !viLiveSubActive) subtitleView.setCues(cueGroup.cues)
             }
 
             override fun onTracksChanged(tracks: Tracks) {
@@ -3627,63 +3683,42 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
-    private fun triggerAetherVietnameseTranslation() {
-        val player = exoPlayer
-        if (player == null || lastNativeUrl.isBlank()) {
-            showPlayerMessage("Dịch phụ đề", "Hãy đợi video bắt đầu phát rồi thử dịch lại.")
-            return
-        }
-        val alreadyTranslated = lastSubtitles.firstOrNull {
-            it.url.startsWith("file://") && it.language == "vi"
-        }
-        if (alreadyTranslated != null) {
-            showPlayerMessage("Phụ đề Tiếng Việt", "Phụ đề dịch AI Tiếng Việt đã được nạp sẵn cho tập phim này.")
-            return
-        }
+    private fun selectSubtitleSourceUrl(subtitles: List<ExternalSubtitleTrack>): String? {
+        val candidate = subtitles.firstOrNull {
+            !it.url.startsWith("file://") && it.language.lowercase(Locale.US).startsWith("en")
+        } ?: subtitles.firstOrNull { !it.url.startsWith("file://") }
+        ?: subtitles.firstOrNull()
+        return candidate?.url
+    }
 
-        translateSubJob?.cancel()
-        loadingOverlay.visibility = View.VISIBLE
-        loadingText.text = "🌐 Đang tải & dịch phụ đề sang Tiếng Việt…"
-        translateSubJob = uiScope.launch {
-            try {
-                val vttFile = withContext(Dispatchers.IO) {
-                    buildTranslatedVietnameseVtt()
-                }
-                if (vttFile == null) {
-                    loadingOverlay.visibility = View.GONE
-                    showPlayerMessage("Dịch phụ đề", "Không tìm thấy phụ đề nguồn (English/SRT/VTT) để dịch sang Tiếng Việt.")
-                    return@launch
-                }
-                val newTrack = ExternalSubtitleTrack(
-                    url = Uri.fromFile(vttFile).toString(),
-                    language = "vi",
-                    label = "🇻🇳 Tiếng Việt (AI Dịch)",
-                    mimeType = MimeTypes.TEXT_VTT
-                )
-                val merged = listOf(newTrack) + lastSubtitles.filterNot { it.url == newTrack.url }
-                val pos = exoPlayer?.currentPosition?.coerceAtLeast(0L) ?: 0L
-                loadingOverlay.visibility = View.GONE
-                prepareExoPlayer(
-                    streamUrl = lastNativeUrl,
-                    headers = lastNativeHeaders,
-                    seekMs = pos,
-                    mediaKind = lastMediaKind,
-                    subtitles = merged
-                )
-            } catch (t: Throwable) {
-                if (t is CancellationException) throw t
-                loadingOverlay.visibility = View.GONE
-                showPlayerMessage("Dịch phụ đề", "Không thể dịch phụ đề lúc này: ${t.message ?: "Lỗi mạng"}")
+    private fun prewarmSourceSubtitle(
+        subtitles: List<ExternalSubtitleTrack>,
+        streamUrl: String,
+        headers: Map<String, String>
+    ) {
+        val subKey = selectSubtitleSourceUrl(subtitles) ?: streamUrl
+        if (subKey.isBlank() || (subKey == cachedSubKey && cachedSubRawText.isNotBlank())) return
+        subPrewarmJob?.cancel()
+        subPrewarmJob = uiScope.launch(Dispatchers.IO) {
+            val raw = fetchSourceSubtitleRaw(subtitles, streamUrl, headers)
+            if (!raw.isNullOrBlank()) {
+                cachedSubKey = subKey
+                cachedSubRawText = raw
             }
         }
     }
 
-    private fun buildTranslatedVietnameseVtt(): File? {
-        val candidate = lastSubtitles.firstOrNull {
-            it.language.lowercase(Locale.US).startsWith("en")
-        } ?: lastSubtitles.firstOrNull()
-
-        val rawText = if (candidate != null) {
+    private fun fetchSourceSubtitleRaw(
+        subtitles: List<ExternalSubtitleTrack>,
+        streamUrl: String,
+        headers: Map<String, String>
+    ): String? {
+        val subKey = selectSubtitleSourceUrl(subtitles) ?: streamUrl
+        if (subKey == cachedSubKey && cachedSubRawText.isNotBlank()) return cachedSubRawText
+        val candidate = subtitles.firstOrNull {
+            !it.url.startsWith("file://") && it.language.lowercase(Locale.US).startsWith("en")
+        } ?: subtitles.firstOrNull { !it.url.startsWith("file://") }
+        val text = if (candidate != null) {
             fetchTextUrl(
                 candidate.url,
                 mapOf(
@@ -3692,24 +3727,126 @@ class PlayerActivity : AppCompatActivity() {
                 )
             )
         } else {
-            fetchEmbeddedHlsVtt(lastNativeUrl, lastNativeHeaders)
-        } ?: return null
-
-        val cues = parseSubtitleCues(rawText)
-        if (cues.isEmpty()) return null
-
-        val translatedCues = translateCuesToVietnamese(cues)
-        val outDir = File(cacheDir, "aether_subs").apply { mkdirs() }
-        val key = (currentEpisode.slug.ifBlank { lastNativeUrl }).hashCode().toString()
-        val outFile = File(outDir, "vi_$key.vtt")
-        val sb = StringBuilder("WEBVTT\n\n")
-        for ((idx, cue) in translatedCues.withIndex()) {
-            sb.append(idx + 1).append('\n')
-            sb.append(cue.first).append('\n')
-            sb.append(cue.second).append("\n\n")
+            fetchEmbeddedHlsVtt(streamUrl, headers)
         }
-        outFile.writeText(sb.toString(), Charsets.UTF_8)
-        return outFile
+        if (!text.isNullOrBlank()) {
+            cachedSubKey = subKey
+            cachedSubRawText = text
+        }
+        return text
+    }
+
+    private fun triggerAetherVietnameseTranslation() {
+        val player = exoPlayer
+        if (player == null) {
+            if (fallbackWebView != null) {
+                sendWebCommand("translateVi")
+                android.widget.Toast.makeText(this, "🌐 Đang kích hoạt dịch phụ đề Việt tức thì…", android.widget.Toast.LENGTH_SHORT).show()
+                return
+            }
+            showPlayerMessage("Dịch phụ đề", "Hãy đợi video bắt đầu phát rồi thử dịch lại.")
+            return
+        }
+
+        val epKey = "${currentEpisode.slug}|$lastNativeUrl"
+        if (viLiveSubActive) {
+            stopLiveViSubtitles(clearView = true)
+            android.widget.Toast.makeText(this, "Đã tắt phụ đề dịch AI, dùng phụ đề gốc", android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        if (translatedEpisodeKey == epKey && viLiveCues.isNotEmpty() && viTranslatedMap.isNotEmpty()) {
+            viLiveSubActive = true
+            viLastRenderedCueText = null
+            aetherTranslateBtn.text = "✓ Sub Việt (AI)"
+            mainHandler.removeCallbacks(subtitleTickRunnable)
+            mainHandler.post(subtitleTickRunnable)
+            return
+        }
+
+        if (translateSubJob?.isActive == true) {
+            android.widget.Toast.makeText(this, "Đang hoàn tất dịch phụ đề nền…", android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val currentPos = player.currentPosition.coerceAtLeast(0L)
+        aetherTranslateBtn.text = "⚡ Đang dịch…"
+        android.widget.Toast.makeText(this, "⚡ Đang dịch sub Việt tại vị trí đang xem…", android.widget.Toast.LENGTH_SHORT).show()
+
+        translateSubJob = uiScope.launch {
+            try {
+                val rawText = withContext(Dispatchers.IO) {
+                    fetchSourceSubtitleRaw(lastSubtitles, lastNativeUrl, lastNativeHeaders)
+                }
+                if (rawText.isNullOrBlank()) {
+                    aetherTranslateBtn.text = "🌐 Dịch Sub Việt"
+                    showPlayerMessage("Dịch phụ đề", "Không tìm thấy phụ đề nguồn (English/SRT/VTT) để dịch sang Tiếng Việt.")
+                    return@launch
+                }
+                val parsedCues = withContext(Dispatchers.Default) {
+                    SubtitleTranslator.parseTimedCues(rawText)
+                }
+                if (parsedCues.isEmpty()) {
+                    aetherTranslateBtn.text = "🌐 Dịch Sub Việt"
+                    showPlayerMessage("Dịch phụ đề", "Tệp phụ đề không có dòng thoại hợp lệ để dịch.")
+                    return@launch
+                }
+
+                viLiveCues = parsedCues
+                viTranslatedMap.clear()
+                translatedEpisodeKey = epKey
+                viLastRenderedCueText = null
+
+                withContext(Dispatchers.IO) {
+                    SubtitleTranslator.translateAllProgressive(
+                        cues = parsedCues,
+                        currentPositionMs = currentPos,
+                        workers = 6,
+                        translateFn = { batch -> SubtitleTranslator.translateViaGtx(batch, aetherHttpClient) },
+                        onWaveReady = { waveMap ->
+                            viTranslatedMap.putAll(waveMap)
+                            mainHandler.post {
+                                if (exoPlayer == null) return@post
+                                viLiveSubActive = true
+                                viLastRenderedCueText = null
+                                aetherTranslateBtn.text = "⚡ Sub Việt (${viTranslatedMap.size}/${parsedCues.size})"
+                                mainHandler.removeCallbacks(subtitleTickRunnable)
+                                mainHandler.post(subtitleTickRunnable)
+                            }
+                        },
+                        onBatchUpdated = { done, total ->
+                            mainHandler.post {
+                                if (viLiveSubActive && done < total) {
+                                    aetherTranslateBtn.text = "⚡ Sub Việt ($done/$total)"
+                                }
+                            }
+                        }
+                    )
+
+                    val outDir = File(cacheDir, "aether_subs").apply { mkdirs() }
+                    val fileKey = (currentEpisode.slug.ifBlank { lastNativeUrl }).hashCode().toString()
+                    val outFile = File(outDir, "vi_$fileKey.vtt")
+                    outFile.writeText(SubtitleTranslator.buildVtt(parsedCues, viTranslatedMap), Charsets.UTF_8)
+
+                    val newTrack = ExternalSubtitleTrack(
+                        url = Uri.fromFile(outFile).toString(),
+                        language = "vi",
+                        label = "🇻🇳 Tiếng Việt (AI Dịch)",
+                        mimeType = MimeTypes.TEXT_VTT
+                    )
+                    mainHandler.post {
+                        lastSubtitles = listOf(newTrack) + lastSubtitles.filterNot { it.url == newTrack.url }
+                        if (viLiveSubActive) {
+                            aetherTranslateBtn.text = "✓ Sub Việt (AI)"
+                        }
+                    }
+                }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                aetherTranslateBtn.text = "🌐 Dịch Sub Việt"
+                showPlayerMessage("Dịch phụ đề", "Không thể dịch phụ đề lúc này: ${t.message ?: "Lỗi mạng"}")
+            }
+        }
     }
 
     private fun fetchTextUrl(url: String, headers: Map<String, String>): String? {
@@ -3936,9 +4073,11 @@ class PlayerActivity : AppCompatActivity() {
                 labels.add(details.joinToString(" • ").ifBlank { "Track ${options.size}" })
             }
         }
-        val hasAetherTranslate = type == C.TRACK_TYPE_TEXT && isAetherEpisode()
+        val hasAetherTranslate = type == C.TRACK_TYPE_TEXT && (isAetherEpisode() || lastSubtitles.isNotEmpty())
         if (hasAetherTranslate) {
-            labels.add("🌐 [Dịch sang Tiếng Việt qua Aether AI]")
+            val aiIdx = labels.size
+            labels.add(if (viLiveSubActive) "✓ 🇻🇳 Tiếng Việt (AI - Đang bật)" else "🌐 [Dịch sang Tiếng Việt tức thì (AI)]")
+            if (viLiveSubActive) selected = aiIdx
         }
         if (options.isEmpty() && !hasAetherTranslate) {
             showPlayerMessage(
@@ -3954,6 +4093,9 @@ class PlayerActivity : AppCompatActivity() {
             if (hasAetherTranslate && index == labels.size - 1) {
                 triggerAetherVietnameseTranslation()
                 return@showSelection
+            }
+            if (type == C.TRACK_TYPE_TEXT && viLiveSubActive) {
+                stopLiveViSubtitles(clearView = true)
             }
             val builder = player.trackSelectionParameters.buildUpon()
                 .clearOverridesOfType(type)

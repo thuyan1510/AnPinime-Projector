@@ -29,11 +29,12 @@ object CatalogService {
     private const val KEY_VERIFIED_ANIME_AT = "verified_anime_at_ms"
 
     val animeFallbackHosts = listOf(
+        "https://animevietsub.best",
+        "https://animevietsub.vip",
         "https://animevietsub.news",
         "https://animevietsub.xyz",
         "https://animevietsub.fan",
         "https://animevietsub.bio",
-        "https://animevietsub.vip",
         "https://animevietsub.sale"
     )
 
@@ -66,7 +67,42 @@ object CatalogService {
 
     private val ioPool = Executors.newFixedThreadPool(6)
 
+    private val syncedCookieJar = object : okhttp3.CookieJar {
+        override fun saveFromResponse(url: okhttp3.HttpUrl, cookies: List<okhttp3.Cookie>) {
+            if (cookies.isEmpty()) return
+            runCatching {
+                val urlStr = url.toString()
+                for (c in cookies) {
+                    WebViewHelper.persistOkHttpCookie(urlStr, "${c.name}=${c.value}")
+                }
+            }
+        }
+
+        override fun loadForRequest(url: okhttp3.HttpUrl): List<okhttp3.Cookie> {
+            val header = runCatching { WebViewHelper.getCookieHeader(url.toString()) }.getOrNull()
+                ?.takeIf { it.isNotBlank() } ?: return emptyList()
+            val out = ArrayList<okhttp3.Cookie>()
+            for (part in header.split(';')) {
+                val kv = part.trim()
+                val eq = kv.indexOf('=')
+                if (eq <= 0) continue
+                val name = kv.substring(0, eq).trim()
+                val value = kv.substring(eq + 1).trim()
+                if (name.isEmpty()) continue
+                okhttp3.Cookie.Builder()
+                    .name(name)
+                    .value(value)
+                    .domain(url.host)
+                    .path("/")
+                    .build()
+                    .let(out::add)
+            }
+            return out
+        }
+    }
+
     val http: OkHttpClient = OkHttpClient.Builder()
+        .cookieJar(syncedCookieJar)
         .connectTimeout(12, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
         .followRedirects(true)
@@ -863,10 +899,18 @@ object CatalogService {
             )
         }
 
-        // Embed URL (e.g. streamc.xyz/embed.php?id=... or player embed):
-        // Try extracting direct .m3u8 from embed HTML first, fallback to WebView with fallbackJavaScript
+        // Embed URL (e.g. embed*.streamc.xyz/embed.php?hash=... or player embed):
+        // Try StreamC bootstrap/issue API first, then literal .m3u8 extraction, then WebView fallback.
         try {
             val embedHtml = httpGet(primaryUrl, referer = defaultReferer)
+            StreamCResolver.extractFromHtml(
+                embedUrl = primaryUrl,
+                html = embedHtml,
+                referer = defaultReferer,
+                http = http,
+                userAgent = USER_AGENT
+            )?.let { return it }
+
             val candidates = PlaybackSourceParser.extractStreamCandidates(embedHtml, primaryUrl)
             val bestDirect = candidates.firstOrNull {
                 it.contains(".m3u8", ignoreCase = true) || it.contains(".mp4", ignoreCase = true)
@@ -942,19 +986,23 @@ object CatalogService {
     // 4. ANIMEVIETSUB (DomainResolver + HTMLParser + Next.js + AJAX Decoder)
     // =========================================================================
 
-    private fun fetchAnimeHtml(url: String, base: String): String {
+    private fun animeUserAgent(): String {
+        return runCatching { WebViewHelper.userAgent.takeIf { it.isNotBlank() } }.getOrNull() ?: USER_AGENT
+    }
+
+    private fun fetchAnimeHtml(url: String, base: String, allowWebFallback: Boolean = true): String {
+        val ua = animeUserAgent()
         val html = try {
-            httpGet(url, referer = "$base/")
+            httpGet(url, referer = "$base/", userAgent = ua)
         } catch (_: Throwable) {
             ""
         }
-        if (html.length > 600 &&
-            !html.contains("Just a moment", ignoreCase = true) &&
-            !html.contains("cf-browser-verification", ignoreCase = true) &&
-            !html.contains("Attention Required!", ignoreCase = true)
-        ) {
-            return html
-        }
+        val needsChallenge = html.length <= 600 || runCatching { WebViewHelper.containsVerification(html) }.getOrDefault(false) ||
+            html.contains("Just a moment", ignoreCase = true) ||
+            html.contains("cf-browser-verification", ignoreCase = true) ||
+            html.contains("Attention Required!", ignoreCase = true)
+        if (!needsChallenge) return html
+        if (!allowWebFallback) return html
         val webHtml = try {
             kotlinx.coroutines.runBlocking { WebViewHelper.fetchHtml(url).first }
         } catch (_: Throwable) {
@@ -965,34 +1013,37 @@ object CatalogService {
 
     private fun loadAnimeHome(): List<AnimeSection> {
         val base = resolveAnimeDomain()
-        val sections = ArrayList<AnimeSection>()
-
-        val homeHtml = try { fetchAnimeHtml("$base/", base) } catch (_: Throwable) { "" }
-        val latest = HTMLParser.home(homeHtml, base)
-        if (latest.isNotEmpty()) {
-            sections.add(AnimeSection("🔥 Anime Mới Cập Nhật", latest, "/anime-moi/"))
-        }
+        val homeHtml = try { fetchAnimeHtml("$base/", base, allowWebFallback = true) } catch (_: Throwable) { "" }
+        val sections = ArrayList(HTMLParser.sections(homeHtml, base))
+        val havePaths = sections.mapNotNull { it.categoryPath?.lowercase() }.toHashSet()
+        val haveTitles = sections.map { it.title.lowercase() }.toSet()
 
         val extraPaths = listOf(
             "📺 Anime Bộ" to "/anime-bo/",
             "🎬 Anime Lẻ / Movie" to "/anime-le/",
             "🏆 Bảng Xếp Hạng" to "/bang-xep-hang.html"
-        )
-        val futures = extraPaths.map { (title, path) ->
-            Triple(title, path, ioPool.submit(Callable {
-                try {
-                    val h = fetchAnimeHtml("$base$path", base)
-                    HTMLParser.home(h, base)
-                } catch (_: Throwable) {
-                    emptyList()
-                }
-            }))
+        ).filter { (title, path) ->
+            !havePaths.contains(path.lowercase()) &&
+                haveTitles.none { it.contains(title.substringAfter(' ').lowercase()) }
         }
 
-        for ((title, path, fut) in futures) {
-            val items = try { fut.get(10, TimeUnit.SECONDS) } catch (_: Throwable) { emptyList() }
-            if (items.isNotEmpty()) {
-                sections.add(AnimeSection(title, items, path))
+        if (extraPaths.isNotEmpty()) {
+            val futures = extraPaths.map { (title, path) ->
+                Triple(title, path, ioPool.submit(Callable {
+                    try {
+                        // Use fast OkHttp with synced Cloudflare cookies first to avoid WebView mutex queueing
+                        val h = fetchAnimeHtml("$base$path", base, allowWebFallback = sections.isEmpty())
+                        HTMLParser.home(h, base)
+                    } catch (_: Throwable) {
+                        emptyList()
+                    }
+                }))
+            }
+            for ((title, path, fut) in futures) {
+                val items = try { fut.get(10, TimeUnit.SECONDS) } catch (_: Throwable) { emptyList() }
+                if (items.isNotEmpty()) {
+                    sections.add(AnimeSection(title, items, path))
+                }
             }
         }
         return sections
@@ -1035,13 +1086,13 @@ object CatalogService {
         val parsed = HTMLParser.detail(detailHtml, pageUrl, base)
 
         var episodes = parsed.episodes
-        val watchUrl = parsed.watchUrl ?: episodes.lastOrNull()?.url
+        val watchUrl = parsed.watchUrl ?: episodes.minByOrNull { if (it.number > 0) it.number else Int.MAX_VALUE }?.url
 
-        // If the detail page only has a "Xem phim" link or incomplete streamed episodes, fetch watch page HTML
-        if ((episodes.isEmpty() || !HTMLParser.hasCompleteStreamedEpisodes(detailHtml, pageUrl, base, episodes)) &&
-            !watchUrl.isNullOrBlank() &&
-            !watchUrl.equals(pageUrl, ignoreCase = true)
-        ) {
+        // On AnimeVietsub detail pages, full episode list + data-hash/filmID often live on watchUrl
+        val needsWatchFetch = episodes.isEmpty() ||
+            episodes.all { it.animeHash.isEmpty() } ||
+            !HTMLParser.hasCompleteStreamedEpisodes(detailHtml, pageUrl, base, episodes)
+        if (needsWatchFetch && !watchUrl.isNullOrBlank() && !watchUrl.equals(pageUrl, ignoreCase = true)) {
             try {
                 val watchHtml = fetchAnimeHtml(watchUrl, base)
                 val watchEpisodes = HTMLParser.episodes(watchHtml, pageUrl, base)
@@ -1078,11 +1129,12 @@ object CatalogService {
     private fun resolveAnimePlayback(episode: Episode): ResolvedPlayback {
         val base = resolveAnimeDomain()
         val epUrl = rewriteAnimeHostIfNeeded(episode.url, base)
+        val ua = animeUserAgent()
 
         if (episode.directUrl.startsWith("http")) {
             return ResolvedPlayback(
                 url = episode.directUrl,
-                headers = mapOf("User-Agent" to USER_AGENT, "Referer" to epUrl),
+                headers = mapOf("User-Agent" to ua, "Referer" to epUrl),
                 isWeb = false,
                 webUrl = epUrl,
                 mediaKind = Phim4KMediaProbe.mediaKind(episode.directUrl)
@@ -1095,78 +1147,62 @@ object CatalogService {
             var filmId = episode.animeFilmId
 
             if (hash.isEmpty()) {
-                hash = Regex("""data-(?:hash|play|id)=["']([a-zA-Z0-9+/=_-]{10,})["']""")
-                    .find(html)?.groupValues?.get(1).orEmpty()
+                hash = Regex("""AnimeVsub\s*\(\s*["']([a-zA-Z0-9+/=_-]{8,})["']""")
+                    .find(html)?.groupValues?.get(1)
+                    ?: Regex("""class=["'][^"']*\bactive\b[^"']*["'][^>]*data-(?:hash|play|id)=["']([a-zA-Z0-9+/=_-]{8,})["']""")
+                        .find(html)?.groupValues?.get(1)
+                    ?: Regex("""data-(?:hash|play)=["']([a-zA-Z0-9+/=_-]{8,})["']""")
+                        .find(html)?.groupValues?.get(1)
+                    ?: Regex("""data-id=["']([a-zA-Z0-9+/=_-]{10,})["']""")
+                        .find(html)?.groupValues?.get(1).orEmpty()
             }
             if (filmId.isEmpty()) {
-                filmId = Regex("""(?:filmId|movie_id|id_film)\s*[:=]\s*["']?(\d+)["']?""")
-                    .find(html)?.groupValues?.get(1).orEmpty()
+                filmId = Regex(
+                    """(?:filmInfo\s*\.\s*filmID|filmId|movie_id|id_film)\s*[:=]\s*(?:parseInt\s*\(\s*)?["']?(\d+)["']?""",
+                    RegexOption.IGNORE_CASE
+                ).find(html)?.groupValues?.get(1)
+                    ?: Regex("""-a(\d+)(?:/|\.html|$)""", RegexOption.IGNORE_CASE).find(epUrl)?.groupValues?.get(1)
+                    ?: ""
             }
+            val effectiveFilmId = filmId.ifEmpty { "1" }
 
             if (hash.isNotEmpty()) {
                 val ajaxUrl = "$base/ajax/player?v=2019a"
                 val form = FormBody.Builder()
                     .add("link", hash)
-                    .add("id", filmId.ifEmpty { "1" })
+                    .add("id", effectiveFilmId)
                     .build()
                 val req = Request.Builder()
                     .url(ajaxUrl)
                     .post(form)
-                    .header("User-Agent", USER_AGENT)
+                    .header("User-Agent", ua)
                     .header("Referer", epUrl)
+                    .header("Origin", base.trimEnd('/'))
                     .header("X-Requested-With", "XMLHttpRequest")
                     .build()
-                val resolvedAjax: ResolvedPlayback? = http.newCall(req).execute().use { resp ->
-                    val body = resp.body?.string().orEmpty()
-                    if (body.isNotEmpty()) {
-                        val json = JSONObject(body)
-                        val linkVal = json.opt("link")
-                        when (linkVal) {
-                            is String -> {
-                                if (linkVal.startsWith("http")) {
-                                    return@use ResolvedPlayback(
-                                        url = linkVal,
-                                        headers = mapOf("User-Agent" to USER_AGENT, "Referer" to "$base/"),
-                                        isWeb = false,
-                                        webUrl = epUrl,
-                                        mediaKind = Phim4KMediaProbe.mediaKind(linkVal)
-                                    )
-                                }
-                                val passphrase = json.optString("playTech").ifEmpty { "dm_thang_suc_vat_get_link_an_dbt" }
-                                val raw = decodeBase64Url(linkVal)
-                                if (raw.size > 16) {
-                                    val decrypted = AnimePayloadDecoder.decode(raw, passphrase)
-                                    val stream = PlaybackSourceParser.extractStreamCandidates(decrypted, base).firstOrNull()
-                                    if (!stream.isNullOrEmpty()) {
-                                        return@use ResolvedPlayback(
-                                            url = stream,
-                                            headers = mapOf("User-Agent" to USER_AGENT, "Referer" to "$base/"),
-                                            isWeb = false,
-                                            webUrl = epUrl,
-                                            mediaKind = Phim4KMediaProbe.mediaKind(stream)
-                                        )
-                                    }
-                                }
-                            }
-                            is JSONArray -> {
-                                for (i in 0 until linkVal.length()) {
-                                    val file = linkVal.optJSONObject(i)?.optString("file").orEmpty()
-                                    if (file.startsWith("http")) {
-                                        return@use ResolvedPlayback(
-                                            url = file,
-                                            headers = mapOf("User-Agent" to USER_AGENT, "Referer" to "$base/"),
-                                            isWeb = false,
-                                            webUrl = epUrl,
-                                            mediaKind = Phim4KMediaProbe.mediaKind(file)
-                                        )
-                                    }
-                                }
-                            }
-                        }
+                val resolvedAjax: ResolvedPlayback? = try {
+                    http.newCall(req).execute().use { resp ->
+                        if (resp.isSuccessful) {
+                            val body = resp.body?.string().orEmpty()
+                            if (body.isNotEmpty()) {
+                                decryptAnimePlayerPayload(body, base.trimEnd('/'), epUrl)
+                            } else null
+                        } else null
                     }
+                } catch (_: Throwable) {
                     null
                 }
                 if (resolvedAjax != null) return resolvedAjax
+
+                // Crucial fallback when Cloudflare blocks OkHttp POST: execute AJAX inside cleared WebView origin
+                val webAjax = try {
+                    kotlinx.coroutines.runBlocking {
+                        WebViewHelper.resolveAnimeAjaxInWebView(epUrl, effectiveFilmId, hash)
+                    }
+                } catch (_: Throwable) {
+                    null
+                }
+                if (webAjax != null) return webAjax
             }
 
             val directInHtml = PlaybackSourceParser.extractStreamCandidates(html, base)
@@ -1174,7 +1210,7 @@ object CatalogService {
             if (!directInHtml.isNullOrEmpty()) {
                 return ResolvedPlayback(
                     url = directInHtml,
-                    headers = mapOf("User-Agent" to USER_AGENT, "Referer" to epUrl),
+                    headers = mapOf("User-Agent" to ua, "Referer" to epUrl),
                     isWeb = false,
                     webUrl = epUrl,
                     mediaKind = Phim4KMediaProbe.mediaKind(directInHtml)
@@ -1185,7 +1221,7 @@ object CatalogService {
 
         return ResolvedPlayback(
             url = epUrl,
-            headers = mapOf("User-Agent" to USER_AGENT, "Referer" to "$base/"),
+            headers = mapOf("User-Agent" to ua, "Referer" to "$base/"),
             isWeb = true,
             webUrl = epUrl
         )
@@ -1216,11 +1252,12 @@ object CatalogService {
 
     // --- HTTP Helpers ---
 
-    private fun httpGet(url: String, referer: String? = null): String {
+    private fun httpGet(url: String, referer: String? = null, userAgent: String = USER_AGENT): String {
         val builder = Request.Builder()
             .url(url)
-            .header("User-Agent", USER_AGENT)
+            .header("User-Agent", userAgent)
             .header("Accept", "application/json, text/html, */*")
+            .header("Accept-Language", "vi-VN,vi;q=0.9,en-US;q=0.8")
         if (!referer.isNullOrEmpty()) {
             builder.header("Referer", referer)
         }
@@ -1243,10 +1280,11 @@ object CatalogService {
         origin: String,
         epPageUrl: String
     ): ResolvedPlayback? {
+        val ua = animeUserAgent()
         fun resolved(text: String): ResolvedPlayback? = PlaybackSourceParser.parse(text, epPageUrl)?.let {
             ResolvedPlayback(
                 url = it.url,
-                headers = mapOf("Referer" to epPageUrl, "Origin" to origin, "User-Agent" to USER_AGENT),
+                headers = mapOf("Referer" to epPageUrl, "Origin" to origin, "User-Agent" to ua),
                 isWeb = it.isWeb,
                 webUrl = epPageUrl,
                 mediaKind = Phim4KMediaProbe.mediaKind(it.url)
@@ -1254,20 +1292,41 @@ object CatalogService {
         }
         resolved(responseText)?.let { return it }
         var encrypted = responseText.trim()
+        var passphrase = "dm_thang_suc_vat_get_link_an_dbt"
         try {
             val j = JSONObject(encrypted)
+            val linkAny = j.opt("link")
+            if (linkAny is JSONArray) {
+                for (i in 0 until linkAny.length()) {
+                    val file = linkAny.optJSONObject(i)?.optString("file").orEmpty()
+                    if (file.startsWith("http")) {
+                        return ResolvedPlayback(
+                            url = file,
+                            headers = mapOf("Referer" to epPageUrl, "Origin" to origin, "User-Agent" to ua),
+                            isWeb = false,
+                            webUrl = epPageUrl,
+                            mediaKind = Phim4KMediaProbe.mediaKind(file)
+                        )
+                    }
+                }
+            }
+            passphrase = j.optString("playTech").ifBlank { passphrase }
             encrypted = j.optString("link").ifBlank { j.optString("data").ifBlank { j.optString("html").ifBlank { encrypted } } }
         } catch (_: Throwable) {}
 
         val raw = decodeBase64Url(encrypted)
         if (raw.size <= 16) return null
-        val clearText = AnimePayloadDecoder.decode(raw, "dm_thang_suc_vat_get_link_an_dbt")
+        val clearText = AnimePayloadDecoder.decode(raw, passphrase)
         return resolved(clearText)
     }
 
     private fun decodeBase64Url(input: String): ByteArray {
         val clean = input.trim().replace('-', '+').replace('_', '/')
         val padded = clean + "=".repeat((4 - clean.length % 4) % 4)
-        return android.util.Base64.decode(padded, android.util.Base64.DEFAULT)
+        return try {
+            java.util.Base64.getDecoder().decode(padded)
+        } catch (_: Throwable) {
+            runCatching { android.util.Base64.decode(padded, android.util.Base64.DEFAULT) }.getOrDefault(ByteArray(0))
+        }
     }
 }

@@ -57,4 +57,41 @@ class FilmMediaRelayTest {
         val invalid = byteArrayOf(137.toByte(),80,78,71,13,10,26,10,127,127,127,127,0,0,0,0,0)
         assertArrayEquals(invalid, FilmMediaRelay.unwrapPng(invalid))
     }
+
+    @Test fun streamCRawMpegTsWithPngExtensionRelaysAsVideoMp2t() {
+        val upstream = MockWebServer()
+        val rawTs = ByteArray(376) { idx -> if (idx % 188 == 0) 0x47 else (idx and 0x7F).toByte() }
+        upstream.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                if (request.getHeader("Origin") != "https://embed1.streamc.xyz") {
+                    return MockResponse().setResponseCode(403)
+                }
+                return when {
+                    request.path!!.startsWith("/eyJ0") -> MockResponse()
+                        .setHeader("Content-Type", "application/vnd.apple.mpegurl")
+                        .setBody("#EXTM3U\n#EXTINF:2.0,\n${upstream.url("/chunk/streamaaa0000.png")}\n#EXT-X-ENDLIST\n")
+                    request.path!!.endsWith(".png") -> MockResponse()
+                        .setHeader("Content-Type", "image/png")
+                        .setBody(Buffer().write(rawTs))
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+        upstream.start()
+        val relay = FilmMediaRelay(mapOf("Origin" to "https://embed1.streamc.xyz"), "fixture")
+        try {
+            val proxyMaster = relay.start(upstream.url("/eyJ0abc").toString(), isHlsHint = true)
+            assertTrue(proxyMaster.contains("/proxy.m3u8"))
+            val playlist = URL(proxyMaster).readText()
+            val segUrl = playlist.lines().first { it.startsWith("http") }
+            val conn = URL(segUrl).openConnection() as HttpURLConnection
+            assertEquals(200, conn.responseCode)
+            assertEquals("video/mp2t", conn.contentType)
+            assertArrayEquals(rawTs, conn.inputStream.use { it.readBytes() })
+            conn.disconnect()
+        } finally {
+            relay.stop()
+            upstream.shutdown()
+        }
+    }
 }

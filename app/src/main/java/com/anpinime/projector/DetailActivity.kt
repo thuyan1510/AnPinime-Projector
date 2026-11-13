@@ -3,12 +3,14 @@ package com.anpinime.projector
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewOutlineProvider
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
@@ -145,6 +147,44 @@ class DetailActivity : AppCompatActivity() {
             seasons.firstOrNull().orEmpty()
         }
         val visibleEpisodes = data.episodes.filter { it.season == activeSeason }
+        val accent = Phim4KUi.accentFor(anime.source)
+
+        if (UiHelper.isCompactPortrait(this)) {
+            renderCompactPortraitDetail(data, seasons, activeSeason, visibleEpisodes, accent)
+            return
+        }
+
+        // Full-bleed dark backdrop behind 2-column TV/Projector detail
+        val bgFrame = FrameLayout(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+        val bgImage = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            alpha = 0.24f
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+        ImageLoader.load(bgImage, data.bannerUrl ?: data.posterUrl ?: anime.imageUrl, maxWidth = 720, maxHeight = 420)
+        bgFrame.addView(bgImage)
+        bgFrame.addView(View(this).apply {
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(
+                    Color.parseColor("#CC080A0F"),
+                    Color.parseColor("#E8080A0F"),
+                    Color.parseColor("#FA080A0F")
+                )
+            )
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        })
 
         val mainLayout = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -179,14 +219,16 @@ class DetailActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply { bottomMargin = UiHelper.dp(context, 14) }
         }
-        UiHelper.makeFocusableButton(backBtn, normalBgColor = UiHelper.COLOR_CARD, radiusDp = 10) {
+        UiHelper.makeFocusableButton(backBtn, normalBgColor = UiHelper.COLOR_CARD, focusedBgColor = accent, radiusDp = 12) {
             finish()
         }
         leftCol.addView(backBtn)
 
         val posterImg = ImageView(this).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
-            background = UiHelper.roundedBg(UiHelper.COLOR_CARD, 12, context, Color.parseColor("#33FFFFFF"), 1)
+            background = UiHelper.roundedBg(UiHelper.COLOR_CARD, 14, context, Color.parseColor("#33FFFFFF"), 1)
+            outlineProvider = ViewOutlineProvider.BACKGROUND
+            clipToOutline = true
             layoutParams = LinearLayout.LayoutParams(
                 UiHelper.dp(context, 190),
                 UiHelper.dp(context, 276)
@@ -199,7 +241,7 @@ class DetailActivity : AppCompatActivity() {
             val svCountBadge = UiHelper.createBadge(
                 this,
                 "${seasons.size} Máy chủ khả dụng",
-                UiHelper.COLOR_ACCENT,
+                accent,
                 Color.WHITE
             ).apply {
                 layoutParams = LinearLayout.LayoutParams(
@@ -275,9 +317,9 @@ class DetailActivity : AppCompatActivity() {
             UiHelper.makeFocusableButton(
                 view = playNowBtn,
                 normalBgColor = UiHelper.COLOR_RED,
-                focusedBgColor = Color.parseColor("#FF5252"),
+                focusedBgColor = Color.parseColor("#FF2E38"),
                 focusedStrokeColor = Color.WHITE,
-                radiusDp = 24,
+                radiusDp = 999,
                 scaleOnFocus = 1.05f
             ) {
                 startPlayer(firstEp, data.episodes)
@@ -353,10 +395,10 @@ class DetailActivity : AppCompatActivity() {
                 }
                 UiHelper.makeFocusableButton(
                     view = svChip,
-                    normalBgColor = if (isSelected) UiHelper.COLOR_ACCENT else UiHelper.COLOR_CARD,
-                    focusedBgColor = Color.parseColor("#C084FC"),
+                    normalBgColor = if (isSelected) accent else UiHelper.COLOR_CARD,
+                    focusedBgColor = UiHelper.COLOR_SURFACE_HIGH,
                     focusedStrokeColor = Color.WHITE,
-                    radiusDp = 18
+                    radiusDp = 999
                 ) {
                     selectedSeason = season
                     renderDetail(data)
@@ -394,10 +436,368 @@ class DetailActivity : AppCompatActivity() {
 
         mainLayout.addView(leftCol)
         mainLayout.addView(rightCol)
-        rootContainer.addView(mainLayout)
+        bgFrame.addView(mainLayout)
+        rootContainer.addView(bgFrame)
 
         // Focus Play button immediately so pressing OK on the remote plays right away
         playNowBtn.requestFocus()
+    }
+
+    private fun renderCompactPortraitDetail(
+        data: AnimeDetail,
+        seasons: List<String>,
+        activeSeason: String,
+        visibleEpisodes: List<Episode>,
+        accent: Int
+    ) {
+        val headerView = buildMobileDetailHeader(data, seasons, activeSeason, visibleEpisodes, accent)
+        val recycler = RecyclerView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            setPadding(0, 0, 0, UiHelper.dp(context, 24))
+            clipToPadding = false
+            val glm = GridLayoutManager(context, 4)
+            glm.spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
+                override fun getSpanSize(position: Int): Int = if (position == 0) 4 else 1
+            }
+            layoutManager = glm
+            adapter = MobileDetailGridAdapter(headerView, visibleEpisodes) { chosenEp ->
+                startPlayer(chosenEp, data.episodes)
+            }
+        }
+        rootContainer.addView(recycler)
+    }
+
+    private fun buildMobileDetailHeader(
+        data: AnimeDetail,
+        seasons: List<String>,
+        activeSeason: String,
+        visibleEpisodes: List<Episode>,
+        accent: Int
+    ): LinearLayout {
+        val rootCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = RecyclerView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        // Top Backdrop Hero
+        val heroFrame = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                UiHelper.dp(context, 238)
+            )
+        }
+        val backdropImg = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            alpha = 0.72f
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+        ImageLoader.load(backdropImg, data.bannerUrl ?: data.posterUrl ?: anime.imageUrl, maxWidth = 720, maxHeight = 420)
+        heroFrame.addView(backdropImg)
+
+        heroFrame.addView(View(this).apply {
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(
+                    Color.parseColor("#38080A0F"),
+                    Color.parseColor("#9E080A0F"),
+                    Color.parseColor("#FF080A0F")
+                )
+            )
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        })
+
+        val backBtn = TextView(this).apply {
+            text = "❮  Quay lại"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(UiHelper.dp(context, 14), UiHelper.dp(context, 7), UiHelper.dp(context, 14), UiHelper.dp(context, 7))
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.START
+            ).apply {
+                leftMargin = UiHelper.dp(context, 14)
+                topMargin = UiHelper.dp(context, 14)
+            }
+        }
+        UiHelper.makeFocusableButton(
+            view = backBtn,
+            normalBgColor = Color.parseColor("#B30F121B"),
+            focusedBgColor = accent,
+            radiusDp = 999
+        ) {
+            finish()
+        }
+        heroFrame.addView(backBtn)
+
+        val heroBottomRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.BOTTOM
+            setPadding(UiHelper.dp(context, 14), 0, UiHelper.dp(context, 14), UiHelper.dp(context, 12))
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM
+            )
+        }
+
+        val posterImg = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            background = UiHelper.roundedBg(UiHelper.COLOR_CARD, 12, context, Color.parseColor("#44FFFFFF"), 1)
+            outlineProvider = ViewOutlineProvider.BACKGROUND
+            clipToOutline = true
+            layoutParams = LinearLayout.LayoutParams(UiHelper.dp(context, 96), UiHelper.dp(context, 142)).apply {
+                rightMargin = UiHelper.dp(context, 14)
+            }
+        }
+        ImageLoader.load(posterImg, data.posterUrl ?: anime.imageUrl, maxWidth = 240, maxHeight = 360)
+        heroBottomRow.addView(posterImg)
+
+        val titleMetaCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        titleMetaCol.addView(TextView(this).apply {
+            text = data.title
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 19.5f)
+            typeface = Typeface.DEFAULT_BOLD
+            maxLines = 3
+            ellipsize = TextUtils.TruncateAt.END
+        })
+        if (data.info.isNotBlank()) {
+            titleMetaCol.addView(TextView(this).apply {
+                text = data.info
+                setTextColor(UiHelper.COLOR_YELLOW)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                typeface = Typeface.DEFAULT_BOLD
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+                setPadding(0, UiHelper.dp(context, 4), 0, UiHelper.dp(context, 6))
+            })
+        }
+        if (seasons.isNotEmpty()) {
+            titleMetaCol.addView(
+                UiHelper.createBadge(this, "${seasons.size} Máy chủ · ${anime.source.subtitle}", accent, Color.WHITE)
+            )
+        }
+        heroBottomRow.addView(titleMetaCol)
+        heroFrame.addView(heroBottomRow)
+        rootCol.addView(heroFrame)
+
+        // Body Metadata & Controls
+        val bodyCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(UiHelper.dp(context, 14), UiHelper.dp(context, 6), UiHelper.dp(context, 14), UiHelper.dp(context, 8))
+        }
+
+        val firstEp = visibleEpisodes.firstOrNull() ?: data.episodes.firstOrNull()
+        val playNowBtn = TextView(this).apply {
+            text = if (firstEp != null) "▶  XEM PHIM NGAY (${firstEp.title})" else "Chưa có tập phát"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(UiHelper.dp(context, 18), UiHelper.dp(context, 13), UiHelper.dp(context, 18), UiHelper.dp(context, 13))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = UiHelper.dp(context, 10) }
+        }
+        if (firstEp != null) {
+            UiHelper.makeFocusableButton(
+                view = playNowBtn,
+                normalBgColor = UiHelper.COLOR_RED,
+                focusedBgColor = Color.parseColor("#FF2E38"),
+                focusedStrokeColor = Color.WHITE,
+                radiusDp = 14,
+                scaleOnFocus = 1.02f
+            ) {
+                startPlayer(firstEp, data.episodes)
+            }
+        }
+        bodyCol.addView(playNowBtn)
+
+        if (firstEp != null) {
+            val badgeScroll = HorizontalScrollView(this).apply {
+                isHorizontalScrollBarEnabled = false
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = UiHelper.dp(context, 10) }
+            }
+            val badgeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            if (firstEp.qualityBadge.isNotBlank()) {
+                badgeRow.addView(UiHelper.createBadge(this, "🎞 ${firstEp.qualityBadge}", UiHelper.COLOR_BLUE, Color.WHITE).apply {
+                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                        rightMargin = UiHelper.dp(context, 6)
+                    }
+                })
+            }
+            if (firstEp.audioLabel.isNotBlank()) {
+                badgeRow.addView(UiHelper.createBadge(this, "🔊 ${firstEp.audioLabel}", Color.parseColor("#2A3B5C"), Color.WHITE).apply {
+                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                        rightMargin = UiHelper.dp(context, 6)
+                    }
+                })
+            }
+            if (firstEp.subtitleLabel.isNotBlank()) {
+                badgeRow.addView(UiHelper.createBadge(this, "💬 ${firstEp.subtitleLabel}", Color.parseColor("#3B1E6D"), Color.WHITE))
+            }
+            badgeScroll.addView(badgeRow)
+            bodyCol.addView(badgeScroll)
+        }
+
+        // Expandable Summary
+        var expanded = false
+        val summaryView = TextView(this).apply {
+            text = data.summary
+            setTextColor(UiHelper.COLOR_TEXT_SECONDARY)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            maxLines = 3
+            ellipsize = TextUtils.TruncateAt.END
+            setLineSpacing(UiHelper.dp(context, 2).toFloat(), 1.08f)
+            setOnClickListener {
+                expanded = !expanded
+                maxLines = if (expanded) 50 else 3
+            }
+            setPadding(0, 0, 0, UiHelper.dp(context, 12))
+        }
+        bodyCol.addView(summaryView)
+
+        if (seasons.size > 1) {
+            val isMultiSeasonShow = seasons.any { it.startsWith("Mùa", ignoreCase = true) }
+            bodyCol.addView(TextView(this).apply {
+                text = if (isMultiSeasonShow) "Chọn Mùa Phim (Season)" else "Chọn Máy Chủ (Server)"
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                typeface = Typeface.DEFAULT_BOLD
+                setPadding(0, 0, 0, UiHelper.dp(context, 7))
+            })
+
+            val svScroll = HorizontalScrollView(this).apply {
+                isHorizontalScrollBarEnabled = false
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = UiHelper.dp(context, 12) }
+            }
+            val svRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            for (season in seasons) {
+                val isSelected = season == activeSeason
+                val badge = data.episodes.firstOrNull { it.season == season }?.qualityBadge.orEmpty()
+                val labelText = if (badge.isNotBlank()) "🖥 $season [$badge]" else "🖥 $season"
+                val svChip = TextView(this).apply {
+                    text = labelText
+                    setTextColor(Color.WHITE)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                    typeface = Typeface.DEFAULT_BOLD
+                    setPadding(UiHelper.dp(context, 13), UiHelper.dp(context, 8), UiHelper.dp(context, 13), UiHelper.dp(context, 8))
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply { rightMargin = UiHelper.dp(context, 8) }
+                }
+                UiHelper.makeFocusableButton(
+                    view = svChip,
+                    normalBgColor = if (isSelected) accent else UiHelper.COLOR_CARD,
+                    focusedBgColor = UiHelper.COLOR_SURFACE_HIGH,
+                    focusedStrokeColor = Color.WHITE,
+                    radiusDp = 999
+                ) {
+                    selectedSeason = season
+                    renderDetail(data)
+                }
+                svRow.addView(svChip)
+            }
+            svScroll.addView(svRow)
+            bodyCol.addView(svScroll)
+        }
+
+        bodyCol.addView(TextView(this).apply {
+            text = "Danh sách tập (${visibleEpisodes.size} tập)"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14.5f)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, 0, 0, UiHelper.dp(context, 4))
+        })
+
+        rootCol.addView(bodyCol)
+        return rootCol
+    }
+
+    private class MobileDetailGridAdapter(
+        private val headerView: View,
+        private val episodes: List<Episode>,
+        private val onClick: (Episode) -> Unit
+    ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+
+        companion object {
+            private const val TYPE_HEADER = 0
+            private const val TYPE_EPISODE = 1
+        }
+
+        class HeaderHolder(view: View) : RecyclerView.ViewHolder(view)
+        class EpHolder(val btn: TextView) : RecyclerView.ViewHolder(btn)
+
+        override fun getItemCount(): Int = 1 + episodes.size
+
+        override fun getItemViewType(position: Int): Int =
+            if (position == 0) TYPE_HEADER else TYPE_EPISODE
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
+            if (viewType == TYPE_HEADER) {
+                return HeaderHolder(headerView)
+            }
+            val ctx = parent.context
+            val tv = TextView(ctx).apply {
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                typeface = Typeface.DEFAULT_BOLD
+                gravity = Gravity.CENTER
+                setSingleLine(true)
+                ellipsize = TextUtils.TruncateAt.END
+                setPadding(UiHelper.dp(ctx, 6), UiHelper.dp(ctx, 11), UiHelper.dp(ctx, 6), UiHelper.dp(ctx, 11))
+                layoutParams = ViewGroup.MarginLayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    leftMargin = UiHelper.dp(ctx, 5)
+                    rightMargin = UiHelper.dp(ctx, 5)
+                    bottomMargin = UiHelper.dp(ctx, 8)
+                }
+            }
+            return EpHolder(tv)
+        }
+
+        override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+            if (holder !is EpHolder) return
+            val ep = episodes[position - 1]
+            holder.btn.text = ep.title
+            UiHelper.makeFocusableButton(
+                view = holder.btn,
+                normalBgColor = UiHelper.COLOR_CARD,
+                focusedBgColor = UiHelper.COLOR_RED,
+                focusedStrokeColor = Color.WHITE,
+                radiusDp = 10,
+                scaleOnFocus = 1.03f
+            ) {
+                onClick(ep)
+            }
+        }
     }
 
     private fun startPlayer(chosenEpisode: Episode, allEpisodes: List<Episode>) {

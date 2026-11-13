@@ -17,6 +17,53 @@ object HTMLParser {
         return home(html, baseURL)
     }
 
+    fun sections(html: String, baseURL: String): List<AnimeSection> {
+        val sections = ArrayList<AnimeSection>()
+        val seenTitles = HashSet<String>()
+        try {
+            val doc = Jsoup.parse(html, baseURL)
+            val blocks = doc.select("section, .MovieListTop, .widget-area .widget, .TpRwCont > div")
+            for (block in blocks) {
+                val headingRaw = block.selectFirst("h1, h2, h3, .Title, .Top > .Title, .widget-title")
+                    ?.text()?.trim().orEmpty()
+                val title = cleanSectionHeading(headingRaw)
+                if (title.isEmpty()) continue
+                val blockItems = extractMovieCardsFromElement(block, baseURL)
+                if (blockItems.size < 2) continue
+                val key = title.lowercase()
+                if (!seenTitles.add(key)) continue
+                sections.add(AnimeSection(title = title, items = blockItems, categoryPath = inferCategoryPath(title)))
+            }
+        } catch (_: Throwable) {
+        }
+        if (sections.isEmpty()) {
+            val fallback = home(html, baseURL)
+            if (fallback.isNotEmpty()) {
+                sections.add(AnimeSection("🔥 Anime Mới Cập Nhật", fallback, "/anime-moi/"))
+            }
+        }
+        return sections
+    }
+
+    private fun cleanSectionHeading(raw: String): String {
+        val cleaned = raw.replace(Regex("""\s+"""), " ").trim()
+        if (cleaned.length < 3 || cleaned.length > 60) return ""
+        val lower = cleaned.lowercase()
+        if (lower.contains("bình luận") || lower.contains("đăng nhập") || lower.contains("quảng cáo")) return ""
+        return cleaned
+    }
+
+    private fun inferCategoryPath(title: String): String? {
+        val lower = title.lowercase()
+        return when {
+            lower.contains("xếp hạng") || lower.contains("top") -> "/bang-xep-hang.html"
+            lower.contains("anime bộ") -> "/anime-bo/"
+            lower.contains("anime lẻ") || lower.contains("movie") -> "/anime-le/"
+            lower.contains("mới") || lower.contains("cập nhật") -> "/anime-moi/"
+            else -> null
+        }
+    }
+
     fun categories(html: String, baseURL: String): List<AnimeCategory> {
         val seen = HashSet<String>()
         val result = ArrayList<AnimeCategory>()
@@ -102,12 +149,12 @@ object HTMLParser {
 
     fun episodes(html: String, pageURL: String, baseURL: String): List<Episode> {
         val canonicalURL = canonicalAnimeURL(html, pageURL, baseURL) ?: pageURL
-        val streamed = streamedEpisodes(html, canonicalURL, baseURL)
-        if (hasCompleteStreamedEpisodes(html, canonicalURL, baseURL, streamed)) {
-            return streamed
-        }
         val htmlEps = htmlEpisodes(html, canonicalURL, baseURL)
-        return mergedEpisodes(primary = htmlEps, fallback = streamed)
+        val streamed = streamedEpisodes(html, canonicalURL, baseURL)
+        if (htmlEps.isNotEmpty()) {
+            return mergedEpisodes(primary = htmlEps, fallback = streamed)
+        }
+        return streamed
     }
 
     fun hasCompleteStreamedEpisodes(
@@ -117,14 +164,24 @@ object HTMLParser {
         precomputed: List<Episode>? = null
     ): Boolean {
         val canonicalURL = canonicalAnimeURL(html, pageURL, baseURL) ?: pageURL
-        val eps = precomputed ?: streamedEpisodes(html, canonicalURL, baseURL)
-        return eps.size >= 2
+        val eps = precomputed ?: episodes(html, canonicalURL, baseURL)
+        return eps.size >= 2 && eps.any { it.animeHash.isNotEmpty() || it.url.contains("/xem-phim", ignoreCase = true) || it.url.contains("/tap-", ignoreCase = true) }
     }
 
     fun watchURL(html: String, pageURL: String, baseURL: String): String? {
         val canonicalURL = canonicalAnimeURL(html, pageURL, baseURL) ?: pageURL
         val showSlug = animeSlug(canonicalURL)
         val showId = animeIdentifier(canonicalURL)
+
+        try {
+            val doc = Jsoup.parse(html, baseURL)
+            val watchCta = doc.selectFirst("a.watch_button[href], a.btn-watch[href], a.bw_btn[href], a[href*=/xem-phim]")
+            if (watchCta != null) {
+                val resolved = resolveURL(watchCta.attr("href"), baseURL)
+                if (!resolved.isNullOrBlank()) return resolved
+            }
+        } catch (_: Throwable) {
+        }
 
         for (link in HTMLDocument.links(html)) {
             if (isExcludedContainerLink(link)) continue
@@ -135,23 +192,26 @@ object HTMLParser {
 
             val isWatchAction = lowerText.contains("xem phim") ||
                 lowerText.contains("xem ngay") ||
-                lowerText.contains("tập mới") ||
                 lowerAttrs.contains("watch") ||
                 lowerAttrs.contains("bw_btn") ||
                 lowerAttrs.contains("btn-watch")
 
-            val epUrl = episodeURL(resolved, canonicalURL, showSlug, showId)
-            if (epUrl != null && (isWatchAction || lowerHref.contains("/tap-") || lowerHref.contains("/xem-phim/"))) {
-                return epUrl
-            }
-            if (isWatchAction && lowerHref.endsWith("/xem-phim.html")) {
+            if (isWatchAction && (lowerHref.endsWith("/xem-phim.html") || lowerHref.contains("/xem-phim/"))) {
                 return resolved
+            }
+            val epUrl = episodeURL(resolved, canonicalURL, showSlug, showId)
+            if (epUrl != null && isWatchAction) {
+                return epUrl
             }
         }
 
+        val htmlEps = htmlEpisodes(html, canonicalURL, baseURL)
+        if (htmlEps.isNotEmpty()) {
+            return htmlEps.minByOrNull { if (it.number > 0) it.number else Int.MAX_VALUE }?.url
+        }
         val streamed = streamedEpisodes(html, canonicalURL, baseURL)
         if (streamed.isNotEmpty()) {
-            return streamed.last().url
+            return streamed.minByOrNull { if (it.number > 0) it.number else Int.MAX_VALUE }?.url
         }
         return null
     }
@@ -207,19 +267,25 @@ object HTMLParser {
         if (primary.isEmpty()) return fallback
         if (fallback.isEmpty()) return primary
 
-        val seenUrls = HashSet<String>()
-        val seenNumbers = HashSet<Int>()
-        val combined = ArrayList<Episode>()
-
+        val byServerAndUrl = LinkedHashMap<String, Episode>()
         for (ep in primary + fallback) {
             val normalizedUrl = normalizeEpisodeCompareUrl(ep.url)
-            if (normalizedUrl.isNotEmpty() && !seenUrls.add(normalizedUrl)) continue
-            if (ep.number > 0 && seenNumbers.contains(ep.number) && combined.any { it.number == ep.number }) continue
-            if (ep.number > 0) seenNumbers.add(ep.number)
-            combined.add(ep)
+            val key = "${ep.season.trim().lowercase()}|$normalizedUrl"
+            val existing = byServerAndUrl[key]
+            if (existing == null) {
+                byServerAndUrl[key] = ep
+            } else {
+                byServerAndUrl[key] = existing.copy(
+                    animeHash = existing.animeHash.ifEmpty { ep.animeHash },
+                    animeFilmId = existing.animeFilmId.ifEmpty { ep.animeFilmId },
+                    episodeId = existing.episodeId.ifEmpty { ep.episodeId },
+                    directUrl = existing.directUrl.ifEmpty { ep.directUrl }
+                )
+            }
         }
 
-        return combined.sortedWith(compareBy<Episode> { if (it.number > 0) it.number else Int.MAX_VALUE })
+        return byServerAndUrl.values
+            .sortedWith(compareBy<Episode>({ if (it.number > 0) it.number else Int.MAX_VALUE }, { it.season }, { it.episodeIndex }))
             .mapIndexed { idx, ep ->
                 if (ep.number <= 0) ep.copy(number = idx + 1) else ep
             }
@@ -241,7 +307,6 @@ object HTMLParser {
                 DayOfWeek.SUNDAY to listOf("chủ nhật", "cn", "sunday", "sun")
             )
 
-            val sections = doc.select("section, div.schedule-day, div.wd-day, div.TPostMv, li.TPostMv, article.TPost")
             var currentDay = DayOfWeek.today()
 
             for (el in doc.select("h2, h3, h4, .day-title, .sched-day, article.TPost, li.TPostMv, div.TPostMv, a[href*=/phim/]")) {
@@ -285,11 +350,19 @@ object HTMLParser {
     // --- Internal Helpers ---
 
     private fun extractMovieCards(html: String, baseURL: String): List<Anime> {
+        return try {
+            val doc = Jsoup.parse(html, baseURL)
+            extractMovieCardsFromElement(doc, baseURL)
+        } catch (_: Throwable) {
+            emptyList()
+        }
+    }
+
+    private fun extractMovieCardsFromElement(root: org.jsoup.nodes.Element, baseURL: String): List<Anime> {
         val out = ArrayList<Anime>()
         val seen = HashSet<String>()
         try {
-            val doc = Jsoup.parse(html, baseURL)
-            val cards = doc.select(".TPostMv, article.TPost, .MovieList li, .film-item, .movie-item")
+            val cards = root.select(".TPostMv, article.TPost, .MovieList li, .film-item, .movie-item")
             for (el in cards) {
                 val a = el.selectFirst("a[href]") ?: continue
                 val href = resolveURL(a.attr("href"), baseURL) ?: continue
@@ -376,40 +449,112 @@ object HTMLParser {
     private fun htmlEpisodes(html: String, canonicalURL: String, baseURL: String): List<Episode> {
         val showSlug = animeSlug(canonicalURL)
         val showId = animeIdentifier(canonicalURL)
+        val globalFilmId = Regex(
+            """(?:filmInfo\s*\.\s*filmID|filmId|movie_id|id_film)\s*[:=]\s*(?:parseInt\s*\(\s*)?["']?(\d+)["']?""",
+            RegexOption.IGNORE_CASE
+        ).find(html)?.groupValues?.get(1)
+            ?: showId?.removePrefix("a")?.removePrefix("A")
+            ?: ""
+
         val results = ArrayList<Episode>()
-        val seenUrls = HashSet<String>()
+        val seenKeys = HashSet<String>()
 
-        for (link in HTMLDocument.links(html)) {
-            if (isExcludedContainerLink(link)) continue
-            val resolved = resolveURL(link.href, baseURL) ?: continue
-            val epUrl = episodeURL(resolved, canonicalURL, showSlug, showId) ?: continue
-            val norm = normalizeEpisodeCompareUrl(epUrl)
-            if (!seenUrls.add(norm)) continue
-
-            val label = episodeLabel(link.text, link.rawAttributes, epUrl) ?: continue
-            val epNumber = extractEpisodeNumber(label, epUrl, results.size + 1)
-            val hash = firstMatch("""data-(?:hash|id|play)\s*=\s*["']([^"']+)["']""", link.rawAttributes) ?: ""
-            val filmId = firstMatch("""data-(?:film|movie-id|id-film)\s*=\s*["']([^"']+)["']""", link.rawAttributes) ?: ""
-
-            results.add(
-                Episode(
-                    title = formatEpisodeTitle(label, epNumber),
-                    url = epUrl,
-                    number = epNumber,
-                    season = "Vietsub",
-                    qualityBadge = "HD · Vietsub",
-                    source = ContentSource.ANIME,
-                    playbackKind = "anime",
-                    episodeIndex = results.size,
-                    refererUrl = canonicalURL,
-                    animeHash = hash,
-                    animeFilmId = filmId,
-                    detailUrl = canonicalURL,
-                    serverName = "Vietsub"
-                )
+        try {
+            val doc = Jsoup.parse(html, baseURL)
+            val candidateAnchors = doc.select(
+                ".list-episode a[href], #list-episode a[href], .episode-list a[href], " +
+                    ".list-server a[href], ul.list-ep a[href], .halim-list-eps a[href], " +
+                    "a.btn-episode[href], a.episode-link[href], a[data-hash][href], a[data-play][href]"
             )
+            for (a in candidateAnchors) {
+                if (a.closest("nav, header, footer, .sidebar, .related, .MovieList, .TPost") != null) continue
+                val resolved = resolveURL(a.attr("href"), baseURL) ?: continue
+                val hasEpAttrs = a.hasClass("btn-episode") || a.hasAttr("data-hash") || a.hasAttr("data-play") || a.hasAttr("data-id")
+                val epUrl = episodeURL(resolved, canonicalURL, showSlug, showId)
+                    ?: (resolved.takeIf { hasEpAttrs && !it.lowercase().contains("/the-loai/") && !it.lowercase().contains("/tag/") })
+                    ?: continue
+
+                val labelText = a.text().trim()
+                if (labelText.equals("Xem phim", ignoreCase = true) || labelText.equals("Xem ngay", ignoreCase = true)) {
+                    continue
+                }
+                val attrsRaw = a.attributes().joinToString(" ") { "${it.key}=\"${it.value}\"" }
+                val label = episodeLabel(labelText, attrsRaw, epUrl) ?: continue
+                val epNumber = extractEpisodeNumber(label, epUrl, results.size + 1)
+
+                val serverEl = a.closest(".server-item, .list-server-item, .halim-server, .server")
+                val serverName = serverEl?.selectFirst(".server-name, h3, h4, strong, .title-sv, span.name")
+                    ?.text()?.trim()?.takeIf { it.isNotEmpty() && it.length <= 32 } ?: "Vietsub"
+
+                val normKey = "${serverName.lowercase()}|${normalizeEpisodeCompareUrl(epUrl)}"
+                if (!seenKeys.add(normKey)) continue
+
+                val hash = a.attr("data-hash").ifEmpty { a.attr("data-play") }.ifEmpty { "" }
+                val epId = a.attr("data-id").ifEmpty { a.attr("data-ep") }
+                val filmId = a.attr("data-film").ifEmpty { a.attr("data-movie-id") }.ifEmpty { globalFilmId }
+
+                results.add(
+                    Episode(
+                        title = formatEpisodeTitle(label, epNumber),
+                        url = epUrl,
+                        number = epNumber,
+                        season = serverName,
+                        qualityBadge = "HD · $serverName",
+                        source = ContentSource.ANIME,
+                        playbackKind = "anime",
+                        episodeIndex = results.size,
+                        refererUrl = canonicalURL,
+                        animeHash = hash.ifEmpty { if (epId.length >= 10) epId else "" },
+                        animeFilmId = filmId,
+                        detailUrl = canonicalURL,
+                        serverName = serverName,
+                        episodeId = epId
+                    )
+                )
+            }
+        } catch (_: Throwable) {
         }
-        return results
+
+        if (results.isEmpty()) {
+            for (link in HTMLDocument.links(html)) {
+                if (isExcludedContainerLink(link)) continue
+                val resolved = resolveURL(link.href, baseURL) ?: continue
+                val epUrl = episodeURL(resolved, canonicalURL, showSlug, showId) ?: continue
+                val norm = "vietsub|${normalizeEpisodeCompareUrl(epUrl)}"
+                if (!seenKeys.add(norm)) continue
+
+                val label = episodeLabel(link.text, link.rawAttributes, epUrl) ?: continue
+                if (label.equals("Xem phim", ignoreCase = true) || label.equals("Xem ngay", ignoreCase = true)) continue
+                val epNumber = extractEpisodeNumber(label, epUrl, results.size + 1)
+                val hash = firstMatch("""data-(?:hash|play)\s*=\s*["']([^"']+)["']""", link.rawAttributes)
+                    ?: firstMatch("""data-id\s*=\s*["']([A-Za-z0-9+/=_-]{10,})["']""", link.rawAttributes)
+                    ?: ""
+                val epId = firstMatch("""data-id\s*=\s*["']([^"']+)["']""", link.rawAttributes) ?: ""
+                val filmId = firstMatch("""data-(?:film|movie-id|id-film)\s*=\s*["']([^"']+)["']""", link.rawAttributes)
+                    ?: globalFilmId
+
+                results.add(
+                    Episode(
+                        title = formatEpisodeTitle(label, epNumber),
+                        url = epUrl,
+                        number = epNumber,
+                        season = "Vietsub",
+                        qualityBadge = "HD · Vietsub",
+                        source = ContentSource.ANIME,
+                        playbackKind = "anime",
+                        episodeIndex = results.size,
+                        refererUrl = canonicalURL,
+                        animeHash = hash,
+                        animeFilmId = filmId,
+                        detailUrl = canonicalURL,
+                        serverName = "Vietsub",
+                        episodeId = epId
+                    )
+                )
+            }
+        }
+
+        return results.sortedWith(compareBy<Episode>({ it.season }, { if (it.number > 0) it.number else Int.MAX_VALUE }, { it.episodeIndex }))
     }
 
     private fun streamedEpisodes(html: String, canonicalURL: String, baseURL: String): List<Episode> {
@@ -467,30 +612,39 @@ object HTMLParser {
         if (rawUrl.isNotEmpty()) {
             resolvedUrl = resolveURL(rawUrl, baseURL)
         } else if (rawSlug.isNotEmpty()) {
+            val cleanSlug = rawSlug.trim().removeSuffix(".html")
+            val isEpisodeSlugToken = Regex(
+                """^(?:(?:tap|ep|episode)-)?(?:\d+(?:\.\d+)?(?:-[a-z0-9]+)*|ova|special|full|movie|end)$""",
+                RegexOption.IGNORE_CASE
+            ).matches(cleanSlug)
             resolvedUrl = if (rawSlug.startsWith("http") || rawSlug.startsWith("/")) {
                 resolveURL(rawSlug, baseURL)
-            } else if (!showSlug.isNullOrEmpty()) {
-                val slugPart = if (rawSlug.startsWith("tap-")) rawSlug else "tap-$rawSlug"
+            } else if (!showSlug.isNullOrEmpty() && isEpisodeSlugToken) {
+                val slugPart = if (Regex("""^(?:tap|ep|episode)-""", RegexOption.IGNORE_CASE).containsMatchIn(cleanSlug)) {
+                    cleanSlug
+                } else {
+                    "tap-$cleanSlug"
+                }
                 resolveURL("/phim/$showSlug/$slugPart.html", baseURL)
             } else {
                 null
             }
         } else if (rawName.isNotEmpty() && !showSlug.isNullOrEmpty()) {
-            val numToken = Regex("""\d+""").find(rawName)?.value
+            // Only synthesize URL from episode name when object looks like a real episode entry for this show
+            val itemShowId = item.optString("filmId").ifEmpty { item.optString("movieId") }.ifEmpty { item.optString("animeId") }
+            val expectedNumId = showKey?.removePrefix("a")?.removePrefix("A")
+            val belongsHere = itemShowId.isEmpty() || expectedNumId.isNullOrEmpty() || itemShowId == expectedNumId
+            val numToken = if (belongsHere) Regex("""^\s*(?:tập|tap|ep|episode)?\s*(\d{1,4})\s*$""", RegexOption.IGNORE_CASE).find(rawName)?.groupValues?.get(1) else null
             if (numToken != null) {
                 resolvedUrl = resolveURL("/phim/$showSlug/tap-$numToken.html", baseURL)
             }
         }
 
         val finalUrl = resolvedUrl ?: return null
-        if (!showKey.isNullOrEmpty() && !finalUrl.lowercase().contains(showKey.lowercase()) &&
-            (showSlug.isNullOrEmpty() || !finalUrl.lowercase().contains(showSlug.lowercase()))
-        ) {
-            return null
-        }
+        val epValidUrl = episodeURL(finalUrl, canonicalURL, showSlug, showKey) ?: return null
 
-        val num = item.optInt("number", -1).takeIf { it > 0 }
-            ?: extractEpisodeNumber(rawName, finalUrl, fallbackNum)
+        val num = item.optInt("number", -1).takeIf { it in 1..5000 }
+            ?: extractEpisodeNumber(rawName, epValidUrl, fallbackNum)
         val label = rawName.ifEmpty { "Tập $num" }
         val directStream = item.optString("m3u8")
             .ifEmpty { item.optString("file") }
@@ -500,7 +654,7 @@ object HTMLParser {
 
         return Episode(
             title = formatEpisodeTitle(label, num),
-            url = finalUrl,
+            url = epValidUrl,
             number = num,
             season = "Vietsub",
             qualityBadge = "HD · Vietsub",
@@ -596,15 +750,25 @@ object HTMLParser {
         }
 
         val isTapRoute = Regex("""/(?:tap|ep|episode)-[^/?#]+""", RegexOption.IGNORE_CASE).containsMatchIn(lower)
-        val isXemPhimRoute = lower.contains("/xem-phim/")
+        val isXemPhimRoute = lower.contains("/xem-phim")
 
         if (!isTapRoute && !isXemPhimRoute) return null
 
-        if (!showId.isNullOrEmpty() && lower.contains(showId.lowercase())) {
-            return candidateURL
+        val candidateId = animeIdentifier(lower)
+        val candidateSlug = animeSlug(lower)
+        if (!showId.isNullOrEmpty() && !candidateId.isNullOrEmpty()) {
+            return if (candidateId.equals(showId, ignoreCase = true)) candidateURL else null
         }
-        if (!showSlug.isNullOrEmpty() && lower.contains(showSlug.lowercase())) {
-            return candidateURL
+        if (!showId.isNullOrEmpty()) {
+            val idPattern = Regex("""(?:^|[-/])${Regex.escape(showId.lowercase())}(?:/|\.html|[?#]|$)""")
+            if (idPattern.containsMatchIn(lower)) return candidateURL
+        }
+        if (!showSlug.isNullOrEmpty() && !candidateSlug.isNullOrEmpty()) {
+            if (candidateSlug.equals(showSlug, ignoreCase = true)) return candidateURL
+        }
+        if (!showSlug.isNullOrEmpty() && candidateId.isNullOrEmpty()) {
+            val slugPattern = Regex("""/(?:phim|xem-phim)/${Regex.escape(showSlug.lowercase())}(?:-a\d+)?(?:/|\.html|$)""")
+            if (slugPattern.containsMatchIn(lower)) return candidateURL
         }
         return null
     }
@@ -612,7 +776,7 @@ object HTMLParser {
     private fun episodeLabel(text: String, rawAttrs: String, url: String): String? {
         val cleaned = text.trim()
         val labelRegex = Regex(
-            """^(?:tập|tap|ep|episode)?\s*\d+[a-zA-Z0-9._-]*(?:\s*(?:end|final|full|ova|special|sp|preview))?$""",
+            """^(?:tập|tap|ep|episode)?\s*\d+(?:\.\d+)?[a-zA-Z._-]*(?:\s*(?:end|final|full|ova|special|sp|preview))?$""",
             RegexOption.IGNORE_CASE
         )
         if (cleaned.isNotEmpty() && (labelRegex.matches(cleaned) || cleaned.equals("Full", ignoreCase = true) || cleaned.equals("Xem phim", ignoreCase = true))) {
@@ -622,9 +786,13 @@ object HTMLParser {
         if (!titleAttr.isNullOrEmpty() && (labelRegex.matches(titleAttr) || titleAttr.lowercase().contains("tập") || titleAttr.lowercase().contains("tap"))) {
             return titleAttr
         }
-        val urlMatch = Regex("""/(?:tap|ep|episode)-([a-zA-Z0-9_-]+)""", RegexOption.IGNORE_CASE).find(url)
-        if (urlMatch != null) {
-            return "Tập ${urlMatch.groupValues[1]}"
+        val numMatch = Regex("""/(?:tap|ep|episode)-(\d{1,4})(?:[-/.?#]|$)""", RegexOption.IGNORE_CASE).find(url)
+        if (numMatch != null) {
+            return "Tập ${numMatch.groupValues[1]}"
+        }
+        if (Regex("""/(?:tap|ep|episode)-(ova|special|full|movie)""", RegexOption.IGNORE_CASE).containsMatchIn(url)) {
+            val special = Regex("""/(?:tap|ep|episode)-([a-zA-Z]+)""", RegexOption.IGNORE_CASE).find(url)?.groupValues?.get(1)
+            return special?.uppercase() ?: "Tập 1"
         }
         return null
     }
@@ -674,8 +842,11 @@ object HTMLParser {
     }
 
     private fun extractEpisodeNumber(label: String, url: String, fallback: Int): Int {
-        Regex("""(\d+)""").find(label)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
-        Regex("""/(?:tap|ep|episode)-(\d+)""", RegexOption.IGNORE_CASE).find(url)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
+        Regex("""(?:tập|tap|ep|episode)?\s*(\d{1,4})(?!\d)""", RegexOption.IGNORE_CASE)
+            .find(label)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
+        val cleanUrl = url.replace(Regex("""-a\d+(?:/|\.html|$)""", RegexOption.IGNORE_CASE), "/")
+        Regex("""/(?:tap|ep|episode)-(\d{1,4})(?:[-/.?#]|$)""", RegexOption.IGNORE_CASE)
+            .find(cleanUrl)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
         return fallback
     }
 

@@ -178,7 +178,12 @@ object AppUpdateManager {
                     for (i in 0 until assets.length()) {
                         val a = assets.optJSONObject(i) ?: continue
                         val name = a.optString("name", "")
-                        if (name.contains("K670Pro", true) || name.contains("universal", true)) {
+                        val matchesDevice = if (BuildConfig.IS_PHONE_FLAVOR) {
+                            name.contains("Phone", true) || name.contains("Mobile", true)
+                        } else {
+                            name.contains("K670Pro", true) || name.contains("universal", true)
+                        }
+                        if (matchesDevice && name.endsWith(".apk", true)) {
                             universalApkUrl = a.optString("browser_download_url", "")
                             apkSize = a.optLong("size", 0L)
                             break
@@ -226,7 +231,11 @@ object AppUpdateManager {
                         val json = JSONObject(body)
                         val code = json.optInt("versionCode", 0)
                         val name = json.optString("versionName", "").removePrefix("v").removePrefix("V")
-                        val apkUrl = json.optString("apkUrl", "")
+                        val apkUrl = if (BuildConfig.IS_PHONE_FLAVOR) {
+                            json.optString("phoneApkUrl", "").ifBlank { json.optString("apkUrl", "") }
+                        } else {
+                            json.optString("apkUrl", "")
+                        }
                         val changelog = json.optString("changelog", "").trim()
                         if (apkUrl.isNotEmpty() && (code > 0 || name.isNotEmpty())) {
                             return UpdateInfo(

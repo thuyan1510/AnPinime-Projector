@@ -11,12 +11,35 @@ android {
         applicationId = "com.anpinime.projector"
         minSdk = 23
         targetSdk = 34
-        versionCode = 16
-        versionName = "1.8.1"
+        versionCode = 17
+        versionName = "1.9.0"
         manifestPlaceholders["appLabel"] = "AnPinime TV"
+        manifestPlaceholders["homeOrientation"] = "sensorLandscape"
 
         ndk {
             abiFilters += listOf("armeabi-v7a", "arm64-v8a")
+        }
+    }
+
+    buildFeatures {
+        buildConfig = true
+    }
+
+    flavorDimensions += "device"
+    productFlavors {
+        create("projector") {
+            dimension = "device"
+            applicationId = "com.anpinime.projector"
+            manifestPlaceholders["appLabel"] = "AnPinime TV"
+            manifestPlaceholders["homeOrientation"] = "sensorLandscape"
+            buildConfigField("boolean", "IS_PHONE_FLAVOR", "false")
+        }
+        create("phone") {
+            dimension = "device"
+            applicationId = "com.anpinime.phone"
+            manifestPlaceholders["appLabel"] = "AnPinime Mobile"
+            manifestPlaceholders["homeOrientation"] = "portrait"
+            buildConfigField("boolean", "IS_PHONE_FLAVOR", "true")
         }
     }
 
@@ -25,13 +48,12 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // Sign with debug key so the release APK installs directly on any projector
+            // Sign with debug key so the release APK installs directly on any projector/phone
             signingConfig = signingConfigs.getByName("debug")
         }
         debug {
             applicationIdSuffix = ".preview"
             versionNameSuffix = "-preview"
-            manifestPlaceholders["appLabel"] = "AnPinime TV Thử nghiệm"
         }
     }
 

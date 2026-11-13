@@ -27,7 +27,7 @@
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation"
             android:exported="true"
-            android:screenOrientation="sensorLandscape">
+            android:screenOrientation="${homeOrientation}">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -39,7 +39,7 @@
             android:name=".DetailActivity"
             android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation"
             android:exported="false"
-            android:screenOrientation="sensorLandscape" />
+            android:screenOrientation="${homeOrientation}" />
 
         <activity
             android:name=".PlayerActivity"

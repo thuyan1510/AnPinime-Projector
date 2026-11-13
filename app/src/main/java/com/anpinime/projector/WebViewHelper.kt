@@ -139,6 +139,20 @@ object WebViewHelper {
         } catch (_: Throwable) {}
     }
 
+    fun persistOkHttpCookie(url: String, cookiePair: String) {
+        if (cookiePair.isBlank()) return
+        try {
+            val cm = CookieManager.getInstance()
+            cm.setAcceptCookie(true)
+            cm.setCookie(url, cookiePair)
+            cm.flush()
+            val merged = cm.getCookie(url)
+            if (!merged.isNullOrBlank()) {
+                persistCookie(url, merged)
+            }
+        } catch (_: Throwable) {}
+    }
+
     fun getCookieHeader(url: String): String? {
         return try {
             val cm = CookieManager.getInstance()
@@ -590,8 +604,12 @@ object WebViewHelper {
                         </head><body><script>
                         var form = new FormData();
                         form.append('link', atob('$hash64')); form.append('id', atob('$film64'));
-                        fetch('/ajax/player', {method:'POST', headers:{'X-Requested-With':'XMLHttpRequest'},
+                        fetch('/ajax/player?v=2019a', {method:'POST', headers:{'X-Requested-With':'XMLHttpRequest'},
                           body:form, credentials:'include'})
+                          .then(function(response){
+                            if(!response.ok) return fetch('/ajax/player', {method:'POST', headers:{'X-Requested-With':'XMLHttpRequest'}, body:form, credentials:'include'});
+                            return response;
+                          })
                           .then(function(response){ if(!response.ok) throw Error('HTTP '+response.status); return response.text(); })
                           .then(function(payload){ AnPinimeBridge.onPayload(payload); })
                           .catch(function(error){ AnPinimeBridge.onError(String(error)); });

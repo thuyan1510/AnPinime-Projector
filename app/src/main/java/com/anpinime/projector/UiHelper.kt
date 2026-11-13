@@ -1,6 +1,7 @@
 package com.anpinime.projector
 
 import android.content.Context
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -10,6 +11,7 @@ import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewOutlineProvider
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -17,14 +19,20 @@ import android.widget.ProgressBar
 import android.widget.TextView
 
 object UiHelper {
-    val COLOR_BG = Color.parseColor("#08090E")
-    val COLOR_SIDEBAR = Color.parseColor("#10121C")
-    val COLOR_CARD = Color.parseColor("#171A26")
-    val COLOR_ACCENT = Color.parseColor("#A855F7")
-    val COLOR_BLUE = Color.parseColor("#1485F5")
+    val COLOR_BG = Color.parseColor("#080A0F")
+    val COLOR_SIDEBAR = Color.parseColor("#0F121B")
+    val COLOR_CARD = Color.parseColor("#171B28")
+    val COLOR_SURFACE_HIGH = Color.parseColor("#1F2538")
+    val COLOR_BORDER = Color.parseColor("#1EFFFFFF")
+    val COLOR_ACCENT = Color.parseColor("#9333EA")
+    val COLOR_BLUE = Color.parseColor("#1D8CF8")
     val COLOR_YELLOW = Color.parseColor("#F5C518")
-    val COLOR_RED = Color.parseColor("#E53935")
-    val COLOR_TEXT_SECONDARY = Color.parseColor("#B0B6C8")
+    val COLOR_RED = Color.parseColor("#E50914")
+    val COLOR_TEXT_SECONDARY = Color.parseColor("#A8B0C2")
+
+    fun isCompactPortrait(context: Context): Boolean =
+        BuildConfig.IS_PHONE_FLAVOR ||
+            context.resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
 
     fun dp(context: Context, value: Int): Int =
         TypedValue.applyDimension(
@@ -124,13 +132,14 @@ object UiHelper {
         view.isFocusable = true
         view.isFocusableInTouchMode = false
         view.isClickable = true
-        view.background = roundedBg(normalBgColor, radiusDp, ctx, Color.parseColor("#26FFFFFF"), 1)
+        val normalStroke = if (normalBgColor == Color.TRANSPARENT) Color.TRANSPARENT else COLOR_BORDER
+        view.background = roundedBg(normalBgColor, radiusDp, ctx, normalStroke, if (normalStroke == Color.TRANSPARENT) 0 else 1)
 
         view.setOnFocusChangeListener { v, hasFocus ->
             v.background = if (hasFocus) {
-                roundedBg(focusedBgColor, radiusDp, ctx, focusedStrokeColor, 3)
+                roundedBg(focusedBgColor, radiusDp, ctx, focusedStrokeColor, 2)
             } else {
-                roundedBg(normalBgColor, radiusDp, ctx, Color.parseColor("#26FFFFFF"), 1)
+                roundedBg(normalBgColor, radiusDp, ctx, normalStroke, if (normalStroke == Color.TRANSPARENT) 0 else 1)
             }
             val targetScale = if (hasFocus) scaleOnFocus else 1.0f
             v.scaleX = targetScale
@@ -194,7 +203,9 @@ object UiHelper {
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     cardHeight - dp(context, 8)
                 )
-                background = roundedBg(COLOR_CARD, 8, context)
+                background = roundedBg(COLOR_CARD, 10, context, COLOR_BORDER, 1)
+                outlineProvider = ViewOutlineProvider.BACKGROUND
+                clipToOutline = true
             }
 
             val imageView = ImageView(context).apply {
@@ -207,6 +218,23 @@ object UiHelper {
             }
             posterFrame.addView(imageView)
 
+            val bottomScrim = View(context).apply {
+                background = GradientDrawable(
+                    GradientDrawable.Orientation.BOTTOM_TOP,
+                    intArrayOf(
+                        Color.parseColor("#E6080A0F"),
+                        Color.parseColor("#4D080A0F"),
+                        Color.TRANSPARENT
+                    )
+                )
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    (cardHeight / 2).coerceAtLeast(dp(context, 48)),
+                    Gravity.BOTTOM
+                )
+            }
+            posterFrame.addView(bottomScrim)
+
             val badgeText = TextView(context).apply {
                 id = R.id.poster_badge
                 setTextColor(Color.WHITE)
@@ -214,15 +242,15 @@ object UiHelper {
                 typeface = Typeface.DEFAULT_BOLD
                 setSingleLine(true)
                 ellipsize = TextUtils.TruncateAt.END
-                setPadding(dp(context, 5), dp(context, 2), dp(context, 5), dp(context, 2))
-                background = roundedBg(Color.parseColor("#D9E53935"), 5, context)
+                setPadding(dp(context, 6), dp(context, 2), dp(context, 6), dp(context, 2))
+                background = roundedBg(Color.parseColor("#EBE50914"), 6, context)
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     Gravity.BOTTOM or Gravity.START
                 ).apply {
-                    leftMargin = dp(context, 5)
-                    bottomMargin = dp(context, 5)
+                    leftMargin = dp(context, 6)
+                    bottomMargin = dp(context, 6)
                 }
             }
             posterFrame.addView(badgeText)
@@ -280,6 +308,11 @@ object UiHelper {
         if (badgeStr.isNotBlank()) {
             badgeView.visibility = View.VISIBLE
             badgeView.text = badgeStr
+            badgeView.background = roundedBg(
+                if (anime.source.isMovie) Color.parseColor("#EBE50914") else Color.parseColor("#EB7C3AED"),
+                6,
+                card.context
+            )
         } else {
             badgeView.visibility = View.GONE
         }
@@ -309,7 +342,7 @@ object UiHelper {
             scoreView.visibility = View.GONE
         }
 
-        ImageLoader.load(imageView, anime.imageUrl, maxWidth = 200, maxHeight = 290)
+        ImageLoader.load(imageView, anime.imageUrl, maxWidth = 240, maxHeight = 350)
         makeFocusableButton(
             view = card,
             normalBgColor = Color.TRANSPARENT,
