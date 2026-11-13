@@ -20,7 +20,7 @@ class FilmMediaRelay(
     private val userAgent: String = CatalogService.USER_AGENT
 ) {
     private var serverSocket: ServerSocket? = null
-    private val executor = Executors.newFixedThreadPool(4)
+    private val executor = Executors.newCachedThreadPool()
     private val clients = java.util.Collections.newSetFromMap(
         java.util.concurrent.ConcurrentHashMap<Socket, Boolean>()
     )
@@ -73,13 +73,19 @@ class FilmMediaRelay(
     private fun proxyUrlFor(remoteUrl: String): String {
         val encoded = URLEncoder.encode(remoteUrl, "UTF-8")
         val clean = remoteUrl.substringBefore('?').lowercase()
-        val ext = if (clean.endsWith(".m3u8") || clean.contains("/stream/hls") || clean.contains("hls")) ".m3u8" else ""
+        val ext = when {
+            clean.endsWith(".m3u8") || clean.contains("/stream/hls") || clean.contains("hls") -> ".m3u8"
+            clean.endsWith(".vtt") -> ".vtt"
+            clean.endsWith(".srt") -> ".srt"
+            clean.endsWith(".key") -> ".key"
+            else -> ""
+        }
         return "http://127.0.0.1:$port/proxy$ext?u=$encoded"
     }
 
     private fun handleClient(client: Socket) {
         client.use { sock ->
-            sock.soTimeout = 15000
+            sock.soTimeout = 20000
             val reader = BufferedReader(InputStreamReader(sock.getInputStream(), Charsets.UTF_8))
             val requestLine = reader.readLine() ?: return
             val parts = requestLine.split(" ")
@@ -101,7 +107,7 @@ class FilmMediaRelay(
             try {
                 conn = (remote.openConnection() as HttpURLConnection).apply {
                     connectTimeout = 10000
-                    readTimeout = 15000
+                    readTimeout = 20000
                     instanceFollowRedirects = true
                     for ((k, v) in baseHeaders) {
                         setRequestProperty(k, v)
@@ -110,6 +116,14 @@ class FilmMediaRelay(
                 }
                 connections.add(conn)
                 if (!running) return
+                val code = conn.responseCode
+                val out = sock.getOutputStream()
+                if (code >= 400) {
+                    val errHeader = "HTTP/1.1 $code Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    out.write(errHeader.toByteArray(Charsets.UTF_8))
+                    out.flush()
+                    return
+                }
                 val rawBytes = conn.inputStream.use { it.readBytes() }
                 val contentType = conn.contentType ?: ""
                 val cleanTarget = targetUrl.substringBefore('?').lowercase()
@@ -118,7 +132,6 @@ class FilmMediaRelay(
                     contentType.contains("mpegurl", ignoreCase = true) ||
                     (rawBytes.size >= 7 && String(rawBytes, 0, 7, Charsets.UTF_8) == "#EXTM3U")
 
-                val out = sock.getOutputStream()
                 if (isPlaylist) {
                     val text = String(rawBytes, Charsets.UTF_8)
                     val rewritten = rewritePlaylist(text, remote)
@@ -133,12 +146,17 @@ class FilmMediaRelay(
                     val unwrapped = unwrapPng(rawBytes)
                     val isTs = cleanTarget.endsWith(".ts") ||
                         contentType.contains("mp2t", ignoreCase = true) ||
-                        (unwrapped.isNotEmpty() && unwrapped[0] == 0x47.toByte())
+                        (unwrapped.isNotEmpty() && unwrapped[0] == 0x47.toByte() &&
+                            (unwrapped.size <= 188 || unwrapped[188] == 0x47.toByte()))
+                    val isVtt = cleanTarget.endsWith(".vtt") || contentType.contains("text/vtt") ||
+                        (unwrapped.size >= 6 && String(unwrapped, 0, 6, Charsets.UTF_8) == "WEBVTT")
+                    val isSrt = cleanTarget.endsWith(".srt") || contentType.contains("subrip")
                     val mime = when {
-                        cleanTarget.endsWith(".vtt") || contentType.contains("text/vtt") -> "text/vtt"
+                        isVtt -> "text/vtt"
+                        isSrt -> "application/x-subrip"
                         cleanTarget.endsWith(".key") -> "application/octet-stream"
                         isTs -> "video/mp2t"
-                        contentType.isNotBlank() && !contentType.startsWith("image/") -> contentType
+                        contentType.isNotBlank() && !contentType.startsWith("image/") && !contentType.startsWith("text/plain") -> contentType
                         else -> "video/mp4"
                     }
 
@@ -202,6 +220,7 @@ class FilmMediaRelay(
                 if (data[i] != PNG_SIG[i]) return data
             }
             var offset = 8
+            var tsChunks: java.io.ByteArrayOutputStream? = null
             while (offset + 12 <= data.size) {
                 val length = ((data[offset].toInt() and 0xFF) shl 24) or
                     ((data[offset + 1].toInt() and 0xFF) shl 16) or
@@ -209,16 +228,26 @@ class FilmMediaRelay(
                     (data[offset + 3].toInt() and 0xFF)
                 if (length < 0 || length > data.size - offset - 12) return data
                 val end = offset + 12 + length
-                if (data[offset + 4] == 'I'.code.toByte() &&
+                if (data[offset + 4] == 't'.code.toByte() &&
+                    data[offset + 5] == 's'.code.toByte() &&
+                    data[offset + 6] == 'D'.code.toByte() &&
+                    data[offset + 7] == 'a'.code.toByte()
+                ) {
+                    if (tsChunks == null) tsChunks = java.io.ByteArrayOutputStream(length)
+                    tsChunks.write(data, offset + 8, length)
+                } else if (data[offset + 4] == 'I'.code.toByte() &&
                     data[offset + 5] == 'E'.code.toByte() &&
                     data[offset + 6] == 'N'.code.toByte() &&
                     data[offset + 7] == 'D'.code.toByte()
                 ) {
+                    if (tsChunks != null && tsChunks.size() > 0) {
+                        return tsChunks.toByteArray()
+                    }
                     return if (end < data.size) data.copyOfRange(end, data.size) else data
                 }
                 offset = end
             }
-            return data
+            return if (tsChunks != null && tsChunks.size() > 0) tsChunks.toByteArray() else data
         }
 
         private fun parseRange(header: String?, total: Int): IntRange? {

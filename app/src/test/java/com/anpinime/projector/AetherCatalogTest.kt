@@ -55,8 +55,17 @@ class AetherCatalogTest {
         """.trimIndent()
 
         val domains = AetherCatalog.parseDomainsFromRentryHtml(sampleHtml)
-        assertEquals(listOf("https://aether.st", "https://aether.ist", "https://aether.cx"), domains)
+        assertEquals(listOf("https://aether.st", "https://aether.ist"), domains)
+        assertFalse(domains.contains("https://aether.cx"))
         assertFalse(domains.contains("https://aether.mom"))
+
+        val onlyYellowHtml = """
+            <table><tbody>
+                <tr><td><a href="https://aether.mom">aether.mom</a></td><td>❌</td></tr>
+                <tr><td><a href="https://aether.cx">aether.cx</a></td><td>🟡</td></tr>
+            </tbody></table>
+        """.trimIndent()
+        assertEquals(listOf("https://aether.cx"), AetherCatalog.parseDomainsFromRentryHtml(onlyYellowHtml))
     }
 
     @Test
@@ -178,6 +187,7 @@ class AetherCatalogTest {
         assertNotNull(tvDetail)
         assertEquals(2, tvDetail!!.episodes.size)
         assertEquals("https://aether.st/media/tmdb-tv-1399/3624/63056", tvDetail.episodes[0].url)
+        assertEquals("aether_stream", tvDetail.episodes[0].playbackKind)
         assertEquals("3624", tvDetail.episodes[0].seasonId)
         assertEquals("63056", tvDetail.episodes[0].episodeId)
         assertEquals(1, tvDetail.episodes[0].seasonNum)

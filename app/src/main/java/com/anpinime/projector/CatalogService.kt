@@ -697,61 +697,11 @@ object CatalogService {
         preferredServerId: String = "auto",
         onProgress: ((sourceName: String, current: Int, total: Int) -> Unit)? = null
     ): ResolvedPlayback {
-        return try {
-            AetherSourceResolver.resolve(
-                episode = episode,
-                preferredServerId = preferredServerId,
-                onProgress = onProgress
-            )
-        } catch (_: Throwable) {
-            val domains = refreshAetherDomains(false)
-            val primaryDomain = domains.firstOrNull() ?: AetherCatalog.FALLBACK_DOMAINS.first()
-            val selectedDomain = AetherCatalog.normalizeHttpsDomain(episode.refererUrl)
-                ?: AetherCatalog.normalizeHttpsDomain(episode.url)
-                ?: primaryDomain
-
-            val targetWebUrl = when {
-                episode.slug.startsWith("tv:", ignoreCase = true) -> {
-                    val showId = episode.slug.substringAfter(':')
-                    val sId = episode.seasonId.ifEmpty { episode.seasonNum.coerceAtLeast(1).toString() }
-                    val eId = episode.episodeId.ifEmpty { episode.episodeNum.coerceAtLeast(1).toString() }
-                    AetherCatalog.buildTvEpisodeUrl(showId, sId, eId, selectedDomain)
-                }
-                episode.slug.startsWith("movie:", ignoreCase = true) -> {
-                    val movieId = episode.slug.substringAfter(':')
-                    AetherCatalog.buildMovieUrl(movieId, selectedDomain)
-                }
-                else -> {
-                    val ref = AetherCatalog.parseMediaRef(episode.url.ifBlank { episode.directUrl })
-                    if (ref != null) {
-                        if (ref.mediaType == "tv") {
-                            val sId = episode.seasonId.ifEmpty { ref.seasonId.ifEmpty { "1" } }
-                            val eId = episode.episodeId.ifEmpty { ref.episodeId.ifEmpty { "1" } }
-                            AetherCatalog.buildTvEpisodeUrl(ref.tmdbId, sId, eId, selectedDomain)
-                        } else {
-                            AetherCatalog.buildMovieUrl(ref.tmdbId, selectedDomain)
-                        }
-                    } else {
-                        episode.url.ifBlank { episode.directUrl }
-                    }
-                }
-            }
-
-            val headers = mapOf(
-                "User-Agent" to USER_AGENT,
-                "Referer" to "$selectedDomain/"
-            )
-
-            ResolvedPlayback(
-                url = targetWebUrl,
-                headers = headers,
-                isF4kWrapped = false,
-                isWeb = true,
-                webUrl = targetWebUrl,
-                mediaKind = StreamMediaKind.UNKNOWN,
-                subtitles = emptyList()
-            )
-        }
+        return AetherSourceResolver.resolve(
+            episode = episode,
+            preferredServerId = preferredServerId,
+            onProgress = onProgress
+        )
     }
 
     // =========================================================================

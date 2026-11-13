@@ -49,6 +49,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
@@ -57,7 +58,10 @@ import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.dash.DashMediaSource
 import androidx.media3.exoplayer.hls.DefaultHlsExtractorFactory
 import androidx.media3.exoplayer.hls.HlsMediaSource
+import androidx.media3.exoplayer.source.MediaSource
+import androidx.media3.exoplayer.source.MergingMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.exoplayer.source.SingleSampleMediaSource
 import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
@@ -69,6 +73,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
+import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -93,8 +98,10 @@ class PlayerActivity : AppCompatActivity() {
 
     private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var resolveJob: Job? = null
+    private var translateSubJob: Job? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private val attemptedStreamUrls = HashSet<String>()
+    private val triedAetherScrapers = HashSet<String>()
 
     private var movieTitle: String = ""
     private lateinit var currentEpisode: Episode
@@ -174,7 +181,7 @@ class PlayerActivity : AppCompatActivity() {
     private var selectionDialog: AlertDialog? = null
 
     private fun isAetherEpisode(ep: Episode = currentEpisode): Boolean {
-        return ep.source == ContentSource.AETHER || ep.playbackKind.equals("aether_web", ignoreCase = true)
+        return ep.source == ContentSource.AETHER || ep.playbackKind.startsWith("aether", ignoreCase = true)
     }
 
     private val commitPendingSeekRunnable = Runnable {
@@ -236,6 +243,7 @@ class PlayerActivity : AppCompatActivity() {
         super.onDestroy()
         mainHandler.removeCallbacksAndMessages(null)
         resolveJob?.cancel()
+        translateSubJob?.cancel()
         uiScope.cancel()
         selectionDialog?.dismiss()
         releasePlayer()
@@ -1000,8 +1008,16 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
-    private fun selectAetherProvider(providerId: String, providerName: String) {
+    private fun selectAetherProvider(
+        providerId: String,
+        providerName: String,
+        resetTried: Boolean = true
+    ) {
         currentAetherProviderId = providerId
+        if (resetTried) triedAetherScrapers.clear()
+        if (providerId != "auto") {
+            triedAetherScrapers.add(providerId.lowercase(Locale.US))
+        }
         val resumePos = exoPlayer?.currentPosition ?: webPositionMs
         releasePlayer(stopRelay = false)
         destroyWebPlayer(force = true)
@@ -1052,6 +1068,11 @@ class PlayerActivity : AppCompatActivity() {
         initialPositionMs: Long = 0L
     ) {
         val generation = ++playbackGeneration
+        val prevSlug = if (::currentEpisode.isInitialized) currentEpisode.slug else ""
+        if (episode.slug != prevSlug || resetPosition) {
+            triedAetherScrapers.clear()
+        }
+        translateSubJob?.cancel()
         releasePlayer()
         preferSoftwareAudio = false
         currentEpisode = episode
@@ -1088,6 +1109,9 @@ class PlayerActivity : AppCompatActivity() {
                 } else {
                     episode.episodeKey.takeIf { it.isNotBlank() && it != "auto" } ?: "auto"
                 }
+                if (activeServerId != "auto") {
+                    triedAetherScrapers.add(activeServerId.lowercase(Locale.US))
+                }
 
                 val resolved = withContext(Dispatchers.IO) {
                     CatalogService.resolvePlayback(
@@ -1105,9 +1129,16 @@ class PlayerActivity : AppCompatActivity() {
                     )
                 }
                 if (generation != playbackGeneration) return@launch
+                if (resolved.providerId.isNotBlank()) {
+                    triedAetherScrapers.add(resolved.providerId.lowercase(Locale.US))
+                    val pName = AetherSourceResolver.SERVERS.firstOrNull {
+                        it.id.equals(resolved.providerId, ignoreCase = true)
+                    }?.name ?: resolved.providerId
+                    topServerText.text = "${episode.title} • Nguồn $pName"
+                }
                 lastWebUrl = resolved.webUrl.ifBlank { episode.url }
                 attemptedStreamUrls.add(resolved.url)
-                if (resolved.isWeb) {
+                if (resolved.isWeb && !aetherMode) {
                     val resumeSeekMs = if (resetPosition) 0L else initialPositionMs
                     startWebFallback(resolved.url, resolved.headers["Referer"] ?: episode.url, resumeSeekMs)
                     return@launch
@@ -1142,11 +1173,11 @@ class PlayerActivity : AppCompatActivity() {
                 if (t is CancellationException) throw t
                 if (generation != playbackGeneration) return@launch
                 if (!trySwitchToBackupServer(0L)) {
-                    if (episode.url.startsWith("http", ignoreCase = true) && !episode.source.isMovie) {
+                    if (!isAetherEpisode(episode) && episode.url.startsWith("http", ignoreCase = true) && !episode.source.isMovie) {
                         startWebFallback(episode.url, CatalogService.currentAnimeBaseUrl())
                     } else {
                         loadingOverlay.visibility = View.VISIBLE
-                        loadingText.text = "Lỗi tải luồng: ${t.message}\nBấm phím Lên/Xuống -> Đổi Server khác."
+                        loadingText.text = "Không tải được luồng phát: ${t.message ?: "Nguồn tạm thời không phản hồi"}\nBấm phím Lên/Xuống -> Đổi Server khác."
                         showOsd(focusPlayButton = true)
                     }
                 }
@@ -1190,13 +1221,13 @@ class PlayerActivity : AppCompatActivity() {
 
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                10_000, // minBufferMs
-                28_000, // maxBufferMs
-                1_500,  // bufferForPlaybackMs (fast start after seek!)
-                3_000   // bufferForPlaybackAfterRebufferMs
+                15_000, // minBufferMs (prevents 3s stalls on 1080p HLS segments)
+                45_000, // maxBufferMs
+                2_500,  // bufferForPlaybackMs
+                4_000   // bufferForPlaybackAfterRebufferMs
             )
-            .setTargetBufferBytes(14 * 1024 * 1024)
-            .setPrioritizeTimeOverSizeThresholds(false)
+            .setTargetBufferBytes(32 * 1024 * 1024)
+            .setPrioritizeTimeOverSizeThresholds(true)
             .build()
 
         val renderersFactory = ProjectorRenderersFactory(this)
@@ -1215,13 +1246,22 @@ class PlayerActivity : AppCompatActivity() {
         WebViewHelper.getCookieHeader(streamUrl)?.let { mergedHeaders["Cookie"] = it }
         lastNativeHeaders = mergedHeaders
 
-        val ua = headers["User-Agent"] ?: "Mozilla/5.0"
+        val ua = headers["User-Agent"] ?: AetherSourceResolver.USER_AGENT
         val httpFactory = DefaultHttpDataSource.Factory()
             .setUserAgent(ua)
             .setConnectTimeoutMs(15_000)
-            .setReadTimeoutMs(20_000)
+            .setReadTimeoutMs(25_000)
             .setAllowCrossProtocolRedirects(true)
             .setDefaultRequestProperties(mergedHeaders)
+
+        // External subtitle sources must NOT inherit video CDN Origin/Referer headers
+        val subHttpFactory = DefaultHttpDataSource.Factory()
+            .setUserAgent(AetherSourceResolver.USER_AGENT)
+            .setConnectTimeoutMs(10_000)
+            .setReadTimeoutMs(15_000)
+            .setAllowCrossProtocolRedirects(true)
+            .setDefaultRequestProperties(mapOf("X-User-Agent" to AetherSourceResolver.OPENSUBTITLES_UA))
+        val subDataSourceFactory = DefaultDataSource.Factory(this, subHttpFactory)
 
         val cleanLower = streamUrl.lowercase()
         val effectiveKind = if (mediaKind != StreamMediaKind.UNKNOWN) {
@@ -1239,18 +1279,37 @@ class PlayerActivity : AppCompatActivity() {
             }
         }
 
+        val firstVietIdx = subtitles.indexOfFirst {
+            it.language.lowercase().startsWith("vi") ||
+                it.label.lowercase().contains("việt") ||
+                it.label.lowercase().contains("viet")
+        }
+        val firstEngIdx = subtitles.indexOfFirst {
+            it.language.lowercase().startsWith("en") ||
+                it.label.lowercase().contains("english")
+        }
         val subtitleConfigs = subtitles.mapIndexed { idx, sub ->
             val subMime = sub.mimeType ?: when {
                 sub.url.lowercase().contains(".vtt") -> MimeTypes.TEXT_VTT
                 sub.url.lowercase().contains(".ass") || sub.url.lowercase().contains(".ssa") -> MimeTypes.TEXT_SSA
                 else -> MimeTypes.APPLICATION_SUBRIP
             }
-            val isViet = sub.language.lowercase().startsWith("vi") || sub.label.lowercase().contains("viet")
+            val isViet = sub.language.lowercase().startsWith("vi") ||
+                sub.label.lowercase().contains("việt") ||
+                sub.label.lowercase().contains("viet")
+            val isEng = sub.language.lowercase().startsWith("en") ||
+                sub.label.lowercase().contains("english")
+            val flags = when {
+                firstVietIdx >= 0 && idx == firstVietIdx -> C.SELECTION_FLAG_DEFAULT or C.SELECTION_FLAG_AUTOSELECT
+                firstVietIdx < 0 && firstEngIdx >= 0 && idx == firstEngIdx -> C.SELECTION_FLAG_DEFAULT or C.SELECTION_FLAG_AUTOSELECT
+                isViet || isEng -> C.SELECTION_FLAG_AUTOSELECT
+                else -> 0
+            }
             MediaItem.SubtitleConfiguration.Builder(Uri.parse(sub.url))
                 .setMimeType(subMime)
                 .setLanguage(sub.language)
                 .setLabel(sub.label)
-                .setSelectionFlags(if (idx == 0 || isViet) C.SELECTION_FLAG_DEFAULT else 0)
+                .setSelectionFlags(flags)
                 .build()
         }
 
@@ -1263,22 +1322,24 @@ class PlayerActivity : AppCompatActivity() {
                     StreamMediaKind.MKV -> setMimeType(MimeTypes.VIDEO_MATROSKA)
                     else -> {}
                 }
-                if (subtitleConfigs.isNotEmpty()) {
-                    setSubtitleConfigurations(subtitleConfigs)
-                }
             }
             .build()
 
-        val mediaSource = when (effectiveKind) {
+        val aetherStream = isAetherEpisode()
+        val videoMediaSource: MediaSource = when (effectiveKind) {
             StreamMediaKind.HLS -> {
-                val hlsExtractorFactory = DefaultHlsExtractorFactory(
-                    DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
-                        DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS,
-                    true
-                )
+                val hlsExtractorFactory = if (aetherStream) {
+                    DefaultHlsExtractorFactory(0, true)
+                } else {
+                    DefaultHlsExtractorFactory(
+                        DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
+                            DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS,
+                        true
+                    )
+                }
                 HlsMediaSource.Factory(httpFactory)
                     .setExtractorFactory(hlsExtractorFactory)
-                    .setAllowChunklessPreparation(false)
+                    .setAllowChunklessPreparation(aetherStream)
                     .createMediaSource(mediaItem)
             }
             StreamMediaKind.DASH -> {
@@ -1290,6 +1351,19 @@ class PlayerActivity : AppCompatActivity() {
                     DefaultExtractorsFactory().setConstantBitrateSeekingEnabled(true)
                 ).createMediaSource(mediaItem)
             }
+        }
+
+        val mediaSource: MediaSource = if (subtitleConfigs.isEmpty()) {
+            videoMediaSource
+        } else {
+            val singleSampleFactory = SingleSampleMediaSource.Factory(subDataSourceFactory)
+                .setTreatLoadErrorsAsEndOfStream(true)
+            val allSources = ArrayList<MediaSource>(1 + subtitleConfigs.size)
+            allSources.add(videoMediaSource)
+            for (cfg in subtitleConfigs) {
+                allSources.add(singleSampleFactory.createMediaSource(cfg, C.TIME_UNSET))
+            }
+            MergingMediaSource(*allSources.toTypedArray())
         }
 
         val player = ExoPlayer.Builder(this, renderersFactory)
@@ -1382,6 +1456,14 @@ class PlayerActivity : AppCompatActivity() {
                 } else {
                     mainHandler.post {
                         if (exoPlayer !== player) return@post
+                        if (isAetherEpisode()) {
+                            if (!trySwitchToBackupServer(lastPos)) {
+                                loadingOverlay.visibility = View.VISIBLE
+                                loadingText.text = "Các máy chủ Aether tạm thời gián đoạn.\nHãy chọn [Đổi Server] ở thanh bên dưới."
+                                showOsd(focusPlayButton = true)
+                            }
+                            return@post
+                        }
                         if (currentEpisode.source.isMovie) {
                             if (!trySwitchToBackupServer(lastPos)) startCompatibilityPlayback(lastPos)
                             return@post
@@ -3411,31 +3493,26 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun trySwitchToBackupServer(resumePosMs: Long): Boolean {
-        if (currentEpisode.source == ContentSource.AETHER) {
-            val domains = AetherCatalog.getActiveDomains(this)
-            val currentUrl = lastWebUrl.ifBlank { currentEpisode.url }
-            val currentHost = runCatching { Uri.parse(currentUrl).host?.lowercase().orEmpty() }.getOrDefault("")
-            val currentIdx = domains.indexOfFirst { d ->
-                runCatching { Uri.parse(d).host?.lowercase() == currentHost }.getOrDefault(false)
-            }
-            val nextDomain: String? = if (currentIdx >= 0 && currentIdx + 1 < domains.size) {
-                domains[currentIdx + 1]
-            } else null
-            if (nextDomain != null) {
-                val nextUrl = AetherCatalog.rewriteUrlToDomain(currentUrl, nextDomain)
-                lastWebUrl = nextUrl
-                val hostLabel = runCatching { Uri.parse(nextDomain).host }.getOrNull() ?: nextDomain
-                topServerText.text = "${currentEpisode.title} • Server dự phòng ($hostLabel)"
-                currentEpisode = currentEpisode.copy(
-                    url = nextUrl,
-                    directUrl = nextUrl,
-                    refererUrl = nextDomain
-                )
-                populateServerDrawer()
-                startWebFallback(nextUrl, nextDomain, resumePosMs)
-                return true
-            }
-            return false
+        if (isAetherEpisode()) {
+            val nextServer = AetherSourceResolver.SERVERS.firstOrNull { srv ->
+                srv.id != "auto" && !triedAetherScrapers.contains(srv.id.lowercase(Locale.US))
+            } ?: return false
+            triedAetherScrapers.add(nextServer.id.lowercase(Locale.US))
+            val savedTried = HashSet(triedAetherScrapers)
+            currentAetherProviderId = nextServer.id
+            val resumePos = exoPlayer?.currentPosition?.takeIf { it > 0L } ?: resumePosMs
+            releasePlayer()
+            destroyWebPlayer(force = true)
+            updateScrapingOverlay(nextServer.name, nextServer.id, "Đang chuyển sang nguồn ${nextServer.name}…", 0)
+            val targetEp = currentEpisode.copy(
+                episodeKey = nextServer.id,
+                season = "Server · ${nextServer.name}",
+                serverName = nextServer.name
+            )
+            triedAetherScrapers.clear()
+            triedAetherScrapers.addAll(savedTried)
+            startEpisodePlayback(targetEp, resetPosition = false, initialPositionMs = resumePos)
+            return true
         }
         // Film4K's "Phần" denotes real seasons, not interchangeable servers.
         if (currentEpisode.source == ContentSource.FILM4K && currentEpisode.seasonNum > 0) return false
@@ -3551,12 +3628,197 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun triggerAetherVietnameseTranslation() {
-        if (fallbackWebView == null) {
-            showPlayerMessage("Dịch phụ đề", "Trình phát Aether chưa sẵn sàng.")
+        val player = exoPlayer
+        if (player == null || lastNativeUrl.isBlank()) {
+            showPlayerMessage("Dịch phụ đề", "Hãy đợi video bắt đầu phát rồi thử dịch lại.")
             return
         }
-        val command = JSONObject().put("type", "AnPinimeCommand").put("name", "translateVi")
-        fallbackWebView?.evaluateJavascript("window.postMessage($command, '*');", null)
+        val alreadyTranslated = lastSubtitles.firstOrNull {
+            it.url.startsWith("file://") && it.language == "vi"
+        }
+        if (alreadyTranslated != null) {
+            showPlayerMessage("Phụ đề Tiếng Việt", "Phụ đề dịch AI Tiếng Việt đã được nạp sẵn cho tập phim này.")
+            return
+        }
+
+        translateSubJob?.cancel()
+        loadingOverlay.visibility = View.VISIBLE
+        loadingText.text = "🌐 Đang tải & dịch phụ đề sang Tiếng Việt…"
+        translateSubJob = uiScope.launch {
+            try {
+                val vttFile = withContext(Dispatchers.IO) {
+                    buildTranslatedVietnameseVtt()
+                }
+                if (vttFile == null) {
+                    loadingOverlay.visibility = View.GONE
+                    showPlayerMessage("Dịch phụ đề", "Không tìm thấy phụ đề nguồn (English/SRT/VTT) để dịch sang Tiếng Việt.")
+                    return@launch
+                }
+                val newTrack = ExternalSubtitleTrack(
+                    url = Uri.fromFile(vttFile).toString(),
+                    language = "vi",
+                    label = "🇻🇳 Tiếng Việt (AI Dịch)",
+                    mimeType = MimeTypes.TEXT_VTT
+                )
+                val merged = listOf(newTrack) + lastSubtitles.filterNot { it.url == newTrack.url }
+                val pos = exoPlayer?.currentPosition?.coerceAtLeast(0L) ?: 0L
+                loadingOverlay.visibility = View.GONE
+                prepareExoPlayer(
+                    streamUrl = lastNativeUrl,
+                    headers = lastNativeHeaders,
+                    seekMs = pos,
+                    mediaKind = lastMediaKind,
+                    subtitles = merged
+                )
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                loadingOverlay.visibility = View.GONE
+                showPlayerMessage("Dịch phụ đề", "Không thể dịch phụ đề lúc này: ${t.message ?: "Lỗi mạng"}")
+            }
+        }
+    }
+
+    private fun buildTranslatedVietnameseVtt(): File? {
+        val candidate = lastSubtitles.firstOrNull {
+            it.language.lowercase(Locale.US).startsWith("en")
+        } ?: lastSubtitles.firstOrNull()
+
+        val rawText = if (candidate != null) {
+            fetchTextUrl(
+                candidate.url,
+                mapOf(
+                    "User-Agent" to AetherSourceResolver.USER_AGENT,
+                    "X-User-Agent" to AetherSourceResolver.OPENSUBTITLES_UA
+                )
+            )
+        } else {
+            fetchEmbeddedHlsVtt(lastNativeUrl, lastNativeHeaders)
+        } ?: return null
+
+        val cues = parseSubtitleCues(rawText)
+        if (cues.isEmpty()) return null
+
+        val translatedCues = translateCuesToVietnamese(cues)
+        val outDir = File(cacheDir, "aether_subs").apply { mkdirs() }
+        val key = (currentEpisode.slug.ifBlank { lastNativeUrl }).hashCode().toString()
+        val outFile = File(outDir, "vi_$key.vtt")
+        val sb = StringBuilder("WEBVTT\n\n")
+        for ((idx, cue) in translatedCues.withIndex()) {
+            sb.append(idx + 1).append('\n')
+            sb.append(cue.first).append('\n')
+            sb.append(cue.second).append("\n\n")
+        }
+        outFile.writeText(sb.toString(), Charsets.UTF_8)
+        return outFile
+    }
+
+    private fun fetchTextUrl(url: String, headers: Map<String, String>): String? {
+        if (url.startsWith("file://")) {
+            return runCatching { File(Uri.parse(url).path ?: return null).readText(Charsets.UTF_8) }.getOrNull()
+        }
+        val req = Request.Builder().url(url).apply {
+            for ((k, v) in headers) header(k, v)
+            if (headers.keys.none { it.equals("User-Agent", ignoreCase = true) }) {
+                header("User-Agent", AetherSourceResolver.USER_AGENT)
+            }
+        }.build()
+        return runCatching {
+            aetherHttpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) null else resp.body?.string()
+            }
+        }.getOrNull()
+    }
+
+    private fun fetchEmbeddedHlsVtt(masterUrl: String, headers: Map<String, String>): String? {
+        if (!masterUrl.contains(".m3u8", ignoreCase = true) && !masterUrl.contains("m3u8", ignoreCase = true)) {
+            return null
+        }
+        val masterText = fetchTextUrl(masterUrl, headers) ?: return null
+        val uriRegex = Regex("""TYPE=SUBTITLES[^\n]*URI="([^"]+)"""")
+        val subRel = uriRegex.find(masterText)?.groupValues?.get(1) ?: return null
+        val subPlUrl = java.net.URI(masterUrl).resolve(subRel).toString()
+        val subPlText = fetchTextUrl(subPlUrl, headers) ?: return null
+        val segRel = subPlText.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() && !it.startsWith("#") }
+            ?: return null
+        val vttUrl = java.net.URI(subPlUrl).resolve(segRel).toString()
+        return fetchTextUrl(vttUrl, headers)
+    }
+
+    private fun parseSubtitleCues(rawText: String): List<Pair<String, String>> {
+        val clean = rawText.removePrefix("\uFEFF").replace("\r\n", "\n").replace("\r", "\n")
+        val blocks = clean.split(Regex("""\n{2,}"""))
+        val tsRegex = Regex("""^((?:\d{1,2}:)?\d{2}:\d{2}[.,]\d{3})\s*-->\s*((?:\d{1,2}:)?\d{2}:\d{2}[.,]\d{3}.*)$""")
+        val cues = ArrayList<Pair<String, String>>()
+        for (block in blocks) {
+            val lines = block.trim().lines()
+            if (lines.isEmpty()) continue
+            val tsIdx = lines.indexOfFirst { tsRegex.containsMatchIn(it.trim()) }
+            if (tsIdx < 0 || tsIdx + 1 >= lines.size) continue
+            val match = tsRegex.find(lines[tsIdx].trim()) ?: continue
+            val start = match.groupValues[1].replace(',', '.')
+            val end = match.groupValues[2].replace(',', '.')
+            val normalizedStart = if (start.count { it == ':' } == 1) "00:$start" else start
+            val normalizedEnd = if (end.substringBefore(' ').count { it == ':' } == 1) "00:$end" else end
+            val text = lines.drop(tsIdx + 1).joinToString("\n")
+                .replace(Regex("""<[^>]+>"""), "")
+                .trim()
+            if (text.isNotEmpty()) {
+                cues.add("$normalizedStart --> $normalizedEnd" to text)
+            }
+        }
+        return cues
+    }
+
+    private fun translateCuesToVietnamese(cues: List<Pair<String, String>>): List<Pair<String, String>> {
+        val result = ArrayList<Pair<String, String>>(cues.size)
+        val batchSize = 25
+        var i = 0
+        while (i < cues.size) {
+            val end = (i + batchSize).coerceAtMost(cues.size)
+            val batch = cues.subList(i, end)
+            val joined = batch.joinToString("\n@@\n") { it.second.replace("@@", "@") }
+            val translated = translateBatchViaGtx(joined)
+            val parts = translated?.split(Regex("""\s*@@\s*"""))
+            if (parts != null && parts.size == batch.size) {
+                for (j in batch.indices) {
+                    result.add(batch[j].first to parts[j].trim().ifEmpty { batch[j].second })
+                }
+            } else {
+                // Split smaller if Google merged a separator
+                for (item in batch) {
+                    val single = translateBatchViaGtx(item.second)?.trim()?.ifEmpty { item.second } ?: item.second
+                    result.add(item.first to single)
+                }
+            }
+            i = end
+        }
+        return result
+    }
+
+    private fun translateBatchViaGtx(text: String): String? {
+        return runCatching {
+            val body = FormBody.Builder()
+                .add("q", text)
+                .build()
+            val req = Request.Builder()
+                .url("https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=vi&dt=t")
+                .post(body)
+                .header("User-Agent", AetherSourceResolver.USER_AGENT)
+                .build()
+            aetherHttpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@runCatching null
+                val raw = resp.body?.string().orEmpty()
+                val outer = JSONArray(raw)
+                val segs = outer.optJSONArray(0) ?: return@runCatching null
+                val sb = StringBuilder()
+                for (k in 0 until segs.length()) {
+                    val seg = segs.optJSONArray(k) ?: continue
+                    val piece = seg.optString(0)
+                    if (piece.isNotEmpty() && piece != "null") sb.append(piece)
+                }
+                sb.toString()
+            }
+        }.getOrNull()
     }
 
     private fun openAetherNativeMenu(route: String) {
@@ -3716,6 +3978,15 @@ class PlayerActivity : AppCompatActivity() {
             "de", "deu", "ger", "german" -> "Tiếng Đức"
             "es", "spa", "spanish" -> "Tiếng Tây Ban Nha"
             "ru", "rus", "russian" -> "Tiếng Nga"
+            "pt", "por", "portuguese" -> "Tiếng Bồ Đào Nha"
+            "it", "ita", "italian" -> "Tiếng Ý"
+            "ar", "ara", "arabic" -> "Tiếng Ả Rập"
+            "id", "ind", "indonesian" -> "Tiếng Indonesia"
+            "tr", "tur", "turkish" -> "Tiếng Thổ Nhĩ Kỳ"
+            "nl", "nld", "dut", "dutch" -> "Tiếng Hà Lan"
+            "pl", "pol", "polish" -> "Tiếng Ba Lan"
+            "hi", "hin", "hindi" -> "Tiếng Hindi"
+            "uk", "ukr", "ukrainian" -> "Tiếng Ukraine"
             else -> code
         }
     }

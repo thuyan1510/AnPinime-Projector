@@ -264,5 +264,6 @@ data class ResolvedPlayback(
     val isWeb: Boolean = false,
     val webUrl: String = "",
     val mediaKind: StreamMediaKind = StreamMediaKind.UNKNOWN,
-    val subtitles: List<ExternalSubtitleTrack> = emptyList()
+    val subtitles: List<ExternalSubtitleTrack> = emptyList(),
+    val providerId: String = ""
 )

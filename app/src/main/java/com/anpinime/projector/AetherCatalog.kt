@@ -21,12 +21,10 @@ object AetherCatalog {
         "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI1YjEwYWNhZDFhNjY3ZTQwMDEyMGVjMTc1ZDBjZTFmZCIsIm5iZiI6MTcyNDk1Mjg3MC45NDA4NDcsInN1YiI6IjY2ZDBhOTgyODQ1OWYzM2FmMjBmYjdkNSIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.ScGHs1VZTLGpUKWPG7EA-2T29OPcqW_qpJjKL5Yhrjc"
 
     val FALLBACK_DOMAINS: List<String> = listOf(
-        "https://aether.st",
-        "https://aether.ist",
-        "https://aether.cx"
+        "https://aether.st"
     )
 
-    private const val PREF_NAME = "anpinime_aether_domains"
+    private const val PREF_NAME = "anpinime_aether_domains_v2"
     private const val PREF_KEY_DOMAINS_JSON = "domains_json"
     private const val PREF_KEY_PRIMARY_DOMAIN = "primary_domain"
     private const val PREF_KEY_UPDATED_AT = "updated_at_ms"
@@ -125,12 +123,8 @@ object AetherCatalog {
             }
         }
 
-        val combined = ArrayList<String>(preferred.size + secondary.size)
-        combined.addAll(preferred)
-        for (d in secondary) {
-            if (!combined.contains(d)) combined.add(d)
-        }
-        return combined
+        // Prefer ONLY ✅ active domains whenever present; fall back to 🟡/redirect only if none are ✅
+        return if (preferred.isNotEmpty()) preferred.toList() else secondary.toList()
     }
 
     fun getActiveDomains(context: Context? = null): List<String> {
@@ -152,7 +146,7 @@ object AetherCatalog {
         val updated = LinkedHashSet<String>()
         updated.add(normalized)
         updated.addAll(cachedDomains)
-        updated.addAll(FALLBACK_DOMAINS)
+        if (updated.isEmpty()) updated.addAll(FALLBACK_DOMAINS)
         cachedDomains = updated.toList()
         if (context != null) {
             context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
@@ -176,8 +170,10 @@ object AetherCatalog {
                     normalizeHttpsDomain(arr.optString(i))?.let { list.add(it) }
                 }
             }
-            for (fb in FALLBACK_DOMAINS) {
-                normalizeHttpsDomain(fb)?.let { list.add(it) }
+            if (list.isEmpty()) {
+                for (fb in FALLBACK_DOMAINS) {
+                    normalizeHttpsDomain(fb)?.let { list.add(it) }
+                }
             }
             if (list.isNotEmpty()) {
                 cachedDomains = list.toList()
@@ -211,16 +207,17 @@ object AetherCatalog {
         } catch (_: Throwable) {
             null
         }
-        if (!html.isNullOrBlank()) {
-            for (d in parseDomainsFromRentryHtml(html)) {
-                candidates.add(d)
+        val liveDomains = if (!html.isNullOrBlank()) parseDomainsFromRentryHtml(html) else emptyList()
+        for (d in liveDomains) {
+            candidates.add(d)
+        }
+        if (candidates.isEmpty()) {
+            for (d in cachedDomains) {
+                normalizeHttpsDomain(d)?.let { candidates.add(it) }
             }
-        }
-        for (d in cachedDomains) {
-            normalizeHttpsDomain(d)?.let { candidates.add(it) }
-        }
-        for (fb in FALLBACK_DOMAINS) {
-            normalizeHttpsDomain(fb)?.let { candidates.add(it) }
+            for (fb in FALLBACK_DOMAINS) {
+                normalizeHttpsDomain(fb)?.let { candidates.add(it) }
+            }
         }
 
         val ordered = if (reachabilityProbe != null) {
@@ -731,7 +728,7 @@ object AetherCatalog {
                                         season = seasonLabel,
                                         qualityBadge = "FHD · Auto Sub Việt",
                                         source = source,
-                                        playbackKind = "aether_web",
+                                        playbackKind = "aether_stream",
                                         slug = "tv:$showIdStr",
                                         seasonNum = sInfo.seasonNumber,
                                         episodeNum = epNum,
@@ -766,7 +763,7 @@ object AetherCatalog {
                                 season = seasonLabel,
                                 qualityBadge = "FHD · Auto Sub Việt",
                                 source = source,
-                                playbackKind = "aether_web",
+                                playbackKind = "aether_stream",
                                 slug = "tv:$showIdStr",
                                 seasonNum = sInfo.seasonNumber,
                                 episodeNum = epNum,
@@ -796,7 +793,7 @@ object AetherCatalog {
                         season = "Mùa 1",
                         qualityBadge = "FHD · Auto Sub Việt",
                         source = source,
-                        playbackKind = "aether_web",
+                        playbackKind = "aether_stream",
                         slug = "tv:$showIdStr",
                         seasonNum = 1,
                         episodeNum = 1,

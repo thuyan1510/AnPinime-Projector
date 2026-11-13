@@ -1,23 +1,35 @@
 package com.anpinime.projector
 
-import android.net.Uri
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.URI
 import java.net.URLEncoder
+import java.util.Locale
+import java.util.concurrent.Callable
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 object AetherSourceResolver {
     const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
     const val DEFAULT_ORIGIN = "https://aether.st"
     const val DEFAULT_REFERER = "https://aether.st/"
-    const val PROXY_JUST = "https://just.raccoonunbutteredbagel.zip/m3u8-proxy"
-    const val PROXY_JUSTICE = "https://justice.raccoonunbutteredbagel.zip/m3u8-proxy"
+    const val OPENSUBTITLES_UA = "VLSub 0.10.2"
+
+    fun activeOrigin(): String = AetherCatalog.getPrimaryDomain().trimEnd('/')
+    fun activeReferer(): String = "${activeOrigin()}/"
 
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(6, TimeUnit.SECONDS)
         .readTimeout(8, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .build()
+
+    private val probeClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(6, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
@@ -30,20 +42,11 @@ object AetherSourceResolver {
     )
 
     val SERVERS: List<ServerOption> = listOf(
-        ServerOption("auto", "Tự động", "Tự động quét nguồn khả dụng nhanh nhất", "FHD · Auto"),
+        ServerOption("auto", "Tự động", "Tự động quét nguồn ổn định nhanh nhất", "FHD · Auto"),
         ServerOption("lul", "Lul", "Nguồn chính 1080p · Tốc độ cao", "1080p"),
-        ServerOption("lil", "Lil", "Nguồn trực tiếp 1080p", "1080p"),
-        ServerOption("ly", "Edge (Ly)", "Nguồn 1080p fMP4", "1080p"),
-        ServerOption("meridian", "Meridian", "Nguồn 1080p đa phụ đề", "1080p"),
-        ServerOption("rock", "VidRock", "Nguồn đa chất lượng 1080p/720p", "1080p"),
-        ServerOption("shore", "Shore", "Nguồn 1080p ổn định", "1080p"),
-        ServerOption("tik", "Tik", "Nguồn 1080p quốc tế", "1080p"),
-        ServerOption("tiki", "Tiki", "Nguồn 360p tiết kiệm dữ liệu", "360p"),
-        ServerOption("vfast_supreme", "VFast · Supreme (4K)", "Máy chủ 4K chất lượng cao", "4K"),
-        ServerOption("vfast_euro", "VFast · Euro", "Máy chủ âm thanh gốc", "1080p"),
-        ServerOption("vfast_prime", "VFast · Prime", "Máy chủ 4K dự phòng", "4K"),
-        ServerOption("vfast_zenith", "VFast · Zenith", "Máy chủ phụ", "1080p"),
-        ServerOption("filler", "Filler", "Nguồn dự phòng", "1080p")
+        ServerOption("ly", "Edge (Ly)", "Nguồn 1080p Multi Audio & Sub", "1080p"),
+        ServerOption("lil", "Lil", "Nguồn trực tiếp 1080p (Phim lẻ)", "1080p"),
+        ServerOption("rock", "VidRock", "Nguồn 1080p ổn định", "1080p")
     )
 
     data class StreamResult(
@@ -52,7 +55,8 @@ object AetherSourceResolver {
         val sourceId: String,
         val sourceName: String,
         val quality: String = "1080p",
-        val subtitles: List<ExternalSubtitleTrack> = emptyList()
+        val subtitles: List<ExternalSubtitleTrack> = emptyList(),
+        val needsRelay: Boolean = false
     )
 
     fun resolve(
@@ -89,11 +93,9 @@ object AetherSourceResolver {
 
         val result = if (targetServerId != "auto") {
             onProgress?.invoke(serverDisplayName(targetServerId), 1, 1)
-            querySpecificScraper(targetServerId, mediaType, tmdbId, season, epNum)
-                ?: run {
-                    // Fallback to auto sweep if user's specific choice failed
-                    sweepScrapers(mediaType, tmdbId, season, epNum, onProgress)
-                }
+            val specific = querySpecificScraper(targetServerId, mediaType, tmdbId, season, epNum)
+                ?.let { verifyStreamResult(it) }
+            specific ?: sweepScrapers(mediaType, tmdbId, season, epNum, onProgress, excludeId = targetServerId)
         } else {
             sweepScrapers(mediaType, tmdbId, season, epNum, onProgress)
         } ?: throw IllegalStateException("Không tìm thấy luồng phát hợp lệ từ các máy chủ Aether cho phim này.")
@@ -132,11 +134,12 @@ object AetherSourceResolver {
         return ResolvedPlayback(
             url = result.streamUrl,
             headers = result.headers,
-            isF4kWrapped = false,
+            isF4kWrapped = result.needsRelay,
             isWeb = false,
             webUrl = episode.url,
             mediaKind = mediaKind,
-            subtitles = allSubs
+            subtitles = allSubs,
+            providerId = result.sourceId
         )
     }
 
@@ -149,19 +152,19 @@ object AetherSourceResolver {
         tmdbId: String,
         season: String,
         episode: String,
-        onProgress: ((sourceName: String, current: Int, total: Int) -> Unit)?
+        onProgress: ((sourceName: String, current: Int, total: Int) -> Unit)?,
+        excludeId: String? = null
     ): StreamResult? {
-        val order = listOf(
-            "lul", "lil", "ly", "meridian", "rock", "shore", "tik",
-            "vfast_supreme", "vfast_euro", "tiki", "filler", "vidy", "baguette", "yildiz"
-        )
-        val total = order.size
+        val order = listOf("lul", "ly", "lil", "rock")
+            .filterNot { excludeId != null && it.equals(excludeId, ignoreCase = true) }
+        val total = order.size.coerceAtLeast(1)
         for ((idx, scraperId) in order.withIndex()) {
             val name = serverDisplayName(scraperId)
             onProgress?.invoke(name, idx + 1, total)
-            val res = querySpecificScraper(scraperId, mediaType, tmdbId, season, episode)
-            if (res != null) {
-                return res
+            val raw = querySpecificScraper(scraperId, mediaType, tmdbId, season, episode) ?: continue
+            val verified = verifyStreamResult(raw)
+            if (verified != null) {
+                return verified
             }
         }
         return null
@@ -179,21 +182,62 @@ object AetherSourceResolver {
             "lul" -> queryLul(path)
             "lil" -> queryLil(path)
             "ly" -> queryLy(path)
-            "meridian" -> queryMeridian(path)
             "rock" -> queryRock(path)
-            "shore" -> queryShore(path)
-            "tik" -> queryTik(path)
-            "tiki" -> queryTiki(path)
-            "vfast_supreme" -> queryVfast(path, "Supreme")
-            "vfast_euro" -> queryVfast(path, "Euro")
-            "vfast_prime" -> queryVfast(path, "Prime")
-            "vfast_zenith" -> queryVfast(path, "Zenith")
-            "vfast" -> queryVfast(path, "Supreme")
-            "filler" -> queryFiller(path)
-            "vidy" -> queryAetherCxScraper("vidy", path)
-            "baguette" -> queryBaguette(path)
-            "yildiz" -> queryAetherCxScraper("yildiz", path)
+            "shore" -> queryShore(mediaType, tmdbId, season, episode)
             else -> queryLul(path)
+        }
+    }
+
+    private fun verifyStreamResult(result: StreamResult): StreamResult? {
+        return try {
+            val probe1 = fetchPlaylistHead(result.streamUrl, result.headers, maxBytes = 16 * 1024) ?: return null
+            val (finalUrl, body) = probe1
+            val trimmed = body.trimStart('\uFEFF', ' ', '\t', '\r', '\n')
+            if (!trimmed.startsWith("#EXTM3U")) return null
+
+            if (!trimmed.contains("#EXTINF:")) {
+                val variantLine = trimmed.lineSequence()
+                    .map { it.trim() }
+                    .firstOrNull { it.isNotEmpty() && !it.startsWith("#") }
+                if (variantLine != null) {
+                    val variantUrl = URI(finalUrl).resolve(variantLine).toString()
+                    val vProbe = fetchPlaylistHead(variantUrl, result.headers, maxBytes = 4096) ?: return null
+                    if (!vProbe.second.trimStart('\uFEFF', ' ', '\t', '\r', '\n').startsWith("#EXTM3U")) {
+                        return null
+                    }
+                }
+            }
+            if (finalUrl != result.streamUrl && result.sourceId == "lul") {
+                result.copy(streamUrl = finalUrl)
+            } else {
+                result
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun fetchPlaylistHead(
+        url: String,
+        headers: Map<String, String>,
+        maxBytes: Int = 8192
+    ): Pair<String, String>? {
+        val reqBuilder = Request.Builder().url(url)
+        for ((k, v) in headers) {
+            reqBuilder.header(k, v)
+        }
+        if (headers.keys.none { it.equals("User-Agent", ignoreCase = true) }) {
+            reqBuilder.header("User-Agent", USER_AGENT)
+        }
+        return probeClient.newCall(reqBuilder.build()).execute().use { resp ->
+            if (!resp.isSuccessful) return@use null
+            val bodySource = resp.body?.source() ?: return@use null
+            val buf = okio.Buffer()
+            while (buf.size < maxBytes) {
+                val read = bodySource.read(buf, maxBytes - buf.size)
+                if (read == -1L) break
+            }
+            resp.request.url.toString() to buf.readUtf8()
         }
     }
 
@@ -205,8 +249,8 @@ object AetherSourceResolver {
         return StreamResult(
             streamUrl = stream,
             headers = mapOf(
-                "Origin" to DEFAULT_ORIGIN,
-                "Referer" to DEFAULT_REFERER,
+                "Origin" to activeOrigin(),
+                "Referer" to activeReferer(),
                 "User-Agent" to USER_AGENT
             ),
             sourceId = "lul",
@@ -224,8 +268,8 @@ object AetherSourceResolver {
         return StreamResult(
             streamUrl = streamUrl,
             headers = mapOf(
-                "Origin" to DEFAULT_ORIGIN,
-                "Referer" to DEFAULT_REFERER,
+                "Origin" to activeOrigin(),
+                "Referer" to activeReferer(),
                 "User-Agent" to USER_AGENT
             ),
             sourceId = "lil",
@@ -244,16 +288,9 @@ object AetherSourceResolver {
         val referer = proxyHeaders?.optString("Referer")?.takeIf { it.isNotEmpty() } ?: "https://vidly.pro/"
         val ua = proxyHeaders?.optString("User-Agent")?.takeIf { it.isNotEmpty() } ?: USER_AGENT
 
-        // Rewrite through Aether's justice m3u8 proxy to ensure 100% CORS & segment success
-        val headersJson = JSONObject().apply {
-            put("Origin", origin)
-            put("Referer", referer)
-            put("User-Agent", ua)
-        }.toString()
-        val proxiedUrl = "$PROXY_JUSTICE?url=${URLEncoder.encode(stream, "UTF-8")}&headers=${URLEncoder.encode(headersJson, "UTF-8")}"
-
+        // Direct CDN access with upstream vidly.pro headers avoids proxy 403 and preserves native audio/sub tracks
         return StreamResult(
-            streamUrl = proxiedUrl,
+            streamUrl = stream,
             headers = mapOf(
                 "Origin" to origin,
                 "Referer" to referer,
@@ -265,217 +302,51 @@ object AetherSourceResolver {
         )
     }
 
-    private fun queryMeridian(path: String): StreamResult? {
-        val url = "https://meridian.raccoonunbutteredbagel.zip$path"
-        val json = fetchJson(url) ?: return null
-        val stream = json.optString("url").trim().ifEmpty { json.optString("stream").trim() }
-        if (stream.isEmpty()) return null
-
-        val subs = ArrayList<ExternalSubtitleTrack>()
-        val subsArr = json.optJSONArray("subtitles")
-        if (subsArr != null) {
-            for (i in 0 until subsArr.length()) {
-                val s = subsArr.optJSONObject(i) ?: continue
-                val sUrl = s.optString("url").trim()
-                val lang = s.optString("language").trim()
-                if (sUrl.isNotEmpty()) {
-                    subs.add(ExternalSubtitleTrack(sUrl, lang.lowercase(), lang, "text/vtt"))
-                }
-            }
-        }
-
-        return StreamResult(
-            streamUrl = stream,
-            headers = mapOf(
-                "Origin" to DEFAULT_ORIGIN,
-                "Referer" to DEFAULT_REFERER,
-                "User-Agent" to USER_AGENT
-            ),
-            sourceId = "meridian",
-            sourceName = "Meridian",
-            quality = "1080p",
-            subtitles = subs
-        )
-    }
-
     private fun queryRock(path: String): StreamResult? {
         val url = "https://rock.raccoonunbutteredbagel.zip$path"
         val json = fetchJson(url) ?: return null
         val stream = json.optString("stream").trim()
         if (stream.isEmpty()) return null
 
-        val origin = "https://vidrock.to"
-        val referer = "https://vidrock.to/"
-        val headersJson = JSONObject().apply {
-            put("Origin", origin)
-            put("Referer", referer)
-            put("User-Agent", USER_AGENT)
-        }.toString()
-        val proxiedUrl = "$PROXY_JUST?url=${URLEncoder.encode(stream, "UTF-8")}&headers=${URLEncoder.encode(headersJson, "UTF-8")}"
-
+        // vidrock streams wrap TS in PNG `tsDa` chunks or text/plain TS; FilmMediaRelay unwraps cleanly
         return StreamResult(
-            streamUrl = proxiedUrl,
+            streamUrl = stream,
             headers = mapOf(
-                "Origin" to origin,
-                "Referer" to referer,
+                "Origin" to "https://vidrock.to",
+                "Referer" to "https://vidrock.to/",
                 "User-Agent" to USER_AGENT
             ),
             sourceId = "rock",
             sourceName = "VidRock",
-            quality = "1080p"
+            quality = "1080p",
+            needsRelay = true
         )
     }
 
-    private fun queryShore(path: String): StreamResult? {
-        val url = "https://shore.raccoonunbutteredbagel.zip$path"
+    private fun queryShore(mediaType: String, tmdbId: String, season: String, episode: String): StreamResult? {
+        val shorePath = if (mediaType == "tv") "/show/$tmdbId?s=$season&e=$episode" else "/movie/$tmdbId"
+        val url = "https://shore.raccoonunbutteredbagel.zip$shorePath"
         val json = fetchJson(url) ?: return null
         var stream = json.optString("stream").trim()
         if (stream.isEmpty()) return null
         if (stream.startsWith("/")) {
-            stream = "https://backend.raccoonunbutteredbagel.zip$stream"
+            val wrapped = runCatching {
+                val u = URI("https://shore.raccoonunbutteredbagel.zip$stream")
+                val q = u.rawQuery.orEmpty()
+                q.split('&').firstOrNull { it.startsWith("url=") }?.substringAfter("url=")
+                    ?.let { java.net.URLDecoder.decode(it, "UTF-8") }
+            }.getOrNull()
+            stream = wrapped?.takeIf { it.startsWith("http") } ?: "https://shore.raccoonunbutteredbagel.zip$stream"
         }
         return StreamResult(
             streamUrl = stream,
             headers = mapOf(
-                "Origin" to DEFAULT_ORIGIN,
-                "Referer" to DEFAULT_REFERER,
+                "Origin" to activeOrigin(),
+                "Referer" to activeReferer(),
                 "User-Agent" to USER_AGENT
             ),
             sourceId = "shore",
             sourceName = "Shore",
-            quality = "1080p"
-        )
-    }
-
-    private fun queryTik(path: String): StreamResult? {
-        val url = "https://tik.raccoonunbutteredbagel.zip$path"
-        val json = fetchJson(url) ?: return null
-        val streams = json.optJSONArray("streams")
-        val streamObj = streams?.optJSONObject(0)
-        val stream = streamObj?.optString("url")?.trim() ?: json.optString("stream").trim()
-        if (stream.isEmpty()) return null
-        return StreamResult(
-            streamUrl = stream,
-            headers = mapOf(
-                "Origin" to DEFAULT_ORIGIN,
-                "Referer" to DEFAULT_REFERER,
-                "User-Agent" to USER_AGENT
-            ),
-            sourceId = "tik",
-            sourceName = "Tik",
-            quality = "1080p"
-        )
-    }
-
-    private fun queryTiki(path: String): StreamResult? {
-        val url = "https://tiki.raccoonunbutteredbagel.zip$path"
-        val json = fetchJson(url) ?: return null
-        val stream = json.optString("stream").trim()
-        if (stream.isEmpty()) return null
-        return StreamResult(
-            streamUrl = stream,
-            headers = mapOf(
-                "Origin" to DEFAULT_ORIGIN,
-                "Referer" to DEFAULT_REFERER,
-                "User-Agent" to USER_AGENT
-            ),
-            sourceId = "tiki",
-            sourceName = "Tiki",
-            quality = "360p"
-        )
-    }
-
-    private fun queryVfast(path: String, serverName: String): StreamResult? {
-        val url = "https://vfast.raccoonunbutteredbagel.zip$path?server=${URLEncoder.encode(serverName, "UTF-8")}"
-        val json = fetchJson(url) ?: return null
-        val proxiedUrl = json.optString("url").trim()
-        val directUrl = json.optString("directUrl").trim()
-        val playUrl = proxiedUrl.ifEmpty { directUrl }
-        if (playUrl.isEmpty()) return null
-
-        val referer = json.optString("referer").ifEmpty { "https://vidcore.io/" }
-        val origin = "https://vidcore.io"
-
-        val subs = ArrayList<ExternalSubtitleTrack>()
-        val tracksArr = json.optJSONArray("tracks")
-        if (tracksArr != null) {
-            for (i in 0 until tracksArr.length()) {
-                val t = tracksArr.optJSONObject(i) ?: continue
-                val f = t.optString("file").trim()
-                val l = t.optString("label").trim()
-                if (f.isNotEmpty()) {
-                    subs.add(ExternalSubtitleTrack(f, l.lowercase(), l, "text/vtt"))
-                }
-            }
-        }
-
-        val is4k = json.optBoolean("has4k", false) || serverName.contains("4k", ignoreCase = true) || serverName.equals("Supreme", ignoreCase = true)
-        return StreamResult(
-            streamUrl = playUrl,
-            headers = mapOf(
-                "Origin" to origin,
-                "Referer" to referer,
-                "User-Agent" to USER_AGENT
-            ),
-            sourceId = "vfast_${serverName.lowercase()}",
-            sourceName = "VFast · $serverName",
-            quality = if (is4k) "4K" else "1080p",
-            subtitles = subs
-        )
-    }
-
-    private fun queryFiller(path: String): StreamResult? {
-        val url = "https://filler.raccoonunbutteredbagel.zip$path"
-        val json = fetchJson(url) ?: return null
-        val stream = json.optString("stream").trim()
-        if (stream.isEmpty()) return null
-        return StreamResult(
-            streamUrl = stream,
-            headers = mapOf(
-                "Origin" to DEFAULT_ORIGIN,
-                "Referer" to DEFAULT_REFERER,
-                "User-Agent" to USER_AGENT
-            ),
-            sourceId = "filler",
-            sourceName = "Filler",
-            quality = "1080p"
-        )
-    }
-
-    private fun queryBaguette(path: String): StreamResult? {
-        val url = "https://baguette.aether.cx/api$path"
-        val json = fetchJson(url) ?: return null
-        val streams = json.optJSONArray("streams")
-        val streamObj = streams?.optJSONObject(0)
-        val stream = streamObj?.optString("url")?.trim() ?: json.optString("stream").trim()
-        if (stream.isEmpty()) return null
-        return StreamResult(
-            streamUrl = stream,
-            headers = mapOf(
-                "Origin" to DEFAULT_ORIGIN,
-                "Referer" to DEFAULT_REFERER,
-                "User-Agent" to USER_AGENT
-            ),
-            sourceId = "baguette",
-            sourceName = "Baguette",
-            quality = "1080p"
-        )
-    }
-
-    private fun queryAetherCxScraper(name: String, path: String): StreamResult? {
-        val url = "https://$name.aether.cx$path"
-        val json = fetchJson(url) ?: return null
-        val stream = json.optString("stream").trim().ifEmpty { json.optString("url").trim() }
-        if (stream.isEmpty()) return null
-        return StreamResult(
-            streamUrl = stream,
-            headers = mapOf(
-                "Origin" to DEFAULT_ORIGIN,
-                "Referer" to DEFAULT_REFERER,
-                "User-Agent" to USER_AGENT
-            ),
-            sourceId = name,
-            sourceName = name.replaceFirstChar { it.uppercase() },
             quality = "1080p"
         )
     }
@@ -485,15 +356,64 @@ object AetherSourceResolver {
             val req = Request.Builder()
                 .url(url)
                 .header("User-Agent", USER_AGENT)
-                .header("Origin", DEFAULT_ORIGIN)
-                .header("Referer", DEFAULT_REFERER)
+                .header("Origin", activeOrigin())
+                .header("Referer", activeReferer())
                 .build()
-            val resp = httpClient.newCall(req).execute()
-            if (!resp.isSuccessful) return null
-            val body = resp.body?.string().orEmpty()
-            if (body.startsWith("{")) JSONObject(body) else null
+            httpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val body = resp.body?.string().orEmpty()
+                if (body.startsWith("{")) JSONObject(body) else null
+            }
         } catch (_: Throwable) {
             null
+        }
+    }
+
+    fun normalizeOpenSubtitlesUrl(rawUrl: String): String {
+        var u = rawUrl.trim()
+        if (u.isEmpty()) return ""
+        if (u.endsWith(".gz", ignoreCase = true)) {
+            u = u.dropLast(3)
+        }
+        if (!u.contains("subencoding-utf8", ignoreCase = true) && u.contains("/download/", ignoreCase = true)) {
+            u = u.replace("/download/", "/download/subencoding-utf8/", ignoreCase = true)
+        }
+        return u
+    }
+
+    fun normalizeSubtitleLanguage(rawLabel: String, rawIso: String = ""): String {
+        val code = rawIso.lowercase(Locale.US).trim()
+        if (code in setOf("vi", "vie")) return "vi"
+        if (code in setOf("en", "eng")) return "en"
+
+        val base = rawLabel.lowercase(Locale.US)
+            .replace(Regex("""\([^)]*\)"""), " ")
+            .replace(Regex("""\bhi\d*\b"""), " ")
+            .replace(Regex("""\d+"""), " ")
+            .trim()
+        return when {
+            base.contains("viet") || base.contains("tiếng việt") -> "vi"
+            base.startsWith("english") || base == "eng" -> "en"
+            base.startsWith("spanish") -> "es"
+            base.startsWith("french") -> "fr"
+            base.startsWith("german") -> "de"
+            base.startsWith("japanese") -> "ja"
+            base.startsWith("korean") -> "ko"
+            base.startsWith("chinese") -> "zh"
+            base.startsWith("thai") -> "th"
+            base.startsWith("indonesian") -> "id"
+            base.startsWith("arabic") -> "ar"
+            base.startsWith("russian") -> "ru"
+            base.startsWith("portuguese") || base.startsWith("brazilian") -> "pt"
+            base.startsWith("italian") -> "it"
+            base.startsWith("turkish") -> "tr"
+            base.startsWith("dutch") -> "nl"
+            base.startsWith("polish") -> "pl"
+            base.startsWith("hindi") -> "hi"
+            base.startsWith("malay") -> "ms"
+            base.startsWith("ukrainian") -> "uk"
+            code.length in 2..3 -> code
+            else -> base.take(2).ifEmpty { "und" }
         }
     }
 
@@ -504,8 +424,47 @@ object AetherSourceResolver {
         episode: String
     ): List<ExternalSubtitleTrack> {
         val out = ArrayList<ExternalSubtitleTrack>()
+        val pool = Executors.newFixedThreadPool(3)
+        try {
+            val vdrkFuture = pool.submit(Callable {
+                fetchVdrkSubtitles(mediaType, tmdbId, season, episode)
+            })
+            val openSubFuture = pool.submit(Callable {
+                fetchOpenSubtitles(mediaType, tmdbId, season, episode)
+            })
 
-        // 1. Aether Subtitle Cache (sub.vdrk.site)
+            val vdrkSubs = try { vdrkFuture.get(8, TimeUnit.SECONDS) } catch (_: Throwable) { emptyList() }
+            val osSubs = try { openSubFuture.get(9, TimeUnit.SECONDS) } catch (_: Throwable) { emptyList() }
+
+            // Prioritize OpenSubtitles UTF-8 + vdrk with bounded non-excessive count per language
+            val merged = osSubs + vdrkSubs
+            val langCounts = HashMap<String, Int>()
+            for (sub in merged) {
+                val limit = when (sub.language) {
+                    "vi" -> 12
+                    "en" -> 6
+                    else -> 1
+                }
+                val cnt = langCounts[sub.language] ?: 0
+                if (cnt < limit && out.none { it.url.equals(sub.url, ignoreCase = true) }) {
+                    out.add(sub)
+                    langCounts[sub.language] = cnt + 1
+                }
+                if (out.size >= 30) break
+            }
+        } finally {
+            pool.shutdownNow()
+        }
+        return out
+    }
+
+    private fun fetchVdrkSubtitles(
+        mediaType: String,
+        tmdbId: String,
+        season: String,
+        episode: String
+    ): List<ExternalSubtitleTrack> {
+        val out = ArrayList<ExternalSubtitleTrack>()
         val subUrl = if (mediaType == "tv") {
             "https://sub.vdrk.site/v1/tv/$tmdbId/$season/$episode"
         } else {
@@ -515,30 +474,38 @@ object AetherSourceResolver {
             val req = Request.Builder()
                 .url(subUrl)
                 .header("User-Agent", USER_AGENT)
-                .header("Origin", DEFAULT_ORIGIN)
-                .header("Referer", DEFAULT_REFERER)
                 .build()
-            val resp = httpClient.newCall(req).execute()
-            if (resp.isSuccessful) {
-                val body = resp.body?.string().orEmpty()
-                if (body.startsWith("[")) {
-                    val arr = JSONArray(body)
-                    for (i in 0 until arr.length()) {
-                        val o = arr.optJSONObject(i) ?: continue
-                        val file = o.optString("file").trim()
-                        val label = o.optString("label").trim()
-                        if (file.isNotEmpty()) {
-                            val lang = if (label.contains("viet", ignoreCase = true)) "vi" else label.lowercase()
-                            out.add(ExternalSubtitleTrack(file, lang, label, "text/vtt"))
+            httpClient.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val body = resp.body?.string().orEmpty()
+                    if (body.startsWith("[")) {
+                        val arr = JSONArray(body)
+                        for (i in 0 until arr.length()) {
+                            val o = arr.optJSONObject(i) ?: continue
+                            val file = o.optString("file").trim()
+                            val label = o.optString("label").trim()
+                            if (file.isNotEmpty()) {
+                                val lang = normalizeSubtitleLanguage(label)
+                                val mime = if (file.lowercase(Locale.US).contains(".srt")) "application/x-subrip" else "text/vtt"
+                                val prettyLabel = if (lang == "vi" && !label.contains("🇻🇳")) "🇻🇳 $label (VDRK)" else "$label (VDRK)"
+                                out.add(ExternalSubtitleTrack(file, lang, prettyLabel, mime))
+                            }
                         }
                     }
                 }
             }
         } catch (_: Throwable) {}
+        return out
+    }
 
-        // 2. OpenSubtitles for Vietnamese
+    private fun fetchOpenSubtitles(
+        mediaType: String,
+        tmdbId: String,
+        season: String,
+        episode: String
+    ): List<ExternalSubtitleTrack> {
+        val out = ArrayList<ExternalSubtitleTrack>()
         try {
-            // Find IMDB ID from TMDB
             val tmdbExternalUrl = if (mediaType == "tv") {
                 "https://api.themoviedb.org/3/tv/$tmdbId/external_ids"
             } else {
@@ -548,36 +515,65 @@ object AetherSourceResolver {
                 .url(tmdbExternalUrl)
                 .header("Authorization", "Bearer ${AetherCatalog.TMDB_READ_TOKEN}")
                 .build()
-            val tmdbResp = httpClient.newCall(tmdbReq).execute()
-            if (tmdbResp.isSuccessful) {
+            val imdbId = httpClient.newCall(tmdbReq).execute().use { tmdbResp ->
+                if (!tmdbResp.isSuccessful) return emptyList()
                 val body = tmdbResp.body?.string().orEmpty()
-                val imdbId = JSONObject(body).optString("imdb_id").trim()
-                if (imdbId.isNotEmpty()) {
-                    val osUrl = "https://rest.opensubtitles.org/search/imdbid-${imdbId.removePrefix("tt")}/sublanguageid-vie"
-                    val osReq = Request.Builder()
-                        .url(osUrl)
-                        .header("User-Agent", "TemporaryUserAgent")
-                        .build()
-                    val osResp = httpClient.newCall(osReq).execute()
-                    if (osResp.isSuccessful) {
-                        val osBody = osResp.body?.string().orEmpty()
-                        if (osBody.startsWith("[")) {
-                            val osArr = JSONArray(osBody)
-                            for (i in 0 until osArr.length()) {
-                                val item = osArr.optJSONObject(i) ?: continue
-                                val dl = item.optString("SubDownloadLink").trim()
-                                val name = item.optString("SubFileName").trim().ifEmpty { "Tiếng Việt (OpenSubtitles)" }
-                                if (dl.isNotEmpty()) {
-                                    // OpenSubtitles dl link
-                                    out.add(ExternalSubtitleTrack(dl, "vi", "🇻🇳 $name", "application/x-subrip"))
-                                }
-                            }
-                        }
-                    }
+                JSONObject(body).optString("imdb_id").trim()
+            }
+            if (imdbId.isEmpty()) return emptyList()
+
+            val numImdb = imdbId.removePrefix("tt")
+            for ((queryLang, isoLang, prefix) in listOf(
+                Triple("vie", "vi", "🇻🇳"),
+                Triple("eng", "en", "🇬🇧")
+            )) {
+                val osUrl = if (mediaType == "tv") {
+                    "https://rest.opensubtitles.org/search/episode-$episode/imdbid-$numImdb/season-$season/sublanguageid-$queryLang"
+                } else {
+                    "https://rest.opensubtitles.org/search/imdbid-$numImdb/sublanguageid-$queryLang"
                 }
+                val osReq = Request.Builder()
+                    .url(osUrl)
+                    .header("User-Agent", USER_AGENT)
+                    .header("X-User-Agent", OPENSUBTITLES_UA)
+                    .build()
+                try {
+                    httpClient.newCall(osReq).execute().use { osResp ->
+                        if (!osResp.isSuccessful) return@use
+                        val osBody = osResp.body?.string().orEmpty()
+                        if (!osBody.startsWith("[")) return@use
+                        val osArr = JSONArray(osBody)
+                        val ranked = ArrayList<Pair<Int, ExternalSubtitleTrack>>()
+                        for (i in 0 until osArr.length()) {
+                            val item = osArr.optJSONObject(i) ?: continue
+                            val rawDl = item.optString("SubDownloadLink").trim()
+                            val cleanDl = normalizeOpenSubtitlesUrl(rawDl)
+                            if (cleanDl.isEmpty()) continue
+                            val fmt = item.optString("SubFormat").lowercase(Locale.US).trim()
+                            if (fmt in setOf("sub", "idx", "smi", "txt")) continue
+                            val mime = when (fmt) {
+                                "vtt" -> "text/vtt"
+                                "ass", "ssa" -> "text/x-ssa"
+                                else -> "application/x-subrip"
+                            }
+                            val name = item.optString("SubFileName").trim()
+                                .ifEmpty { if (isoLang == "vi") "Tiếng Việt (OpenSubtitles)" else "English (OpenSubtitles)" }
+                            val downloads = item.optString("SubDownloadsCnt").toIntOrNull() ?: 0
+                            ranked.add(
+                                downloads to ExternalSubtitleTrack(
+                                    cleanDl,
+                                    isoLang,
+                                    "$prefix $name",
+                                    mime
+                                )
+                            )
+                        }
+                        ranked.sortByDescending { it.first }
+                        ranked.take(6).forEach { out.add(it.second) }
+                    }
+                } catch (_: Throwable) {}
             }
         } catch (_: Throwable) {}
-
         return out
     }
 }
