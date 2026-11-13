@@ -101,13 +101,16 @@ class PlayerActivity : AppCompatActivity() {
     private var resolveJob: Job? = null
     private var translateSubJob: Job? = null
     private var subPrewarmJob: Job? = null
+    private val VI_CUE_UNSET = "\u0000__UNSET__"
     @Volatile private var viLiveSubActive = false
     @Volatile private var viLiveCues: List<TimedSubtitleCue> = emptyList()
     private val viTranslatedMap = ConcurrentHashMap<Int, String>()
-    @Volatile private var viLastRenderedCueText: String? = null
+    @Volatile private var viLastRenderedCueText: String? = VI_CUE_UNSET
     @Volatile private var cachedSubKey: String = ""
     @Volatile private var cachedSubRawText: String = ""
     @Volatile private var translatedEpisodeKey: String = ""
+    @Volatile private var selectedSourceSubUrl: String = ""
+    @Volatile private var allowNativeWebHandoff: Boolean = true
     private val mainHandler = Handler(Looper.getMainLooper())
     private val attemptedStreamUrls = HashSet<String>()
     private val triedAetherScrapers = HashSet<String>()
@@ -234,8 +237,14 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun stopLiveViSubtitles(clearView: Boolean = true) {
         viLiveSubActive = false
-        viLastRenderedCueText = null
+        viLastRenderedCueText = VI_CUE_UNSET
         mainHandler.removeCallbacks(subtitleTickRunnable)
+        exoPlayer?.let { player ->
+            player.trackSelectionParameters = player.trackSelectionParameters
+                .buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                .build()
+        }
         if (clearView && ::subtitleView.isInitialized) {
             subtitleView.setCues(emptyList())
         }
@@ -1247,6 +1256,13 @@ class PlayerActivity : AppCompatActivity() {
         subtitles: List<ExternalSubtitleTrack> = emptyList()
     ) {
         releasePlayer(stopRelay = false)
+        if (translatedEpisodeKey.isNotEmpty() && !translatedEpisodeKey.startsWith("${currentEpisode.slug}|")) {
+            translatedEpisodeKey = ""
+            selectedSourceSubUrl = ""
+            viLiveCues = emptyList()
+            viTranslatedMap.clear()
+            stopLiveViSubtitles(clearView = true)
+        }
         lastNativeUrl = streamUrl
         lastNativeHeaders = headers
         lastMediaKind = mediaKind
@@ -1361,6 +1377,7 @@ class PlayerActivity : AppCompatActivity() {
                 else -> 0
             }
             MediaItem.SubtitleConfiguration.Builder(Uri.parse(sub.url))
+                .setId(sub.url)
                 .setMimeType(subMime)
                 .setLanguage(sub.language)
                 .setLabel(sub.label)
@@ -1535,7 +1552,7 @@ class PlayerActivity : AppCompatActivity() {
                         }
 
                         if (fallbackUrl.isNotBlank()) {
-                            startWebFallback(fallbackUrl, currentEpisode.url)
+                            startWebFallback(fallbackUrl, currentEpisode.url, initialSeekMs = lastPos, allowNativeHandoff = false)
                         } else if (!trySwitchToBackupServer(lastPos)) {
                             loadingOverlay.visibility = View.VISIBLE
                             loadingText.text = "Máy chủ hiện tại bị gián đoạn.\nHãy chọn [Đổi Server] ở thanh bên dưới."
@@ -1559,10 +1576,16 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun startWebFallback(webUrl: String, referer: String, initialSeekMs: Long = 0L) {
+    private fun startWebFallback(
+        webUrl: String,
+        referer: String,
+        initialSeekMs: Long = 0L,
+        allowNativeHandoff: Boolean = true
+    ) {
         releasePlayer()
         destroyWebPlayer()
         val aetherMode = isAetherEpisode()
+        allowNativeWebHandoff = allowNativeHandoff
         // NEVER set surfaceView to GONE - keep it visible so its native Surface is preserved and never black-screens!
         surfaceView.visibility = View.VISIBLE
         if (::subtitleView.isInitialized) subtitleView.visibility = View.VISIBLE
@@ -1620,7 +1643,7 @@ class PlayerActivity : AppCompatActivity() {
             databaseEnabled = true
             mediaPlaybackRequiresUserGesture = false
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-            userAgentString = CatalogService.USER_AGENT
+            userAgentString = if (aetherMode) CatalogService.USER_AGENT else CatalogService.animeUserAgent()
             allowContentAccess = true
             loadWithOverviewMode = true
             useWideViewPort = true
@@ -1633,6 +1656,7 @@ class PlayerActivity : AppCompatActivity() {
             fun onVideoFound(streamUrl: String, refUrl: String) {
                 mainHandler.post {
                     if (fallbackWebView !== wv) return@post
+                    if (!allowNativeWebHandoff) return@post
                     if (streamUrl.startsWith("http", ignoreCase = true) && exoPlayer == null) {
                         if (attemptedStreamUrls.contains(streamUrl)) {
                             return@post
@@ -1645,10 +1669,15 @@ class PlayerActivity : AppCompatActivity() {
                             ""
                         }
                         val hdrs = HashMap<String, String>()
-                        hdrs["User-Agent"] = CatalogService.USER_AGENT
+                        hdrs["User-Agent"] = CatalogService.animeUserAgent()
                         if (origin.isNotBlank()) {
                             hdrs["Referer"] = "$origin/"
                             hdrs["Origin"] = origin
+                        }
+                        val cookieHeader = WebViewHelper.getCookieHeader(streamUrl)
+                            ?: WebViewHelper.getCookieHeader(refUrl.ifBlank { webUrl })
+                        if (!cookieHeader.isNullOrBlank()) {
+                            hdrs["Cookie"] = cookieHeader
                         }
                         val effectiveKind = when {
                             streamUrl.contains(".m3u8", ignoreCase = true) -> StreamMediaKind.HLS
@@ -1780,6 +1809,19 @@ class PlayerActivity : AppCompatActivity() {
                         sendWebCommand("rate", currentPlaybackSpeed.toDouble())
                     }
                     scheduleHideOsd()
+                }
+            }
+
+            @JavascriptInterface
+            fun onChallengeRequired() {
+                mainHandler.post {
+                    if (fallbackWebView !== wv) return@post
+                    if (exoPlayer != null) return@post
+                    loadingOverlay.visibility = View.GONE
+                    wv.visibility = View.VISIBLE
+                    wv.isFocusable = true
+                    wv.isFocusableInTouchMode = true
+                    wv.requestFocus()
                 }
             }
 
@@ -2002,6 +2044,14 @@ class PlayerActivity : AppCompatActivity() {
               var reportedFrames = {};
               var activeVideo = null;
               var detectedStreams = [], reportedSources = {};
+              function hasBlobVideoElement(){
+                var videos = document.querySelectorAll('video');
+                for (var i = 0; i < videos.length; i++) {
+                  var s = videos[i].currentSrc || videos[i].getAttribute('src') || '';
+                  if (/^blob:/i.test(s)) return true;
+                }
+                return false;
+              }
               function sendVideo(url, ref) {
                 try { AnPinimeWebBridge.onVideoFound(url, ref); } catch(e){}
               }
@@ -2013,7 +2063,7 @@ class PlayerActivity : AppCompatActivity() {
                   url = new URL(String(url), location.href).href;
                   if (/\.(?:m3u8|mp4)(?:[?#]|$)/i.test(url) && !adURL(url) && detectedStreams.indexOf(url) < 0) {
                     detectedStreams.push(url);
-                    if (!needsWebsiteDecoder()) sendVideo(url, location.href);
+                    if (!needsWebsiteDecoder() && !hasBlobVideoElement()) sendVideo(url, location.href);
                   }
                 } catch(e){}
               }
@@ -2044,7 +2094,7 @@ class PlayerActivity : AppCompatActivity() {
                 return /^https?:/i.test(s) && !adURL(s) ? s : '';
               }
               function reportSource(v){
-                if(needsWebsiteDecoder()) return;
+                if(needsWebsiteDecoder() || hasBlobVideoElement()) return;
                 var s = contentURL(v);
                 if (!/^https?:/i.test(s)) s = detectedStreams[detectedStreams.length - 1] || '';
                 if (/^https?:/i.test(s) && !reportedSources[s]){
@@ -2070,7 +2120,16 @@ class PlayerActivity : AppCompatActivity() {
                 });
               }
               function challenge(){
-                return /just a moment|xác minh an toàn|xác minh bảo mật|verify you are human|checking your browser/i.test(document.title) || !!document.querySelector('#challenge-form');
+                return /just a moment|xác minh an toàn|xác minh bảo mật|đang kiểm tra|verify you are human|checking your browser/i.test(document.title)
+                  || !!document.querySelector('#challenge-form, #cf-please-wait, .captcha-placeholder, .cf-turnstile')
+                  || !!(window._cf_chl_opt);
+              }
+              function notifyChallengeIfNeeded(){
+                if (challenge()) {
+                  try { AnPinimeWebBridge.onChallengeRequired(); } catch(e){}
+                  return true;
+                }
+                return false;
               }
               function trackState(v){
                 var api = playerAPI(v), audio = [], subs = [{id: 'off', title: 'Tắt'}], aid = '', sid = 'off';
@@ -2210,7 +2269,7 @@ class PlayerActivity : AppCompatActivity() {
               }
               function focus(){
                 if (!window.document || !document.documentElement) return false;
-                if (challenge()) return false;
+                if (notifyChallengeIfNeeded()) return false;
                 hideChrome();
                 var videos = document.querySelectorAll('video');
                 if (videos.length) return watch(videos[0]);
@@ -2392,8 +2451,9 @@ class PlayerActivity : AppCompatActivity() {
                     }
                 }
 
-                // Fallback stream interception for ExoPlayer
-                if (request?.method == "GET" && Regex("(?i)\\.(m3u8|mp4)([?#]|$)").containsMatchIn(url) &&
+                // Fallback stream interception for ExoPlayer (Aether mode only; AnimeVietsub uses bridge/decoder)
+                if (aetherMode && allowNativeWebHandoff && request?.method == "GET" &&
+                    Regex("(?i)\\.(m3u8|mp4)([?#]|$)").containsMatchIn(url) &&
                     !url.contains("/ads/", true)) {
                     val requestHeaders = request.requestHeaders.orEmpty()
                     mainHandler.post {
@@ -2454,8 +2514,10 @@ class PlayerActivity : AppCompatActivity() {
         headlessWebContainer.addView(wv)
         if (aetherMode) {
             wv.loadUrl(webUrl)
+        } else if (referer.isNotBlank()) {
+            wv.loadUrl(webUrl, mapOf("Referer" to referer))
         } else {
-            wv.loadUrl(webUrl, mapOf("Referer" to referer, "User-Agent" to "Mozilla/5.0"))
+            wv.loadUrl(webUrl)
         }
     }
 
@@ -3683,24 +3745,85 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
-    private fun selectSubtitleSourceUrl(subtitles: List<ExternalSubtitleTrack>): String? {
-        val candidate = subtitles.firstOrNull {
+    private fun findActivePlayerSourceTrack(player: ExoPlayer?): ExternalSubtitleTrack? {
+        if (player != null) {
+            for (group in player.currentTracks.groups) {
+                if (group.type != C.TRACK_TYPE_TEXT) continue
+                for (i in 0 until group.length) {
+                    if (!group.isTrackSelected(i)) continue
+                    val fmt = group.getTrackFormat(i)
+                    val byId = fmt.id?.let { idUrl ->
+                        lastSubtitles.firstOrNull { it.url == idUrl && !it.url.startsWith("file://") }
+                    }
+                    if (byId != null) return byId
+                    val fmtLang = fmt.language.orEmpty()
+                    val fmtLabel = fmt.label.orEmpty()
+                    if (fmtLang.isNotBlank() || fmtLabel.isNotBlank()) {
+                        val byMeta = lastSubtitles.firstOrNull { sub ->
+                            !sub.url.startsWith("file://") &&
+                                (fmtLang.isBlank() || sub.language.equals(fmtLang, ignoreCase = true)) &&
+                                (fmtLabel.isBlank() || sub.label.equals(fmtLabel, ignoreCase = true))
+                        }
+                        if (byMeta != null) return byMeta
+                    }
+                }
+            }
+        }
+        val preferred = selectedSourceSubUrl
+        if (preferred.isNotBlank()) {
+            lastSubtitles.firstOrNull { it.url == preferred && !it.url.startsWith("file://") }
+                ?.let { return it }
+        }
+        return null
+    }
+
+    private fun getSelectedTextLanguage(player: ExoPlayer?): String? {
+        if (player == null) return null
+        for (group in player.currentTracks.groups) {
+            if (group.type != C.TRACK_TYPE_TEXT) continue
+            for (i in 0 until group.length) {
+                if (group.isTrackSelected(i)) {
+                    return group.getTrackFormat(i).language?.takeIf { it.isNotBlank() }
+                }
+            }
+        }
+        return null
+    }
+
+    private fun selectSubtitleSourceTrack(
+        subtitles: List<ExternalSubtitleTrack>,
+        preferredUrl: String? = selectedSourceSubUrl
+    ): ExternalSubtitleTrack? {
+        if (!preferredUrl.isNullOrBlank()) {
+            subtitles.firstOrNull {
+                it.url == preferredUrl && !it.url.startsWith("file://")
+            }?.let { return it }
+        }
+        return subtitles.firstOrNull {
             !it.url.startsWith("file://") && it.language.lowercase(Locale.US).startsWith("en")
+        } ?: subtitles.firstOrNull {
+            !it.url.startsWith("file://") && !it.language.lowercase(Locale.US).startsWith("vi")
         } ?: subtitles.firstOrNull { !it.url.startsWith("file://") }
         ?: subtitles.firstOrNull()
-        return candidate?.url
     }
+
+    private fun selectSubtitleSourceUrl(
+        subtitles: List<ExternalSubtitleTrack>,
+        preferredUrl: String? = selectedSourceSubUrl
+    ): String? = selectSubtitleSourceTrack(subtitles, preferredUrl)?.url
 
     private fun prewarmSourceSubtitle(
         subtitles: List<ExternalSubtitleTrack>,
         streamUrl: String,
-        headers: Map<String, String>
+        headers: Map<String, String>,
+        preferredUrl: String? = selectedSourceSubUrl
     ) {
-        val subKey = selectSubtitleSourceUrl(subtitles) ?: streamUrl
+        val chosen = selectSubtitleSourceTrack(subtitles, preferredUrl)
+        val subKey = chosen?.url ?: streamUrl
         if (subKey.isBlank() || (subKey == cachedSubKey && cachedSubRawText.isNotBlank())) return
         subPrewarmJob?.cancel()
         subPrewarmJob = uiScope.launch(Dispatchers.IO) {
-            val raw = fetchSourceSubtitleRaw(subtitles, streamUrl, headers)
+            val raw = fetchSourceSubtitleRaw(subtitles, streamUrl, headers, chosen?.url, chosen?.language)
             if (!raw.isNullOrBlank()) {
                 cachedSubKey = subKey
                 cachedSubRawText = raw
@@ -3711,13 +3834,13 @@ class PlayerActivity : AppCompatActivity() {
     private fun fetchSourceSubtitleRaw(
         subtitles: List<ExternalSubtitleTrack>,
         streamUrl: String,
-        headers: Map<String, String>
+        headers: Map<String, String>,
+        preferredUrl: String? = selectedSourceSubUrl,
+        preferredLang: String? = null
     ): String? {
-        val subKey = selectSubtitleSourceUrl(subtitles) ?: streamUrl
+        val candidate = selectSubtitleSourceTrack(subtitles, preferredUrl)
+        val subKey = candidate?.url ?: "${streamUrl}|${preferredLang.orEmpty()}"
         if (subKey == cachedSubKey && cachedSubRawText.isNotBlank()) return cachedSubRawText
-        val candidate = subtitles.firstOrNull {
-            !it.url.startsWith("file://") && it.language.lowercase(Locale.US).startsWith("en")
-        } ?: subtitles.firstOrNull { !it.url.startsWith("file://") }
         val text = if (candidate != null) {
             fetchTextUrl(
                 candidate.url,
@@ -3727,7 +3850,7 @@ class PlayerActivity : AppCompatActivity() {
                 )
             )
         } else {
-            fetchEmbeddedHlsVtt(streamUrl, headers)
+            fetchEmbeddedHlsVtt(streamUrl, headers, preferredLang)
         }
         if (!text.isNullOrBlank()) {
             cachedSubKey = subKey
@@ -3748,16 +3871,26 @@ class PlayerActivity : AppCompatActivity() {
             return
         }
 
-        val epKey = "${currentEpisode.slug}|$lastNativeUrl"
         if (viLiveSubActive) {
             stopLiveViSubtitles(clearView = true)
             android.widget.Toast.makeText(this, "Đã tắt phụ đề dịch AI, dùng phụ đề gốc", android.widget.Toast.LENGTH_SHORT).show()
             return
         }
 
+        val activeTrack = findActivePlayerSourceTrack(player)
+        val activeLang = getSelectedTextLanguage(player)
+        val targetSubUrl = activeTrack?.url ?: selectSubtitleSourceUrl(lastSubtitles, selectedSourceSubUrl)
+        val sourceKey = targetSubUrl ?: "${lastNativeUrl}|${activeLang.orEmpty()}"
+        val epKey = "${currentEpisode.slug}|$sourceKey"
+
         if (translatedEpisodeKey == epKey && viLiveCues.isNotEmpty() && viTranslatedMap.isNotEmpty()) {
+            player.trackSelectionParameters = player.trackSelectionParameters
+                .buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                .build()
+            if (::subtitleView.isInitialized) subtitleView.setCues(emptyList())
             viLiveSubActive = true
-            viLastRenderedCueText = null
+            viLastRenderedCueText = VI_CUE_UNSET
             aetherTranslateBtn.text = "✓ Sub Việt (AI)"
             mainHandler.removeCallbacks(subtitleTickRunnable)
             mainHandler.post(subtitleTickRunnable)
@@ -3776,11 +3909,17 @@ class PlayerActivity : AppCompatActivity() {
         translateSubJob = uiScope.launch {
             try {
                 val rawText = withContext(Dispatchers.IO) {
-                    fetchSourceSubtitleRaw(lastSubtitles, lastNativeUrl, lastNativeHeaders)
+                    fetchSourceSubtitleRaw(
+                        subtitles = lastSubtitles,
+                        streamUrl = lastNativeUrl,
+                        headers = lastNativeHeaders,
+                        preferredUrl = targetSubUrl,
+                        preferredLang = activeLang
+                    )
                 }
                 if (rawText.isNullOrBlank()) {
                     aetherTranslateBtn.text = "🌐 Dịch Sub Việt"
-                    showPlayerMessage("Dịch phụ đề", "Không tìm thấy phụ đề nguồn (English/SRT/VTT) để dịch sang Tiếng Việt.")
+                    showPlayerMessage("Dịch phụ đề", "Không tìm thấy phụ đề nguồn (SRT/VTT/ASS) để dịch sang Tiếng Việt.")
                     return@launch
                 }
                 val parsedCues = withContext(Dispatchers.Default) {
@@ -3795,20 +3934,41 @@ class PlayerActivity : AppCompatActivity() {
                 viLiveCues = parsedCues
                 viTranslatedMap.clear()
                 translatedEpisodeKey = epKey
-                viLastRenderedCueText = null
+                viLastRenderedCueText = VI_CUE_UNSET
 
                 withContext(Dispatchers.IO) {
-                    SubtitleTranslator.translateAllProgressive(
+                    val outDir = File(cacheDir, "aether_subs").apply { mkdirs() }
+                    val cacheHash = SubtitleTranslator.computeSubCacheKey(sourceKey, parsedCues.size, "vi")
+                    val transCacheFile = File(outDir, "cache_$cacheHash.json")
+                    val seedMap = SubtitleTranslator.loadCachedTranslations(transCacheFile, parsedCues.size)
+
+                    SubtitleTranslator.translateAllProgressiveFast(
                         cues = parsedCues,
                         currentPositionMs = currentPos,
-                        workers = 6,
-                        translateFn = { batch -> SubtitleTranslator.translateViaGtx(batch, aetherHttpClient) },
+                        workers = 3,
+                        batchSize = 80,
+                        seedTranslations = seedMap,
+                        translateBatchFn = { batch ->
+                            SubtitleTranslator.translateBatchViaHtml(
+                                texts = batch,
+                                client = aetherHttpClient,
+                                targetLang = "vi",
+                                userAgent = AetherSourceResolver.USER_AGENT
+                            )
+                        },
                         onWaveReady = { waveMap ->
                             viTranslatedMap.putAll(waveMap)
                             mainHandler.post {
-                                if (exoPlayer == null) return@post
+                                val p = exoPlayer ?: return@post
                                 viLiveSubActive = true
-                                viLastRenderedCueText = null
+                                p.trackSelectionParameters = p.trackSelectionParameters
+                                    .buildUpon()
+                                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                                    .build()
+                                if (::subtitleView.isInitialized) {
+                                    subtitleView.setCues(emptyList())
+                                }
+                                viLastRenderedCueText = VI_CUE_UNSET
                                 aetherTranslateBtn.text = "⚡ Sub Việt (${viTranslatedMap.size}/${parsedCues.size})"
                                 mainHandler.removeCallbacks(subtitleTickRunnable)
                                 mainHandler.post(subtitleTickRunnable)
@@ -3823,9 +3983,17 @@ class PlayerActivity : AppCompatActivity() {
                         }
                     )
 
-                    val outDir = File(cacheDir, "aether_subs").apply { mkdirs() }
-                    val fileKey = (currentEpisode.slug.ifBlank { lastNativeUrl }).hashCode().toString()
-                    val outFile = File(outDir, "vi_$fileKey.vtt")
+                    if (viTranslatedMap.isEmpty()) {
+                        mainHandler.post {
+                            stopLiveViSubtitles(clearView = true)
+                            translatedEpisodeKey = ""
+                            showPlayerMessage("Dịch phụ đề", "Không thể kết nối máy chủ dịch lúc này. Vui lòng thử lại.")
+                        }
+                        return@withContext
+                    }
+
+                    SubtitleTranslator.saveCachedTranslations(transCacheFile, parsedCues.size, viTranslatedMap)
+                    val outFile = File(outDir, "vi_$cacheHash.vtt")
                     outFile.writeText(SubtitleTranslator.buildVtt(parsedCues, viTranslatedMap), Charsets.UTF_8)
 
                     val newTrack = ExternalSubtitleTrack(
@@ -3838,12 +4006,14 @@ class PlayerActivity : AppCompatActivity() {
                         lastSubtitles = listOf(newTrack) + lastSubtitles.filterNot { it.url == newTrack.url }
                         if (viLiveSubActive) {
                             aetherTranslateBtn.text = "✓ Sub Việt (AI)"
+                            mainHandler.removeCallbacks(subtitleTickRunnable)
+                            mainHandler.post(subtitleTickRunnable)
                         }
                     }
                 }
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
-                aetherTranslateBtn.text = "🌐 Dịch Sub Việt"
+                stopLiveViSubtitles(clearView = true)
                 showPlayerMessage("Dịch phụ đề", "Không thể dịch phụ đề lúc này: ${t.message ?: "Lỗi mạng"}")
             }
         }
@@ -3861,24 +4031,82 @@ class PlayerActivity : AppCompatActivity() {
         }.build()
         return runCatching {
             aetherHttpClient.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) null else resp.body?.string()
+                if (!resp.isSuccessful) return@use null
+                val bytes = resp.body?.bytes() ?: return@use null
+                if (bytes.size >= 2 && bytes[0] == 0x1f.toByte() && bytes[1] == 0x8b.toByte()) {
+                    java.util.zip.GZIPInputStream(bytes.inputStream()).bufferedReader(Charsets.UTF_8).readText()
+                } else {
+                    String(bytes, Charsets.UTF_8)
+                }
             }
         }.getOrNull()
     }
 
-    private fun fetchEmbeddedHlsVtt(masterUrl: String, headers: Map<String, String>): String? {
+    private fun fetchEmbeddedHlsVtt(
+        masterUrl: String,
+        headers: Map<String, String>,
+        preferredLang: String? = null
+    ): String? {
         if (!masterUrl.contains(".m3u8", ignoreCase = true) && !masterUrl.contains("m3u8", ignoreCase = true)) {
             return null
         }
         val masterText = fetchTextUrl(masterUrl, headers) ?: return null
-        val uriRegex = Regex("""TYPE=SUBTITLES[^\n]*URI="([^"]+)"""")
-        val subRel = uriRegex.find(masterText)?.groupValues?.get(1) ?: return null
-        val subPlUrl = java.net.URI(masterUrl).resolve(subRel).toString()
+        val subLines = masterText.lineSequence()
+            .filter { it.contains("TYPE=SUBTITLES", ignoreCase = true) && it.contains("URI=", ignoreCase = true) }
+            .toList()
+        if (subLines.isEmpty()) return null
+
+        val langAttrRegex = Regex("""LANGUAGE="([^"]+)"""", RegexOption.IGNORE_CASE)
+        val uriAttrRegex = Regex("""URI="([^"]+)"""", RegexOption.IGNORE_CASE)
+        val candidates = subLines.mapNotNull { line ->
+            val u = uriAttrRegex.find(line)?.groupValues?.get(1) ?: return@mapNotNull null
+            val l = langAttrRegex.find(line)?.groupValues?.get(1).orEmpty().lowercase(Locale.US)
+            l to u
+        }
+        if (candidates.isEmpty()) return null
+
+        val normPref = preferredLang?.trim()?.lowercase(Locale.US).orEmpty()
+        val chosenUri = (if (normPref.isNotBlank() && !normPref.startsWith("vi")) {
+            candidates.firstOrNull { it.first == normPref || it.first.startsWith(normPref) }
+        } else null)
+            ?: candidates.firstOrNull { it.first.startsWith("en") }
+            ?: candidates.firstOrNull { !it.first.startsWith("vi") }
+            ?: candidates.first()
+
+        val subPlUrl = java.net.URI(masterUrl).resolve(chosenUri.second).toString()
         val subPlText = fetchTextUrl(subPlUrl, headers) ?: return null
-        val segRel = subPlText.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() && !it.startsWith("#") }
-            ?: return null
-        val vttUrl = java.net.URI(subPlUrl).resolve(segRel).toString()
-        return fetchTextUrl(vttUrl, headers)
+        if (!subPlText.contains("#EXTINF", ignoreCase = true) && subPlText.contains("-->")) {
+            return subPlText
+        }
+        val basePlUri = java.net.URI(subPlUrl)
+        val segUrls = subPlText.lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && !it.startsWith("#") }
+            .map { basePlUri.resolve(it).toString() }
+            .distinct()
+            .take(300)
+            .toList()
+        if (segUrls.isEmpty()) return null
+
+        val results = arrayOfNulls<String>(segUrls.size)
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(4.coerceAtMost(segUrls.size))
+        try {
+            val futures = segUrls.mapIndexed { i, segUrl ->
+                pool.submit {
+                    results[i] = fetchTextUrl(segUrl, headers)
+                }
+            }
+            for (f in futures) {
+                runCatching { f.get() }
+            }
+        } finally {
+            pool.shutdownNow()
+        }
+        val merged = results.asSequence()
+            .filterNotNull()
+            .filter { it.isNotBlank() }
+            .joinToString("\n\n")
+        return merged.takeIf { it.isNotBlank() }
     }
 
     private fun parseSubtitleCues(rawText: String): List<Pair<String, String>> {
@@ -4094,8 +4322,13 @@ class PlayerActivity : AppCompatActivity() {
                 triggerAetherVietnameseTranslation()
                 return@showSelection
             }
-            if (type == C.TRACK_TYPE_TEXT && viLiveSubActive) {
-                stopLiveViSubtitles(clearView = true)
+            if (type == C.TRACK_TYPE_TEXT) {
+                if (viLiveSubActive) {
+                    stopLiveViSubtitles(clearView = true)
+                }
+                if (index == 0) {
+                    selectedSourceSubUrl = ""
+                }
             }
             val builder = player.trackSelectionParameters.buildUpon()
                 .clearOverridesOfType(type)
@@ -4103,6 +4336,20 @@ class PlayerActivity : AppCompatActivity() {
             if (index > 0 && index <= options.size) {
                 val (group, track) = options[index - 1]
                 builder.setOverrideForType(TrackSelectionOverride(group, track))
+                if (type == C.TRACK_TYPE_TEXT) {
+                    val fmt = group.getFormat(track)
+                    val matched = fmt.id?.takeIf { !it.startsWith("file://") }?.let { idUrl ->
+                        lastSubtitles.firstOrNull { it.url == idUrl }
+                    } ?: lastSubtitles.firstOrNull { sub ->
+                        !sub.url.startsWith("file://") &&
+                            (fmt.language.isNullOrBlank() || sub.language.equals(fmt.language, true)) &&
+                            (fmt.label.isNullOrBlank() || sub.label.equals(fmt.label, true))
+                    }
+                    if (matched != null && !matched.url.startsWith("file://")) {
+                        selectedSourceSubUrl = matched.url
+                        prewarmSourceSubtitle(lastSubtitles, lastNativeUrl, lastNativeHeaders, matched.url)
+                    }
+                }
             }
             player.trackSelectionParameters = builder.build()
         }

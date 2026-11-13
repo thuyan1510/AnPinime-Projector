@@ -149,4 +149,46 @@ class HTMLParserTest {
         assertEquals("Bảng xếp hạng", sections[1].title)
         assertEquals("/bang-xep-hang.html", sections[1].categoryPath)
     }
+
+    @Test
+    fun rejectsCloudflareVietnameseTitlesCommentUsernamesAndExtractsRealEpisodeNumbers() {
+        val cfVi = """<html><head><title>Xác Minh An Toàn - AnimeVietsub</title></head><body><div class="captcha-placeholder"></div></body></html>"""
+        val cfCheck = """<html><head><title>Đang Kiểm Tra Trình Duyệt...</title></head><body></body></html>"""
+        assertFalse(HTMLParser.isVerifiedAnimeDetail(cfVi, "https://animevietsub.best/phim/bleach-a1/", "https://animevietsub.best"))
+        assertFalse(HTMLParser.isVerifiedAnimeDetail(cfCheck, "https://animevietsub.best/phim/bleach-a1/", "https://animevietsub.best"))
+
+        val html = """
+            <html>
+            <head><title>Solo Leveling - AnimeVietsub</title></head>
+            <body>
+              <div class="sidebar">
+                <a class="watch_button" href="/phim/other-show-a999/xem-phim.html">Xem phim</a>
+              </div>
+              <a class="watch_button" href="/phim/solo-leveling-a101/xem-phim.html">Xem phim</a>
+              <ul class="list-episode">
+                <li><a class="btn-episode" href="/phim/solo-leveling-a101/tap-1.html" data-hash="H1">4K - Tập 1</a></li>
+                <li><a class="btn-episode" href="/phim/solo-leveling-a101/tap-5.html" data-hash="H5">1080p Tập 5</a></li>
+                <li><a class="btn-episode" href="/phim/solo-leveling-a101/tap-3.html" data-hash="H3">Bản 2026 Tập 3</a></li>
+              </ul>
+              <div id="comments">
+                <blockquote>
+                  <a class="btn-episode" href="/phim/other-show-a999/tap-99.html" data-id="comment99">18Cuong</a>
+                  <a href="/phim/solo-leveling-a101/tap-99.html">18Cuong</a>
+                </blockquote>
+              </div>
+              <script>{"name":"2026","label":"YearOnly"}</script>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val canonical = "https://animevietsub.best/phim/solo-leveling-a101/"
+        assertEquals(
+            "https://animevietsub.best/phim/solo-leveling-a101/xem-phim.html",
+            HTMLParser.watchURL(html, canonical, "https://animevietsub.best")
+        )
+        val eps = HTMLParser.episodes(html, canonical, "https://animevietsub.best")
+        assertEquals(listOf(1, 3, 5), eps.map { it.number }.sorted())
+        assertFalse(eps.any { it.number == 4 || it.number == 1080 || it.number == 2026 || it.number == 99 || it.number == 18 })
+        assertFalse(eps.any { it.url.contains("other-show-a999") })
+    }
 }

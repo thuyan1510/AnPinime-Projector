@@ -110,7 +110,9 @@ object CatalogService {
         .build()
 
     fun init(context: Context) {
-        appContext = context.applicationContext
+        val app = context.applicationContext
+        appContext = app
+        WebViewHelper.init(app)
     }
 
     // --- Custom Anime Domain Management ---
@@ -162,13 +164,19 @@ object CatalogService {
                     return savedUrl
                 }
             }
+            // Fast cold-start path (matches DomainResolver.homeCandidate): resolve bit.ly redirects immediately
+            // without stalling 12s on Bleach probes that may 403 until WebView solves Cloudflare on home load.
+            val quickHost = resolveShortlinkCandidate()?.trimEnd('/')
+                ?: animeFallbackHosts.first().trimEnd('/')
+            resolvedAnimeBase = quickHost
+            resolvedAnimeAtMs = now
+            return quickHost
         }
 
         val candidates = LinkedHashSet<String>()
         resolveShortlinkCandidate()?.let { candidates.add(it.trimEnd('/')) }
         animeFallbackHosts.forEach { candidates.add(it.trimEnd('/')) }
 
-        // Verify candidates in parallel against Bleach detail page
         val candidateList = candidates.toList()
         val tasks = candidateList.map { host ->
             Callable {
@@ -176,7 +184,7 @@ object CatalogService {
             }
         }
         try {
-            val futures = ioPool.invokeAll(tasks, 12, TimeUnit.SECONDS)
+            val futures = ioPool.invokeAll(tasks, 8, TimeUnit.SECONDS)
             for (i in futures.indices) {
                 val verified = try {
                     futures[i].get()
@@ -198,23 +206,31 @@ object CatalogService {
     }
 
     private fun resolveShortlinkCandidate(): String? {
+        var current = ANIME_SHORTLINK
+        val ua = animeUserAgent()
         try {
-            val conn = (URL(ANIME_SHORTLINK).openConnection() as HttpURLConnection).apply {
-                instanceFollowRedirects = false
-                connectTimeout = 6000
-                readTimeout = 6000
-                setRequestProperty("User-Agent", USER_AGENT)
-            }
-            val code = conn.responseCode
-            val loc = conn.getHeaderField("Location")
-            conn.disconnect()
-            if (code in 300..399 && !loc.isNullOrBlank()) {
-                val uri = Uri.parse(loc)
-                val scheme = uri.scheme ?: "https"
-                val host = uri.host
-                if (!host.isNullOrBlank() && !host.contains("bit.ly", ignoreCase = true)) {
-                    return "$scheme://$host"
+            for (hop in 0 until 6) {
+                val conn = (URL(current).openConnection() as HttpURLConnection).apply {
+                    instanceFollowRedirects = false
+                    connectTimeout = 3500
+                    readTimeout = 3500
+                    setRequestProperty("User-Agent", ua)
                 }
+                val code = conn.responseCode
+                val loc = conn.getHeaderField("Location")
+                conn.disconnect()
+                if (code in 300..399 && !loc.isNullOrBlank()) {
+                    val nextUrl = URL(URL(current), loc).toString()
+                    current = nextUrl
+                } else {
+                    break
+                }
+            }
+            val uri = Uri.parse(current)
+            val scheme = uri.scheme ?: "https"
+            val host = uri.host
+            if (!host.isNullOrBlank() && !host.contains("bit.ly", ignoreCase = true)) {
+                return "$scheme://$host"
             }
         } catch (_: Throwable) {
         }
@@ -223,10 +239,12 @@ object CatalogService {
 
     private fun verifyAnimeCandidate(baseHost: String): Boolean {
         val testUrl = "${baseHost.trimEnd('/')}$ANIME_VERIFY_PATH"
+        val ua = animeUserAgent()
         val html = try {
             val req = Request.Builder()
                 .url(testUrl)
-                .header("User-Agent", USER_AGENT)
+                .header("User-Agent", ua)
+                .header("Referer", "${baseHost.trimEnd('/')}/")
                 .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
                 .build()
             http.newCall(req).execute().use { resp ->
@@ -986,11 +1004,16 @@ object CatalogService {
     // 4. ANIMEVIETSUB (DomainResolver + HTMLParser + Next.js + AJAX Decoder)
     // =========================================================================
 
-    private fun animeUserAgent(): String {
+    fun animeUserAgent(): String {
         return runCatching { WebViewHelper.userAgent.takeIf { it.isNotBlank() } }.getOrNull() ?: USER_AGENT
     }
 
-    private fun fetchAnimeHtml(url: String, base: String, allowWebFallback: Boolean = true): String {
+    private fun fetchAnimeHtml(
+        url: String,
+        base: String,
+        allowWebFallback: Boolean = true,
+        waitForEpisodes: Boolean = false
+    ): String {
         val ua = animeUserAgent()
         val html = try {
             httpGet(url, referer = "$base/", userAgent = ua)
@@ -999,12 +1022,17 @@ object CatalogService {
         }
         val needsChallenge = html.length <= 600 || runCatching { WebViewHelper.containsVerification(html) }.getOrDefault(false) ||
             html.contains("Just a moment", ignoreCase = true) ||
+            html.contains("Xác Minh An Toàn", ignoreCase = true) ||
+            html.contains("Đang Kiểm Tra", ignoreCase = true) ||
+            html.contains("_cf_chl_opt", ignoreCase = true) ||
             html.contains("cf-browser-verification", ignoreCase = true) ||
             html.contains("Attention Required!", ignoreCase = true)
         if (!needsChallenge) return html
         if (!allowWebFallback) return html
         val webHtml = try {
-            kotlinx.coroutines.runBlocking { WebViewHelper.fetchHtml(url).first }
+            kotlinx.coroutines.runBlocking {
+                WebViewHelper.fetchHtml(url, waitForEpisodes = waitForEpisodes).first
+            }
         } catch (_: Throwable) {
             ""
         }
@@ -1012,9 +1040,20 @@ object CatalogService {
     }
 
     private fun loadAnimeHome(): List<AnimeSection> {
-        val base = resolveAnimeDomain()
-        val homeHtml = try { fetchAnimeHtml("$base/", base, allowWebFallback = true) } catch (_: Throwable) { "" }
-        val sections = ArrayList(HTMLParser.sections(homeHtml, base))
+        var base = resolveAnimeDomain()
+        var homeHtml = try { fetchAnimeHtml("$base/", base, allowWebFallback = true) } catch (_: Throwable) { "" }
+        var sections = ArrayList(HTMLParser.sections(homeHtml, base))
+        if (sections.isEmpty()) {
+            val refreshed = resolveAnimeDomain(forceRefresh = true)
+            if (refreshed != base) {
+                base = refreshed
+                homeHtml = try { fetchAnimeHtml("$base/", base, allowWebFallback = true) } catch (_: Throwable) { "" }
+                sections = ArrayList(HTMLParser.sections(homeHtml, base))
+            }
+        }
+        if (sections.isNotEmpty()) {
+            saveVerifiedAnimeDomain(base)
+        }
         val havePaths = sections.mapNotNull { it.categoryPath?.lowercase() }.toHashSet()
         val haveTitles = sections.map { it.title.lowercase() }.toSet()
 
@@ -1082,7 +1121,7 @@ object CatalogService {
     private fun loadAnimeDetail(anime: Anime): AnimeDetail {
         val base = resolveAnimeDomain()
         val pageUrl = rewriteAnimeHostIfNeeded(anime.url, base)
-        val detailHtml = fetchAnimeHtml(pageUrl, base)
+        val detailHtml = fetchAnimeHtml(pageUrl, base, waitForEpisodes = true)
         val parsed = HTMLParser.detail(detailHtml, pageUrl, base)
 
         var episodes = parsed.episodes
@@ -1094,11 +1133,14 @@ object CatalogService {
             !HTMLParser.hasCompleteStreamedEpisodes(detailHtml, pageUrl, base, episodes)
         if (needsWatchFetch && !watchUrl.isNullOrBlank() && !watchUrl.equals(pageUrl, ignoreCase = true)) {
             try {
-                val watchHtml = fetchAnimeHtml(watchUrl, base)
+                val watchHtml = fetchAnimeHtml(watchUrl, base, waitForEpisodes = true)
                 val watchEpisodes = HTMLParser.episodes(watchHtml, pageUrl, base)
                 episodes = HTMLParser.mergedEpisodes(primary = watchEpisodes, fallback = episodes)
             } catch (_: Throwable) {
             }
+        }
+        if (episodes.isNotEmpty() || parsed.title.isNotEmpty()) {
+            saveVerifiedAnimeDomain(base)
         }
 
         if (episodes.isEmpty() && !watchUrl.isNullOrBlank()) {

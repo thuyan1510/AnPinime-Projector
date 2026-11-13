@@ -175,10 +175,19 @@ object HTMLParser {
 
         try {
             val doc = Jsoup.parse(html, baseURL)
-            val watchCta = doc.selectFirst("a.watch_button[href], a.btn-watch[href], a.bw_btn[href], a[href*=/xem-phim]")
-            if (watchCta != null) {
-                val resolved = resolveURL(watchCta.attr("href"), baseURL)
-                if (!resolved.isNullOrBlank()) return resolved
+            val watchCtas = doc.select("a.watch_button[href], a.btn-watch[href], a.bw_btn[href], a[href*=/xem-phim]")
+            for (watchCta in watchCtas) {
+                if (watchCta.closest("nav, header, footer, form, #comments, .comments, .comment-list, .comment, .disqus, blockquote, .sidebar, .related, .MovieList, .TPost") != null) {
+                    continue
+                }
+                val resolved = resolveURL(watchCta.attr("href"), baseURL) ?: continue
+                if (belongsToOtherShow(resolved, showSlug, showId)) continue
+                val ownedEp = episodeURL(resolved, canonicalURL, showSlug, showId)
+                if (!ownedEp.isNullOrBlank()) return ownedEp
+                val lowerResolved = resolved.lowercase()
+                if (lowerResolved.endsWith("/xem-phim.html") || lowerResolved.contains("/xem-phim/")) {
+                    return resolved
+                }
             }
         } catch (_: Throwable) {
         }
@@ -186,6 +195,7 @@ object HTMLParser {
         for (link in HTMLDocument.links(html)) {
             if (isExcludedContainerLink(link)) continue
             val resolved = resolveURL(link.href, baseURL) ?: continue
+            if (belongsToOtherShow(resolved, showSlug, showId)) continue
             val lowerHref = resolved.lowercase()
             val lowerText = link.text.lowercase()
             val lowerAttrs = link.rawAttributes.lowercase()
@@ -223,6 +233,12 @@ object HTMLParser {
         val pageTitle = (HTMLDocument.title(html) ?: "").lowercase()
         val blockedTitles = listOf(
             "just a moment",
+            "xác minh an toàn",
+            "xác minh bảo mật",
+            "đang kiểm tra",
+            "verify you are human",
+            "checking your browser",
+            "one more step",
             "attention required!",
             "access denied",
             "ddos-guard",
@@ -467,11 +483,18 @@ object HTMLParser {
                     "a.btn-episode[href], a.episode-link[href], a[data-hash][href], a[data-play][href]"
             )
             for (a in candidateAnchors) {
-                if (a.closest("nav, header, footer, .sidebar, .related, .MovieList, .TPost") != null) continue
+                if (a.closest("nav, header, footer, form, #comments, .comments, .comment-list, .comment, .disqus, blockquote, .sidebar, .related, .MovieList, .TPost") != null) continue
                 val resolved = resolveURL(a.attr("href"), baseURL) ?: continue
+                if (belongsToOtherShow(resolved, showSlug, showId)) continue
                 val hasEpAttrs = a.hasClass("btn-episode") || a.hasAttr("data-hash") || a.hasAttr("data-play") || a.hasAttr("data-id")
+                val lowerRes = resolved.lowercase()
                 val epUrl = episodeURL(resolved, canonicalURL, showSlug, showId)
-                    ?: (resolved.takeIf { hasEpAttrs && !it.lowercase().contains("/the-loai/") && !it.lowercase().contains("/tag/") })
+                    ?: (resolved.takeIf {
+                        hasEpAttrs &&
+                            !lowerRes.contains("#comment") &&
+                            !lowerRes.contains("/the-loai/") &&
+                            !lowerRes.contains("/tag/")
+                    })
                     ?: continue
 
                 val labelText = a.text().trim()
@@ -632,8 +655,10 @@ object HTMLParser {
         } else if (rawName.isNotEmpty() && !showSlug.isNullOrEmpty()) {
             // Only synthesize URL from episode name when object looks like a real episode entry for this show
             val itemShowId = item.optString("filmId").ifEmpty { item.optString("movieId") }.ifEmpty { item.optString("animeId") }
+            val hasEpSignal = item.has("episodeId") || item.has("episode_id") || item.has("epId") ||
+                item.has("id") || item.has("hash") || item.has("play") || item.has("number") || itemShowId.isNotEmpty()
             val expectedNumId = showKey?.removePrefix("a")?.removePrefix("A")
-            val belongsHere = itemShowId.isEmpty() || expectedNumId.isNullOrEmpty() || itemShowId == expectedNumId
+            val belongsHere = hasEpSignal && (itemShowId.isEmpty() || expectedNumId.isNullOrEmpty() || itemShowId == expectedNumId)
             val numToken = if (belongsHere) Regex("""^\s*(?:tập|tap|ep|episode)?\s*(\d{1,4})\s*$""", RegexOption.IGNORE_CASE).find(rawName)?.groupValues?.get(1) else null
             if (numToken != null) {
                 resolvedUrl = resolveURL("/phim/$showSlug/tap-$numToken.html", baseURL)
@@ -773,17 +798,33 @@ object HTMLParser {
         return null
     }
 
+    private fun belongsToOtherShow(candidateURL: String, showSlug: String?, showId: String?): Boolean {
+        val candidateId = animeIdentifier(candidateURL)
+        if (!showId.isNullOrEmpty() && !candidateId.isNullOrEmpty() && !candidateId.equals(showId, ignoreCase = true)) {
+            return true
+        }
+        val candidateSlug = animeSlug(candidateURL)
+        if (!showSlug.isNullOrEmpty() && !candidateSlug.isNullOrEmpty() && !candidateSlug.equals(showSlug, ignoreCase = true)) {
+            return true
+        }
+        return false
+    }
+
     private fun episodeLabel(text: String, rawAttrs: String, url: String): String? {
         val cleaned = text.trim()
-        val labelRegex = Regex(
-            """^(?:tập|tap|ep|episode)?\s*\d+(?:\.\d+)?[a-zA-Z._-]*(?:\s*(?:end|final|full|ova|special|sp|preview))?$""",
+        val prefixedLabelRegex = Regex(
+            """^(?:(?:4k|2k|1080p|720p|480p|full\s*hd|hd|sd)\s*[-:|]?\s*)?(?:tập|tap|ep|episode)\s*\d+(?:\.\d+)?[a-zA-Z]?(?:\s*[-_]\s*\d+)?(?:\s*(?:end|final|full|ova|special|sp|preview|\(\s*(?:end|final|full|hd|4k)\s*\)))?$""",
             RegexOption.IGNORE_CASE
         )
-        if (cleaned.isNotEmpty() && (labelRegex.matches(cleaned) || cleaned.equals("Full", ignoreCase = true) || cleaned.equals("Xem phim", ignoreCase = true))) {
+        val bareNumLabelRegex = Regex(
+            """^\d+(?:\.\d+)?[a-dA-D]?(?:\s*[-_]\s*\d+)?(?:\s*(?:end|final|full|ova|special|sp|preview|\(\s*end\s*\)))?$""",
+            RegexOption.IGNORE_CASE
+        )
+        if (cleaned.isNotEmpty() && (prefixedLabelRegex.matches(cleaned) || bareNumLabelRegex.matches(cleaned) || cleaned.equals("Full", ignoreCase = true) || cleaned.equals("Xem phim", ignoreCase = true))) {
             return cleaned
         }
         val titleAttr = firstMatch("""\btitle\s*=\s*["']([^"']+)["']""", rawAttrs)?.trim()
-        if (!titleAttr.isNullOrEmpty() && (labelRegex.matches(titleAttr) || titleAttr.lowercase().contains("tập") || titleAttr.lowercase().contains("tap"))) {
+        if (!titleAttr.isNullOrEmpty() && (prefixedLabelRegex.matches(titleAttr) || bareNumLabelRegex.matches(titleAttr) || titleAttr.lowercase().contains("tập") || titleAttr.lowercase().contains("tap"))) {
             return titleAttr
         }
         val numMatch = Regex("""/(?:tap|ep|episode)-(\d{1,4})(?:[-/.?#]|$)""", RegexOption.IGNORE_CASE).find(url)
@@ -798,7 +839,7 @@ object HTMLParser {
     }
 
     private fun isExcludedContainerLink(link: HTMLDocument.Link): Boolean {
-        val excludedTags = setOf("nav", "header", "footer", "form")
+        val excludedTags = setOf("nav", "header", "footer", "form", "blockquote")
         if (link.ancestorTags.any { excludedTags.contains(it) }) return true
 
         val excludedClassTokens = listOf(
@@ -842,11 +883,14 @@ object HTMLParser {
     }
 
     private fun extractEpisodeNumber(label: String, url: String, fallback: Int): Int {
-        Regex("""(?:tập|tap|ep|episode)?\s*(\d{1,4})(?!\d)""", RegexOption.IGNORE_CASE)
+        // Explicit "Tập N" / "Ep N" in label must beat quality tags like "4K - Tập 1" or "1080p Tập 5"
+        Regex("""\b(?:tập|tap|ep|episode)\s*[:.#-]?\s*(\d{1,4})(?!\d)""", RegexOption.IGNORE_CASE)
             .find(label)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
         val cleanUrl = url.replace(Regex("""-a\d+(?:/|\.html|$)""", RegexOption.IGNORE_CASE), "/")
         Regex("""/(?:tap|ep|episode)-(\d{1,4})(?:[-/.?#]|$)""", RegexOption.IGNORE_CASE)
             .find(cleanUrl)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
+        val strippedLabel = label.replace(Regex("""\b(?:4k|2k|1080p|720p|480p|360p|x264|x265)\b""", RegexOption.IGNORE_CASE), " ")
+        Regex("""^\s*(\d{1,4})\b""").find(strippedLabel)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
         return fallback
     }
 

@@ -1,8 +1,13 @@
 package com.anpinime.projector
 
+import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.*
 import org.junit.Test
+import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 class SubtitleTranslatorTest {
 
@@ -89,5 +94,101 @@ class SubtitleTranslatorTest {
         }
         assertEquals(listOf("vi-A", "vi-B", "vi-C", "vi-D"), out)
         assertEquals(3, calls) // 1 batch of 4 + 2 halves of 2 (instead of 5 calls!)
+    }
+
+    @Test
+    fun parsesAssDialogueCuesHtmlEntitiesAndRejectsHtmlErrorPages() {
+        val ass = """
+            [Script Info]
+            Title: Test
+            [Events]
+            Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+            Dialogue: 0,0:00:01.20,0:00:03.45,Default,,0,0,0,,{\i1}Hello &amp; welcome{\i0}\N1 &lt; 2 &quot;ok&quot;
+        """.trimIndent()
+        val cues = SubtitleTranslator.parseTimedCues(ass)
+        assertEquals(1, cues.size)
+        assertEquals(1_200L, cues[0].startMs)
+        assertEquals(3_450L, cues[0].endMs)
+        assertEquals("Hello & welcome\n1 < 2 \"ok\"", cues[0].text)
+
+        val htmlError = "<!doctype html><html><head><title>Just a moment...</title></head><body>403</body></html>"
+        assertTrue(SubtitleTranslator.parseTimedCues(htmlError).isEmpty())
+    }
+
+    @Test
+    fun translateBatchViaHtmlMatchesAetherProtocolAndRestoresLineBreaks() {
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody("""[["Xin chào!<br /> Bạn khỏe không?","Tạm biệt"],["en","en"]]""")
+        )
+        server.start()
+        try {
+            val client = OkHttpClient()
+            val out = SubtitleTranslator.translateBatchViaHtml(
+                texts = listOf("Hello!\nHow are you?", "Goodbye"),
+                client = client,
+                targetLang = "vi",
+                endpointUrl = server.url("/v1/translateHtml").toString(),
+                apiKey = "test-api-key",
+                fallbackTranslateFn = null,
+                retryDelayMs = 0L
+            )
+            val recorded = server.takeRequest()
+            assertEquals("POST", recorded.method)
+            assertEquals("test-api-key", recorded.getHeader("X-goog-api-key"))
+            assertTrue(recorded.getHeader("Content-Type").orEmpty().contains("application/json+protobuf"))
+            val bodyStr = recorded.body.readUtf8()
+            assertEquals("""[[["Hello!<br />How are you?","Goodbye"],"auto","vi"],"te"]""", bodyStr)
+            assertEquals(listOf("Xin chào!\nBạn khỏe không?", "Tạm biệt"), out)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun translateAllProgressiveFastDeduplicatesPhrasesAndRoundTripsDiskCache() {
+        val phrases = listOf("Yeah.", "What?", "Look at the sky!", "Let's go.")
+        val cues = (0 until 240).map { i ->
+            TimedSubtitleCue(
+                startMs = i * 2000L,
+                endMs = i * 2000L + 1500L,
+                startStamp = "00:00:00.000",
+                endStamp = "00:00:01.500",
+                text = phrases[i % phrases.size]
+            )
+        }
+        val sentStrings = AtomicInteger(0)
+        val waveReady = AtomicBoolean(false)
+        val translated = SubtitleTranslator.translateAllProgressiveFast(
+            cues = cues,
+            currentPositionMs = 200_000L,
+            workers = 2,
+            batchSize = 80,
+            translateBatchFn = { uniqueList ->
+                sentStrings.addAndGet(uniqueList.size)
+                uniqueList.map { "VI:$it" }
+            },
+            onWaveReady = {
+                waveReady.set(true)
+            }
+        )
+        assertTrue(waveReady.get())
+        assertEquals(240, translated.size)
+        // With deduplication of 4 distinct phrases across batches, unique calls stay minimal
+        assertTrue("Expected deduped phrase count <= 16, was ${sentStrings.get()}", sentStrings.get() <= 16)
+        assertEquals("VI:Look at the sky!", SubtitleTranslator.findActiveCueText(cues, translated, 4_500L))
+
+        val tmpFile = File.createTempFile("sub_cache_test", ".json")
+        try {
+            SubtitleTranslator.saveCachedTranslations(tmpFile, cues.size, translated)
+            val loaded = SubtitleTranslator.loadCachedTranslations(tmpFile, cues.size)
+            assertEquals(240, loaded.size)
+            assertEquals("VI:Yeah.", loaded[0])
+            assertTrue(SubtitleTranslator.loadCachedTranslations(tmpFile, 999).isEmpty())
+        } finally {
+            tmpFile.delete()
+        }
     }
 }

@@ -12,7 +12,6 @@ import android.os.SystemClock
 import android.util.Base64
 import android.util.TypedValue
 import android.view.Gravity
-import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
@@ -123,20 +122,31 @@ object WebViewHelper {
         } catch (_: Throwable) {}
     }
 
-    fun registerActivity(activity: Activity) {
-        activityRef = WeakReference(activity)
-        appContext = activity.applicationContext
-        initCookies(activity.applicationContext)
+    private fun initUserAgent(context: Context) {
         try {
-            val rawUa = WebSettings.getDefaultUserAgent(activity)
+            val rawUa = WebSettings.getDefaultUserAgent(context)
             if (!rawUa.isNullOrBlank()) {
-                // Clean "; wv" and "Version/4.0" so Cloudflare treats WebView & HttpURLConnection identically as Chrome
+                // Clean "; wv" and "Version/4.0" so Cloudflare treats WebView & OkHttp identically as Chrome
                 userAgent = rawUa
                     .replace("; wv", "")
                     .replace(Regex("""Version/\d+\.\d+\s*"""), "")
                     .trim()
             }
         } catch (_: Throwable) {}
+    }
+
+    fun init(context: Context) {
+        val app = context.applicationContext
+        appContext = app
+        initCookies(app)
+        initUserAgent(app)
+    }
+
+    fun registerActivity(activity: Activity) {
+        activityRef = WeakReference(activity)
+        appContext = activity.applicationContext
+        initCookies(activity.applicationContext)
+        initUserAgent(activity)
     }
 
     fun persistOkHttpCookie(url: String, cookiePair: String) {
@@ -202,9 +212,15 @@ object WebViewHelper {
             "just a moment",
             "xác minh an toàn",
             "xác minh bảo mật",
+            "đang kiểm tra",
             "attention required",
             "verify you are human",
-            "checking your browser"
+            "checking your browser",
+            "one more step",
+            "ddos-guard",
+            "access denied",
+            "security check",
+            "403 forbidden"
         )
         val hasChallengeTitle = challengeTitles.any { title.contains(it) }
         val hasContent = Regex("""class=["'][^"']*(?:tpost|ml-item|film-item|movie-item|btn-episode)[^"']*["']""")
@@ -213,18 +229,26 @@ object WebViewHelper {
         return hasChallengeTitle ||
             lower.contains("id=\"challenge-form\"") ||
             lower.contains("id='challenge-form'") ||
+            lower.contains("_cf_chl_opt") ||
+            lower.contains("/cdn-cgi/challenge-platform/") ||
+            lower.contains("challenge-error-text") ||
+            lower.contains("captcha-placeholder") ||
             lower.contains("cf-turnstile") ||
             lower.contains("g-recaptcha") ||
             lower.contains("h-captcha")
     }
 
     /**
-     * Loads a URL inside a real Android WebView to follow redirects (e.g. bit.ly -> animevietsub.sale),
+     * Loads a URL inside a real Android WebView to follow redirects (e.g. bit.ly -> animevietsub.best),
      * pass Cloudflare JS/Turnstile verification, sync cf_clearance cookies to CookieManager,
      * and return (html, finalUrl).
      */
     @SuppressLint("SetJavaScriptEnabled")
-    suspend fun fetchHtml(targetUrl: String, timeoutMs: Long = 28_000L): Pair<String, String> = mutex.withLock {
+    suspend fun fetchHtml(
+        targetUrl: String,
+        timeoutMs: Long = 28_000L,
+        waitForEpisodes: Boolean = false
+    ): Pair<String, String> = mutex.withLock {
         withContext(Dispatchers.Main) {
             suspendCancellableCoroutine { cont ->
                 val activity = activityRef?.get()?.takeIf { !it.isFinishing && !it.isDestroyed }
@@ -235,10 +259,11 @@ object WebViewHelper {
                 }
 
                 var finished = false
-                var hasDispatchedTouch = false
                 var webView: WebView? = null
                 var hiddenHolder: FrameLayout? = null
                 var verifyDialog: Dialog? = null
+                var lastEpCount = -1
+                var lastEpChangeAt = System.currentTimeMillis()
                 val startTime = System.currentTimeMillis()
 
                 fun cleanupAndResume(html: String, finalUrl: String) {
@@ -361,23 +386,18 @@ object WebViewHelper {
                               var s = window.getComputedStyle(e);
                               return r.width > 10 && r.height > 10 && s.display !== 'none' && s.visibility !== 'hidden';
                             };
-                            var tf = document.querySelector('iframe[src*="challenges.cloudflare.com"],iframe[src*="turnstile"]');
-                            var touchBox = null;
-                            if (tf && visible(tf)) {
-                              var r = tf.getBoundingClientRect();
-                              touchBox = {
-                                x: Math.round(r.left + Math.min(35, r.width / 2)),
-                                y: Math.round(r.top + (r.height / 2))
-                              };
-                            }
-                            var sel = 'iframe[src*="challenges.cloudflare.com"],iframe[src*="recaptcha"],iframe[src*="hcaptcha"],.cf-turnstile,.g-recaptcha,.h-captcha,#challenge-stage input[type="checkbox"]';
+                            var sel = 'iframe[src*="challenges.cloudflare.com"],iframe[src*="turnstile"],iframe[src*="recaptcha"],iframe[src*="hcaptcha"],.cf-turnstile,.g-recaptcha,.h-captcha,#challenge-stage input[type="checkbox"]';
                             var interactive = Array.prototype.some.call(document.querySelectorAll(sel), visible);
+                            var challengeDom = !!(window._cf_chl_opt) ||
+                              !!document.querySelector('.captcha-placeholder, .cf-turnstile, #challenge-stage, #challenge-form, #cf-please-wait');
+                            var epCount = document.querySelectorAll('.list-episode a, .list_episode a, .episodes a, .episode-list a, a.btn-episode, [data-hash], [data-play]').length;
                             var html = document.documentElement ? document.documentElement.outerHTML : '';
                             return JSON.stringify({
                               href: window.location.href || '',
                               title: document.title || '',
                               interactive: interactive,
-                              touchBox: touchBox,
+                              challengeDom: challengeDom,
+                              epCount: epCount,
                               html: html
                             });
                           } catch(e) {
@@ -391,7 +411,8 @@ object WebViewHelper {
                         mainHandler.postAtTime({
                             if (finished) return@postAtTime
                             val elapsed = System.currentTimeMillis() - startTime
-                            if (elapsed > timeoutMs) {
+                            val effectiveTimeout = if (verifyDialog != null) maxOf(timeoutMs, 180_000L) else timeoutMs
+                            if (elapsed > effectiveTimeout) {
                                 val currentUrl = wv.url ?: targetUrl
                                 cleanupAndResume("", currentUrl)
                                 return@postAtTime
@@ -407,37 +428,30 @@ object WebViewHelper {
                                             val href = obj.optString("href").ifBlank { wv.url ?: targetUrl }
                                             val html = obj.optString("html")
                                             val interactive = obj.optBoolean("interactive", false)
-                                            val isBitly = href.contains("bit.ly", ignoreCase = true)
-
-                                            // Auto-dispatch touch event to Cloudflare Turnstile checkbox after 1.2s
-                                            val touchObj = obj.optJSONObject("touchBox")
-                                            if (touchObj != null && !hasDispatchedTouch && elapsed > 1200L) {
-                                                val tx = touchObj.optDouble("x", -1.0).toFloat()
-                                                val ty = touchObj.optDouble("y", -1.0).toFloat()
-                                                if (tx > 0f && ty > 0f) {
-                                                    hasDispatchedTouch = true
-                                                    val nowTime = SystemClock.uptimeMillis()
-                                                    val downEv = MotionEvent.obtain(nowTime, nowTime, MotionEvent.ACTION_DOWN, tx, ty, 0)
-                                                    val upEv = MotionEvent.obtain(nowTime, nowTime + 60L, MotionEvent.ACTION_UP, tx, ty, 0)
-                                                    wv.dispatchTouchEvent(downEv)
-                                                    wv.dispatchTouchEvent(upEv)
-                                                    downEv.recycle()
-                                                    upEv.recycle()
-                                                }
+                                            val challengeDom = obj.optBoolean("challengeDom", false)
+                                            val epCount = obj.optInt("epCount", 0)
+                                            if (epCount != lastEpCount) {
+                                                lastEpCount = epCount
+                                                lastEpChangeAt = System.currentTimeMillis()
                                             }
+                                            val isBitly = href.contains("bit.ly", ignoreCase = true)
+                                            val challengeActive = containsVerification(html) || challengeDom
 
-                                            if (!isBitly && html.length > 400 && !containsVerification(html)) {
+                                            if (!isBitly && html.length > 400 && !challengeActive) {
                                                 val hasMarkers = Regex(
                                                     """(?is)(?:TPost|ml-item|film-item|movie-item|btn-episode|filmInfo\.filmID|Description|MovieList)"""
                                                 ).containsMatchIn(html)
-                                                if (hasMarkers || elapsed > 3500L) {
+                                                val epStable = !waitForEpisodes ||
+                                                    (lastEpCount > 0 && (System.currentTimeMillis() - lastEpChangeAt) >= 600L) ||
+                                                    elapsed > 4500L
+                                                if (epStable && (hasMarkers || elapsed > 2500L)) {
                                                     cleanupAndResume(html, href)
                                                     return@evaluateJavascript
                                                 }
                                             }
 
-                                            // Only show verification dialog if an interactive challenge checkbox remains unsolved after 9.0s
-                                            val needsChallengeUi = interactive && elapsed > 9000L
+                                            val needsChallengeUi = (interactive && elapsed > 1200L) ||
+                                                (challengeActive && elapsed > 2800L)
                                             if (needsChallengeUi && verifyDialog == null && activity != null && !activity.isFinishing) {
                                                 wv.settings.loadsImagesAutomatically = true
                                                 (wv.parent as? ViewGroup)?.removeView(wv)
@@ -464,7 +478,7 @@ object WebViewHelper {
                                                     setPadding(0, 0, 0, UiHelper.dp(activity, 10))
                                                 }
                                                 val titleTv = TextView(activity).apply {
-                                                    text = "Đang xác minh kết nối ${URL(targetUrl).host}…"
+                                                    text = "Xác minh kết nối ${URL(href).host}…"
                                                     setTextColor(Color.WHITE)
                                                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
                                                     typeface = Typeface.DEFAULT_BOLD
@@ -488,13 +502,10 @@ object WebViewHelper {
                                                 headerRow.addView(titleTv)
                                                 headerRow.addView(closeBtn)
                                                 box.addView(headerRow)
-                                                box.addView(
-                                                    wv,
-                                                    LinearLayout.LayoutParams(
-                                                        UiHelper.dp(activity, 520),
-                                                        UiHelper.dp(activity, 380)
-                                                    )
-                                                )
+                                                val dm = activity.resources.displayMetrics
+                                                val dlgW = (dm.widthPixels * 0.92f).toInt().coerceAtMost(UiHelper.dp(activity, 520))
+                                                val dlgH = (dm.heightPixels * 0.65f).toInt().coerceAtMost(UiHelper.dp(activity, 420))
+                                                box.addView(wv, LinearLayout.LayoutParams(dlgW, dlgH))
                                                 dlg.setContentView(box)
                                                 dlg.show()
                                                 verifyDialog = dlg
