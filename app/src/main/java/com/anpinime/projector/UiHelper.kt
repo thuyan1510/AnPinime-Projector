@@ -19,16 +19,16 @@ import android.widget.ProgressBar
 import android.widget.TextView
 
 object UiHelper {
-    val COLOR_BG = Color.parseColor("#080A0F")
-    val COLOR_SIDEBAR = Color.parseColor("#0F121B")
-    val COLOR_CARD = Color.parseColor("#171B28")
-    val COLOR_SURFACE_HIGH = Color.parseColor("#1F2538")
-    val COLOR_BORDER = Color.parseColor("#1EFFFFFF")
-    val COLOR_ACCENT = Color.parseColor("#9333EA")
-    val COLOR_BLUE = Color.parseColor("#1D8CF8")
+    val COLOR_BG = Color.parseColor("#060608")
+    val COLOR_SIDEBAR = Color.parseColor("#0C0B0E")
+    val COLOR_CARD = Color.parseColor("#141216")
+    val COLOR_SURFACE_HIGH = Color.parseColor("#241418")
+    val COLOR_BORDER = Color.parseColor("#28FF2A36")
+    val COLOR_ACCENT = Color.parseColor("#E50914")
+    val COLOR_BLUE = Color.parseColor("#FF2A36")
     val COLOR_YELLOW = Color.parseColor("#F5C518")
     val COLOR_RED = Color.parseColor("#E50914")
-    val COLOR_TEXT_SECONDARY = Color.parseColor("#A8B0C2")
+    val COLOR_TEXT_SECONDARY = Color.parseColor("#B5ACB0")
 
     fun isCompactPortrait(context: Context): Boolean =
         BuildConfig.IS_PHONE_FLAVOR ||
@@ -222,8 +222,8 @@ object UiHelper {
                 background = GradientDrawable(
                     GradientDrawable.Orientation.BOTTOM_TOP,
                     intArrayOf(
-                        Color.parseColor("#E6080A0F"),
-                        Color.parseColor("#4D080A0F"),
+                        Color.parseColor("#E6060608"),
+                        Color.parseColor("#4D060608"),
                         Color.TRANSPARENT
                     )
                 )
@@ -309,7 +309,7 @@ object UiHelper {
             badgeView.visibility = View.VISIBLE
             badgeView.text = badgeStr
             badgeView.background = roundedBg(
-                if (anime.source.isMovie) Color.parseColor("#EBE50914") else Color.parseColor("#EB7C3AED"),
+                if (anime.source.isMovie) Color.parseColor("#E6E50914") else Color.parseColor("#E6B91C1C"),
                 6,
                 card.context
             )
@@ -334,7 +334,7 @@ object UiHelper {
             val isVip = shortCatalog == "VIP"
             scoreView.setTextColor(if (isVip) Color.BLACK else Color.WHITE)
             scoreView.background = roundedBg(
-                if (isVip) COLOR_YELLOW else Color.parseColor("#CC1485F5"),
+                if (isVip) COLOR_YELLOW else Color.parseColor("#D9B80710"),
                 5,
                 card.context
             )
@@ -346,8 +346,8 @@ object UiHelper {
         makeFocusableButton(
             view = card,
             normalBgColor = Color.TRANSPARENT,
-            focusedBgColor = Color.parseColor("#2AFFFFFF"),
-            focusedStrokeColor = COLOR_ACCENT,
+            focusedBgColor = Color.parseColor("#33E50914"),
+            focusedStrokeColor = Color.parseColor("#FF2A36"),
             radiusDp = 10,
             scaleOnFocus = 1.06f
         ) {

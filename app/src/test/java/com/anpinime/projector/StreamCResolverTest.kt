@@ -99,4 +99,102 @@ class StreamCResolverTest {
         assertNotNull(decrypted)
         assertEquals("secret-grant", decrypted!!.getString("grant"))
     }
+
+    @Test
+    fun extractsR25StringBootstrapAndPreissuedPlaylistFromStreamC() {
+        val server = MockWebServer()
+        server.start()
+        val apiUrl = server.url("/embed.php?hash=2a1d850ad1169cc89a9d3161e7d2ef15").toString()
+        val expectedPlaylist = server.url("/eyJ0IjoicGxheWxpc3QiLCJ2IjoxfQ").toString()
+
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                if (request.method == "POST") {
+                    val reqJson = JSONObject(request.body.readUtf8())
+                    return when (reqJson.getString("action")) {
+                        "bootstrap" -> MockResponse().setBody(
+                            JSONObject()
+                                .put("bootstrap", "eyJ0eXAiOiJib290c3RyYXAiLCJhbGciOiJIUzI1NiJ9.payload.sig")
+                                .put("turnstileEnabled", false)
+                                .put(
+                                    "preissued",
+                                    JSONObject()
+                                        .put("playlistFormat", "hls")
+                                        .put("playlist", expectedPlaylist)
+                                )
+                                .toString()
+                        )
+                        else -> MockResponse().setResponseCode(400)
+                    }
+                }
+                return MockResponse().setResponseCode(404)
+            }
+        }
+
+        try {
+            val resolved = StreamCResolver.extractFromHtml(
+                embedUrl = apiUrl,
+                html = "",
+                referer = "https://phim.nguonc.com/api/film/test",
+                http = OkHttpClient()
+            )
+            assertNotNull(resolved)
+            assertFalse(resolved!!.isWeb)
+            assertTrue(resolved.isF4kWrapped)
+            assertEquals(StreamMediaKind.HLS, resolved.mediaKind)
+            assertEquals(expectedPlaylist, resolved.url)
+            assertEquals("2a1d850ad1169cc89a9d3161e7d2ef15", resolved.headers["X-StreamC-Hash"])
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun extractsR25StringBootstrapViaIssueEndpointWhenPreissuedMissing() {
+        val server = MockWebServer()
+        server.start()
+        val apiUrl = server.url("/embed.php?hash=99887766").toString()
+        val expectedPlaylist = server.url("/eyJ0IjoicGxheWxpc3QifQ").toString()
+        val jwtBootstrap = "eyJ0eXAiOiJib290c3RyYXAiLCJhbGciOiJIUzI1NiJ9.payload.sig"
+
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                if (request.method == "POST") {
+                    val reqJson = JSONObject(request.body.readUtf8())
+                    return when (reqJson.getString("action")) {
+                        "bootstrap" -> MockResponse().setBody(
+                            JSONObject()
+                                .put("bootstrap", jwtBootstrap)
+                                .put("turnstileEnabled", false)
+                                .toString()
+                        )
+                        "issue" -> {
+                            assertEquals(jwtBootstrap, reqJson.getString("bootstrap"))
+                            MockResponse().setBody(
+                                JSONObject()
+                                    .put("playlistFormat", "hls")
+                                    .put("playlist", expectedPlaylist)
+                                    .toString()
+                            )
+                        }
+                        else -> MockResponse().setResponseCode(400)
+                    }
+                }
+                return MockResponse().setResponseCode(404)
+            }
+        }
+
+        try {
+            val resolved = StreamCResolver.extractFromHtml(
+                embedUrl = apiUrl,
+                html = "",
+                referer = "https://phim.nguonc.com/api/film/test",
+                http = OkHttpClient()
+            )
+            assertNotNull(resolved)
+            assertEquals(expectedPlaylist, resolved!!.url)
+        } finally {
+            server.shutdown()
+        }
+    }
 }

@@ -98,7 +98,7 @@ object AetherSourceResolver {
             specific ?: sweepScrapers(mediaType, tmdbId, season, epNum, onProgress, excludeId = targetServerId)
         } else {
             sweepScrapers(mediaType, tmdbId, season, epNum, onProgress)
-        } ?: throw IllegalStateException("Không tìm thấy luồng phát hợp lệ từ các máy chủ Aether cho phim này.")
+        } ?: throw IllegalStateException("Không tìm thấy luồng phát hợp lệ từ các máy chủ Thúy An cho phim này.")
 
         // Collect subtitles from all available providers
         val allSubs = ArrayList<ExternalSubtitleTrack>()

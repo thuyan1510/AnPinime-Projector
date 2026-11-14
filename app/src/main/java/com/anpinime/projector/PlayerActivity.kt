@@ -196,13 +196,13 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var rewindBtn: ImageView
     private lateinit var forwardBtn: ImageView
     private lateinit var nextEpBtn: ImageView
-    private lateinit var episodeBtn: ImageView
-    private lateinit var serverBtn: ImageView
-    private lateinit var subtitleBtn: ImageView
-    private lateinit var aetherTranslateBtn: ImageView
-    private lateinit var audioBtn: ImageView
-    private lateinit var aspectBtn: ImageView
-    private lateinit var settingsBtn: ImageView
+    private lateinit var episodeBtn: LinearLayout
+    private lateinit var serverBtn: LinearLayout
+    private lateinit var subtitleBtn: LinearLayout
+    private lateinit var aetherTranslateBtn: LinearLayout
+    private lateinit var audioBtn: LinearLayout
+    private lateinit var aspectBtn: LinearLayout
+    private lateinit var settingsBtn: LinearLayout
     private lateinit var sidePanelBackdrop: View
     private lateinit var sidePanelContainer: LinearLayout
     private lateinit var panelTitleText: TextView
@@ -312,7 +312,7 @@ class PlayerActivity : AppCompatActivity() {
             subtitleView.setCues(emptyList())
         }
         if (::aetherTranslateBtn.isInitialized) {
-            Phim4KPlayerUi.styleActiveIconButton(aetherTranslateBtn, this, isActive = false)
+            Phim4KPlayerUi.styleLabeledControlButton(aetherTranslateBtn, this, isActive = false)
         }
         updateTranslateStatusUi(0, 0, completed = false)
     }
@@ -414,10 +414,47 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
+    private fun setWebSurfaceVisible(visible: Boolean, focusable: Boolean = false) {
+        if (visible) {
+            if (::surfaceView.isInitialized) {
+                surfaceView.visibility = View.INVISIBLE
+            }
+            if (::headlessWebContainer.isInitialized) {
+                headlessWebContainer.visibility = View.VISIBLE
+                headlessWebContainer.layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+                headlessWebContainer.isFocusable = focusable
+                headlessWebContainer.isFocusableInTouchMode = focusable
+            }
+            fallbackWebView?.let { wv ->
+                wv.visibility = View.VISIBLE
+                wv.isFocusable = focusable
+                wv.isFocusableInTouchMode = focusable
+            }
+        } else {
+            fallbackWebView?.let { wv ->
+                wv.visibility = View.GONE
+                wv.isFocusable = false
+                wv.isFocusableInTouchMode = false
+            }
+            if (::headlessWebContainer.isInitialized) {
+                headlessWebContainer.visibility = View.GONE
+                headlessWebContainer.layoutParams = FrameLayout.LayoutParams(1, 1, Gravity.TOP or Gravity.START)
+                headlessWebContainer.isFocusable = false
+                headlessWebContainer.isFocusableInTouchMode = false
+            }
+            if (::surfaceView.isInitialized) {
+                surfaceView.visibility = View.VISIBLE
+            }
+        }
+    }
+
     private fun destroyWebPlayer(force: Boolean = true) {
         if (!force && isAetherEpisode() && fallbackWebView != null) {
             // Keep the hidden WebView running in background for AI subtitle translation and fast failover
-            fallbackWebView?.visibility = View.GONE
+            setWebSurfaceVisible(false)
             fallbackWebView?.evaluateJavascript(
                 "(function(){try{document.querySelectorAll('video,audio').forEach(function(m){m.pause();m.muted=true;m.removeAttribute('src');m.load();});}catch(e){}})();",
                 null
@@ -425,8 +462,10 @@ class PlayerActivity : AppCompatActivity() {
             return
         }
         aetherMenuOpen = false
-        val wv = fallbackWebView ?: return
+        val wv = fallbackWebView
         fallbackWebView = null
+        setWebSurfaceVisible(false)
+        if (wv == null) return
         webAudioTracks = emptyList()
         webSubtitleTracks = emptyList()
         webQualities = emptyList()
@@ -688,7 +727,7 @@ class PlayerActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setPadding(UiHelper.dp(context, 24), UiHelper.dp(context, 18), UiHelper.dp(context, 24), UiHelper.dp(context, 18))
-            background = UiHelper.roundedBg(Color.parseColor("#D908090E"), 16, context, Color.parseColor("#26FFFFFF"), 1)
+            background = UiHelper.roundedBg(Color.parseColor("#EB0A080B"), 16, context, Color.parseColor("#40FF2A36"), 1)
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -699,12 +738,12 @@ class PlayerActivity : AppCompatActivity() {
 
         loadingProviderBadge = TextView(this).apply {
             text = "⚡ Đang kiểm tra: Tự động"
-            setTextColor(Color.parseColor("#38BDF8"))
+            setTextColor(Color.parseColor("#FF6B74"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             setPadding(UiHelper.dp(context, 14), UiHelper.dp(context, 5), UiHelper.dp(context, 14), UiHelper.dp(context, 5))
-            background = UiHelper.roundedBg(Color.parseColor("#2638BDF8"), 14, context, Color.parseColor("#4D38BDF8"), 1)
+            background = UiHelper.roundedBg(Color.parseColor("#2EE50914"), 14, context, Color.parseColor("#66FF2A36"), 1)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -861,7 +900,7 @@ class PlayerActivity : AppCompatActivity() {
         }
         topServerText = TextView(this).apply {
             text = "${currentEpisode.title} • ${currentEpisode.season}"
-            setTextColor(0xFFB8C7D9.toInt())
+            setTextColor(0xFFC8BDC0.toInt())
             setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 11.5f else 13f)
             setSingleLine(true)
             ellipsize = TextUtils.TruncateAt.END
@@ -877,11 +916,11 @@ class PlayerActivity : AppCompatActivity() {
         }
         topTranslateBadge = TextView(this).apply {
             visibility = View.GONE
-            setTextColor(0xFFE1F5FE.toInt())
+            setTextColor(0xFFFFE6E8.toInt())
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             typeface = Typeface.DEFAULT_BOLD
             setPadding(Phim4KPlayerUi.dp(context, 10), Phim4KPlayerUi.dp(context, 5), Phim4KPlayerUi.dp(context, 10), Phim4KPlayerUi.dp(context, 5))
-            background = Phim4KPlayerUi.createGlassPillDrawable(context, fillColor = 0x404FC3F7, strokeColor = 0x994FC3F7.toInt(), cornerDp = 14)
+            background = Phim4KPlayerUi.createGlassPillDrawable(context, fillColor = 0x5AE50914, strokeColor = 0xCCFF2A36.toInt(), cornerDp = 14)
             isFocusable = false
             isClickable = true
             setOnClickListener { triggerAetherVietnameseTranslation() }
@@ -898,7 +937,7 @@ class PlayerActivity : AppCompatActivity() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             typeface = Typeface.DEFAULT_BOLD
             setPadding(Phim4KPlayerUi.dp(context, 10), Phim4KPlayerUi.dp(context, 5), Phim4KPlayerUi.dp(context, 10), Phim4KPlayerUi.dp(context, 5))
-            background = Phim4KPlayerUi.createGlassPillDrawable(context, fillColor = 0x7305060A, strokeColor = 0x33FFFFFF, cornerDp = 14)
+            background = Phim4KPlayerUi.createGlassPillDrawable(context, fillColor = 0x80141216.toInt(), strokeColor = 0x45FF2A36, cornerDp = 14)
             isFocusable = false
             isClickable = true
             setOnClickListener { showSettingsMenu() }
@@ -907,7 +946,7 @@ class PlayerActivity : AppCompatActivity() {
         topBar.addView(topBadgesRow)
         osdContainer.addView(topBar)
 
-        // Bottom Control Panel (Phim4K Order: Hint -> Time Row -> SeekBar -> Centered Icon Row)
+        // Bottom Control Panel (Black-Red Cinema Order: Hint -> Time Row -> SeekBar -> Transport & Action Pills)
         val bottomPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(hPad, Phim4KPlayerUi.dp(context, 28), hPad, vPadBottom)
@@ -921,7 +960,7 @@ class PlayerActivity : AppCompatActivity() {
 
         controlHintText = TextView(this).apply {
             text = "Chạm video để ẩn/hiện · Chạm đúp trái/phải tua 10s"
-            setTextColor(0xFFA6D8FA.toInt())
+            setTextColor(0xFFFF8F96.toInt())
             setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 11f else 12f)
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             gravity = Gravity.CENTER
@@ -956,14 +995,14 @@ class PlayerActivity : AppCompatActivity() {
         }
         seekPreviewBadge = TextView(this).apply {
             visibility = View.GONE
-            setTextColor(0xFF06131C.toInt())
+            setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             typeface = Typeface.DEFAULT_BOLD
             setPadding(Phim4KPlayerUi.dp(context, 10), Phim4KPlayerUi.dp(context, 3), Phim4KPlayerUi.dp(context, 10), Phim4KPlayerUi.dp(context, 3))
             background = Phim4KPlayerUi.createGlassPillDrawable(
                 context,
-                fillColor = Phim4KPlayerUi.COLOR_ACCENT_CYAN,
-                strokeColor = Color.TRANSPARENT,
+                fillColor = Phim4KPlayerUi.COLOR_PHIM4K_RED,
+                strokeColor = 0x80FFFFFF.toInt(),
                 cornerDp = 12
             )
             layoutParams = FrameLayout.LayoutParams(
@@ -974,7 +1013,7 @@ class PlayerActivity : AppCompatActivity() {
         }
         timeTotalText = TextView(this).apply {
             text = "00:00"
-            setTextColor(0xFFD6E2F0.toInt())
+            setTextColor(0xFFD8CED1.toInt())
             setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 11.5f else 12.5f)
             typeface = Typeface.DEFAULT_BOLD
             setPadding(Phim4KPlayerUi.dp(context, 9), Phim4KPlayerUi.dp(context, 3), Phim4KPlayerUi.dp(context, 9), Phim4KPlayerUi.dp(context, 3))
@@ -1045,12 +1084,13 @@ class PlayerActivity : AppCompatActivity() {
         }
         bottomPanel.addView(seekBar)
 
-        // Centered Phim4K Single-Row Icon Bar
+        // Black-Red Optimized Player Control Bar: Transport Circles + Labeled Action Pills
         val btnSize = if (compact) 38 else 44
-        val playBtnSize = if (compact) 46 else 54
+        val playBtnSize = if (compact) 48 else 56
         val iconPad = if (compact) 9 else 11
         val playIconPad = if (compact) 11 else 13
-        val gapPx = Phim4KPlayerUi.dp(this, if (compact) 7 else 10)
+        val gapPx = Phim4KPlayerUi.dp(this, if (compact) 6 else 9)
+        val pillGapPx = Phim4KPlayerUi.dp(this, if (compact) 6 else 8)
 
         val btnRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1090,6 +1130,43 @@ class PlayerActivity : AppCompatActivity() {
             }
         }
 
+        fun makeP4kPillBtn(
+            iconResId: Int,
+            shortLabel: String,
+            hintTitle: String,
+            extraHint: () -> String = { "" },
+            onClick: () -> Unit
+        ): LinearLayout {
+            return Phim4KPlayerUi.createLabeledControlButton(
+                context = this,
+                iconRes = iconResId,
+                label = shortLabel,
+                compact = compact,
+                contentDesc = hintTitle
+            ) {
+                scheduleHideOsd()
+                onClick()
+            }.apply {
+                nextFocusUpId = seekBarId
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { marginEnd = pillGapPx }
+                setOnFocusChangeListener { v, hasFocus ->
+                    v.animate()
+                        .scaleX(if (hasFocus) 1.06f else 1f)
+                        .scaleY(if (hasFocus) 1.06f else 1f)
+                        .setDuration(110L)
+                        .start()
+                    if (hasFocus) {
+                        scheduleHideOsd()
+                        val detail = extraHint()
+                        updateFocusedHint(if (detail.isNotBlank()) "$hintTitle · $detail" else hintTitle)
+                    }
+                }
+            }
+        }
+
         fun attachSeekKeyRepeat(btn: ImageView, baseDelta: Long) {
             var lastRepeatAt = 0L
             btn.setOnKeyListener { _, code, event ->
@@ -1124,8 +1201,20 @@ class PlayerActivity : AppCompatActivity() {
         }
         btnRow.addView(nextEpBtn)
 
-        episodeBtn = makeP4kIconBtn(
+        btnRow.addView(View(this).apply {
+            setBackgroundColor(0x4DFF2A36)
+            layoutParams = LinearLayout.LayoutParams(
+                maxOf(1, Phim4KPlayerUi.dp(context, 1)),
+                Phim4KPlayerUi.dp(context, if (compact) 20 else 24)
+            ).apply {
+                marginStart = Phim4KPlayerUi.dp(context, 2)
+                marginEnd = Phim4KPlayerUi.dp(context, if (compact) 8 else 12)
+            }
+        })
+
+        episodeBtn = makeP4kPillBtn(
             R.drawable.ic_p4k_playlist,
+            "Tập",
             "Danh sách tập",
             extraHint = { "${allEpisodes.count { it.season == currentEpisode.season }} tập" }
         ) {
@@ -1133,8 +1222,9 @@ class PlayerActivity : AppCompatActivity() {
         }
         btnRow.addView(episodeBtn)
 
-        serverBtn = makeP4kIconBtn(
+        serverBtn = makeP4kPillBtn(
             R.drawable.ic_p4k_server,
+            "Nguồn",
             "Đổi nguồn phát / Server",
             extraHint = { currentEpisode.season }
         ) {
@@ -1142,8 +1232,9 @@ class PlayerActivity : AppCompatActivity() {
         }
         btnRow.addView(serverBtn)
 
-        subtitleBtn = makeP4kIconBtn(
+        subtitleBtn = makeP4kPillBtn(
             R.drawable.ic_p4k_subtitles,
+            "Phụ đề",
             "Phụ đề",
             extraHint = { if (viLiveSubActive) "Tiếng Việt (AI)" else "Chọn hoặc tắt phụ đề" }
         ) {
@@ -1151,8 +1242,9 @@ class PlayerActivity : AppCompatActivity() {
         }
         btnRow.addView(subtitleBtn)
 
-        aetherTranslateBtn = makeP4kIconBtn(
+        aetherTranslateBtn = makeP4kPillBtn(
             R.drawable.ic_p4k_translate,
+            "Dịch AI",
             "Dịch Sub Việt (AI)",
             extraHint = { if (viLiveSubActive) "Đang bật" else "Tức thì bằng AI" }
         ) {
@@ -1160,13 +1252,14 @@ class PlayerActivity : AppCompatActivity() {
         }
         btnRow.addView(aetherTranslateBtn)
 
-        audioBtn = makeP4kIconBtn(R.drawable.ic_p4k_audio, "Âm thanh") {
+        audioBtn = makeP4kPillBtn(R.drawable.ic_p4k_audio, "Âm thanh", "Âm thanh") {
             showTrackPicker(C.TRACK_TYPE_AUDIO)
         }
         btnRow.addView(audioBtn)
 
-        aspectBtn = makeP4kIconBtn(
+        aspectBtn = makeP4kPillBtn(
             R.drawable.ic_p4k_aspect,
+            "Tỉ lệ",
             "Tỉ lệ màn hình",
             extraHint = { currentAspectMode.label }
         ) {
@@ -1174,8 +1267,9 @@ class PlayerActivity : AppCompatActivity() {
         }
         btnRow.addView(aspectBtn)
 
-        settingsBtn = makeP4kIconBtn(
+        settingsBtn = makeP4kPillBtn(
             R.drawable.ic_p4k_settings,
+            "Cài đặt",
             "Cài đặt phát",
             extraHint = { "Chất lượng · Tốc độ · Cỡ Sub · Audio" }
         ) {
@@ -1206,7 +1300,7 @@ class PlayerActivity : AppCompatActivity() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 14f else 16f)
             typeface = Typeface.DEFAULT_BOLD
             setPadding(Phim4KPlayerUi.dp(context, 16), Phim4KPlayerUi.dp(context, 9), Phim4KPlayerUi.dp(context, 16), Phim4KPlayerUi.dp(context, 9))
-            background = Phim4KPlayerUi.createGlassPillDrawable(context, fillColor = 0xCC0B0D12.toInt(), strokeColor = 0x4DFFFFFF, cornerDp = 22)
+            background = Phim4KPlayerUi.createGlassPillDrawable(context, fillColor = 0xCC060608.toInt(), strokeColor = 0x66FF2A36, cornerDp = 22)
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1351,10 +1445,10 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun updateTranslateStatusUi(done: Int, total: Int, completed: Boolean) {
         if (::aetherTranslateBtn.isInitialized) {
-            Phim4KPlayerUi.styleActiveIconButton(aetherTranslateBtn, this, isActive = viLiveSubActive)
+            Phim4KPlayerUi.styleLabeledControlButton(aetherTranslateBtn, this, isActive = viLiveSubActive)
         }
         if (::subtitleBtn.isInitialized) {
-            Phim4KPlayerUi.styleActiveIconButton(subtitleBtn, this, isActive = viLiveSubActive)
+            Phim4KPlayerUi.styleLabeledControlButton(subtitleBtn, this, isActive = viLiveSubActive)
         }
         if (::topTranslateBadge.isInitialized) {
             if (!viLiveSubActive && done == 0 && total == 0) {
@@ -1573,7 +1667,7 @@ class PlayerActivity : AppCompatActivity() {
                     text = "ĐANG PHÁT"
                     textSize = 10f
                     typeface = Typeface.DEFAULT_BOLD
-                    setTextColor(0xFF06131C.toInt())
+                    setTextColor(Color.WHITE)
                     setPadding(
                         Phim4KPlayerUi.dp(this@PlayerActivity, 8),
                         Phim4KPlayerUi.dp(this@PlayerActivity, 3),
@@ -1582,7 +1676,7 @@ class PlayerActivity : AppCompatActivity() {
                     )
                     background = Phim4KPlayerUi.createGlassPillDrawable(
                         this@PlayerActivity,
-                        fillColor = Phim4KPlayerUi.COLOR_ACCENT_CYAN,
+                        fillColor = Phim4KPlayerUi.COLOR_PHIM4K_RED,
                         strokeColor = Color.TRANSPARENT,
                         cornerDp = 10
                     )
@@ -1936,15 +2030,11 @@ class PlayerActivity : AppCompatActivity() {
         val smoothHlsStream = aetherStream || currentEpisode.source == ContentSource.FILM4K || streamUrl.contains("127.0.0.1")
         val videoMediaSource: MediaSource = when (effectiveKind) {
             StreamMediaKind.HLS -> {
-                val hlsExtractorFactory = if (smoothHlsStream) {
-                    DefaultHlsExtractorFactory(0, true)
-                } else {
-                    DefaultHlsExtractorFactory(
-                        DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
-                            DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS,
-                        true
-                    )
-                }
+                val hlsExtractorFactory = DefaultHlsExtractorFactory(
+                    DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
+                        DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS,
+                    true
+                )
                 HlsMediaSource.Factory(httpFactory)
                     .setExtractorFactory(hlsExtractorFactory)
                     .setAllowChunklessPreparation(smoothHlsStream)
@@ -2069,7 +2159,7 @@ class PlayerActivity : AppCompatActivity() {
                         if (isAetherEpisode()) {
                             if (!trySwitchToBackupServer(lastPos)) {
                                 loadingOverlay.visibility = View.VISIBLE
-                                loadingText.text = "Các máy chủ Aether tạm thời gián đoạn.\nHãy chọn [Đổi Server] ở thanh bên dưới."
+                                loadingText.text = "Các máy chủ Thúy An tạm thời gián đoạn.\nHãy chọn [Đổi Server] ở thanh bên dưới."
                                 showOsd(focusPlayButton = true)
                             }
                             return@post
@@ -2339,8 +2429,10 @@ class PlayerActivity : AppCompatActivity() {
             fun onPlayerReady() {
                 mainHandler.post {
                     if (fallbackWebView !== wv) return@post
-                    wv.visibility = View.VISIBLE
-                    loadingOverlay.visibility = View.GONE
+                    if (exoPlayer == null) {
+                        setWebSurfaceVisible(true)
+                        loadingOverlay.visibility = View.GONE
+                    }
                     applySubtitleScale()
                     if (currentPlaybackSpeed != 1.0f) {
                         sendWebCommand("rate", currentPlaybackSpeed.toDouble())
@@ -2355,9 +2447,7 @@ class PlayerActivity : AppCompatActivity() {
                     if (fallbackWebView !== wv) return@post
                     if (exoPlayer != null) return@post
                     loadingOverlay.visibility = View.GONE
-                    wv.visibility = View.VISIBLE
-                    wv.isFocusable = true
-                    wv.isFocusableInTouchMode = true
+                    setWebSurfaceVisible(true, focusable = true)
                     wv.requestFocus()
                 }
             }
@@ -2368,7 +2458,7 @@ class PlayerActivity : AppCompatActivity() {
                     if (fallbackWebView !== wv) return@post
                     if (!trySwitchToBackupServer(webPositionMs)) {
                         loadingOverlay.visibility = View.VISIBLE
-                        loadingText.text = "Aether đã dò hết các máy chủ nhưng chưa tìm thấy luồng phát cho phim này.\nHãy thử lại hoặc chọn phim/nguồn khác."
+                        loadingText.text = "Thúy An đã dò hết các máy chủ nhưng chưa tìm thấy luồng phát cho phim này.\nHãy thử lại hoặc chọn phim/nguồn khác."
                         showOsd(focusPlayButton = true)
                     }
                 }
@@ -2390,8 +2480,10 @@ class PlayerActivity : AppCompatActivity() {
                 if (!position.isFinite() || !duration.isFinite()) return
                 mainHandler.post {
                     if (fallbackWebView !== wv) return@post
-                    if (duration > 0.5 && position > 0.0 && loadingOverlay.visibility == View.VISIBLE) {
-                        wv.visibility = View.VISIBLE
+                    if (exoPlayer == null && duration > 0.5 && position > 0.0 &&
+                        (loadingOverlay.visibility == View.VISIBLE || headlessWebContainer.visibility != View.VISIBLE || wv.visibility != View.VISIBLE)
+                    ) {
+                        setWebSurfaceVisible(true)
                         loadingOverlay.visibility = View.GONE
                     }
                     webPositionMs = (position * 1000).toLong().coerceAtLeast(0)
@@ -2409,10 +2501,13 @@ class PlayerActivity : AppCompatActivity() {
                     val wasOpen = aetherMenuOpen
                     aetherMenuOpen = isOpen
                     if (isOpen) {
-                        wv.visibility = View.VISIBLE
+                        setWebSurfaceVisible(true)
                         loadingOverlay.visibility = View.GONE
                         hideOsd()
                     } else if (wasOpen) {
+                        if (exoPlayer != null) {
+                            setWebSurfaceVisible(false)
+                        }
                         showOsd(focusPlayButton = true)
                     }
                 }
@@ -2443,8 +2538,10 @@ class PlayerActivity : AppCompatActivity() {
                         val dur = root.optDouble("duration", 0.0)
                         val paused = root.optBoolean("paused", true)
                         if (pos.isFinite() && dur.isFinite()) {
-                            if (dur > 0.5 && wv.visibility != View.VISIBLE) {
-                                wv.visibility = View.VISIBLE
+                            if (exoPlayer == null && dur > 0.5 &&
+                                (wv.visibility != View.VISIBLE || headlessWebContainer.visibility != View.VISIBLE)
+                            ) {
+                                setWebSurfaceVisible(true)
                                 loadingOverlay.visibility = View.GONE
                             }
                             webPositionMs = (pos * 1000).toLong().coerceAtLeast(0L)
@@ -3025,7 +3122,7 @@ class PlayerActivity : AppCompatActivity() {
                         }
                         loadingOverlay.visibility = View.VISIBLE
                         loadingText.text = if (aetherMode) {
-                            "Không thể tải nguồn phát Aether hoặc hết thời gian chờ. Hãy đổi tên miền dự phòng trong mục Máy chủ."
+                            "Không thể tải nguồn phát Thúy An hoặc hết thời gian chờ. Hãy đổi tên miền dự phòng trong mục Máy chủ."
                         } else {
                             "Chưa mở được video. Hãy thử server khác hoặc kiểm tra Android System WebView."
                         }
@@ -3079,7 +3176,7 @@ class PlayerActivity : AppCompatActivity() {
                 "(function(){try{document.querySelectorAll('video,audio').forEach(function(m){m.pause();m.muted=true;m.removeAttribute('src');});}catch(e){}})();",
                 null
             )
-            wv.visibility = View.GONE
+            setWebSurfaceVisible(false)
             loadingOverlay.visibility = View.GONE
             loadingProviderBadge.visibility = View.GONE
             loadingProgressBar.visibility = View.GONE
@@ -3766,7 +3863,7 @@ class PlayerActivity : AppCompatActivity() {
                 var audio = [];
                 var subs = [
                   { id: 'off', title: '🚫 Tắt phụ đề' },
-                  { id: '__aether_translate_vi__', title: '🇻🇳 Tự động dịch sang Tiếng Việt (Công cụ dịch Aether)' }
+                  { id: '__aether_translate_vi__', title: '🇻🇳 Tự động dịch sang Tiếng Việt (Công cụ dịch Thúy An)' }
                 ];
                 var qualities = [];
                 var aid = '';
@@ -3807,7 +3904,7 @@ class PlayerActivity : AppCompatActivity() {
                     sorted.forEach(function(c, idx){
                       if (!/^vi/i.test(c.language || '')) return;
                       var cid = String(c.id);
-                      var srcTag = c.opensubtitles ? 'OpenSubtitles' : (c.source || 'Aether');
+                      var srcTag = c.opensubtitles ? 'OpenSubtitles' : (c.source || 'Thúy An');
                       subs.push({ id: cid, title: '🇻🇳 Tiếng Việt (Gốc) • ' + srcTag + ' #' + (idx + 1) });
                     });
 
@@ -3815,7 +3912,7 @@ class PlayerActivity : AppCompatActivity() {
                     sorted.slice(0, 10).forEach(function(c, idx){
                       if (/^vi/i.test(c.language || '')) return;
                       var cid = String(c.id);
-                      var srcTag = c.opensubtitles ? 'OpenSubtitles' : (c.source || 'Aether');
+                      var srcTag = c.opensubtitles ? 'OpenSubtitles' : (c.source || 'Thúy An');
                       var trId = '__translate__:' + cid;
                       var isTranslatingThis = task && task.targetCaption && String(task.targetCaption.id) === cid && task.targetLanguage === 'vi';
                       var statusSuffix = isTranslatingThis ? (task.done ? ' [Đang bật bản dịch]' : ' [Đang dịch...]') : '';
@@ -3832,7 +3929,7 @@ class PlayerActivity : AppCompatActivity() {
                     sorted.forEach(function(c, idx){
                       if (/^vi/i.test(c.language || '')) return;
                       var cid = String(c.id);
-                      var srcTag = c.opensubtitles ? 'OpenSubtitles' : (c.source || 'Aether');
+                      var srcTag = c.opensubtitles ? 'OpenSubtitles' : (c.source || 'Thúy An');
                       subs.push({ id: cid, title: langLabel(c.language) + ' (Gốc) • ' + srcTag + ' #' + (idx + 1) });
                     });
                   }
@@ -4055,7 +4152,7 @@ class PlayerActivity : AppCompatActivity() {
                       document.body.removeAttribute('data-anpinime-menu-open');
                       try {
                         AnPinimeWebBridge.onAetherMenuState(false);
-                        AnPinimeWebBridge.onAetherStatus('Đang chờ thanh công cụ Aether...');
+                        AnPinimeWebBridge.onAetherStatus('Đang chờ thanh công cụ Thúy An...');
                       } catch(e){}
                     }
                   }, 250);
@@ -4238,7 +4335,7 @@ class PlayerActivity : AppCompatActivity() {
             "Bộ giải mã Audio · $decoderLabel"
         )
         if (fallbackWebView != null && isAetherEpisode()) {
-            items.add("Menu gốc trình phát Web (Aether)")
+            items.add("Menu gốc trình phát Web (Thúy An)")
         }
 
         showSelection("Cài đặt phát", items, -1) { index ->
@@ -4352,7 +4449,7 @@ class PlayerActivity : AppCompatActivity() {
                 val options = listOf(WebTrackItem("auto", "Tự động (Auto)", webQualities.none { it.selected })) + webQualities
                 val labels = options.map { it.label }
                 val selected = options.indexOfFirst { it.selected }.coerceAtLeast(0)
-                showSelection("Chất lượng video (Aether)", labels, selected) { idx ->
+                showSelection("Chất lượng video (Thúy An)", labels, selected) { idx ->
                     val chosen = options.getOrNull(idx) ?: return@showSelection
                     sendWebTrackCommand("quality", chosen.id)
                     updateTopStatusBadges()
@@ -4360,7 +4457,7 @@ class PlayerActivity : AppCompatActivity() {
                 return
             }
             if (currentEpisode.source == ContentSource.AETHER && fallbackWebView != null) {
-                showPlayerMessage("Chất lượng video", "Nguồn phát Aether hiện tại đang tự động tối ưu độ phân giải cao nhất (Auto FHD).")
+                showPlayerMessage("Chất lượng video", "Nguồn phát Thúy An hiện tại đang tự động tối ưu độ phân giải cao nhất (Auto FHD).")
                 return
             }
             showPlayerMessage("Chất lượng", "Chưa có luồng native. Trình phát web hiện chưa hỗ trợ chọn chất lượng bằng app.")
@@ -4852,7 +4949,7 @@ class PlayerActivity : AppCompatActivity() {
     private fun openAetherNativeMenu(route: String) {
         val wv = fallbackWebView
         if (wv == null) {
-            showPlayerMessage("Menu Aether", "Trình phát Aether chưa sẵn sàng.")
+            showPlayerMessage("Menu Thúy An", "Trình phát Thúy An chưa sẵn sàng.")
             return
         }
         hideOsd()
@@ -4909,7 +5006,7 @@ class PlayerActivity : AppCompatActivity() {
                         if (isAetherEpisode()) {
                             listOf(
                                 WebTrackItem("off", "🚫 Tắt phụ đề", false),
-                                WebTrackItem("__aether_translate_vi__", "🇻🇳 Tự động dịch sang Tiếng Việt (Công cụ dịch Aether)", true)
+                                WebTrackItem("__aether_translate_vi__", "🇻🇳 Tự động dịch sang Tiếng Việt (Công cụ dịch Thúy An)", true)
                             )
                         } else emptyList()
                     }

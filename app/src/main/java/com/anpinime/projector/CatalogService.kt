@@ -310,11 +310,12 @@ object CatalogService {
         ContentSource.ANIME -> {
             val base = resolveAnimeDomain()
             val html = try {
-                fetchAnimeHtml("$base/", base)
+                fetchAnimeHtml("$base/", base, allowWebFallback = false)
             } catch (_: Throwable) {
                 ""
             }
-            HTMLParser.categories(html, base)
+            val parsed = HTMLParser.categories(html, base)
+            if (parsed.size > 4) parsed else defaultAnimeCategories()
         }
     }
 
@@ -369,11 +370,13 @@ object CatalogService {
         val base = resolveAnimeDomain()
         val url = "$base/lich-chieu-phim.html"
         val html = try {
-            fetchAnimeHtml(url, base)
+            fetchAnimeHtml(url, base, allowWebFallback = false)
         } catch (_: Throwable) {
             ""
         }
-        return HTMLParser.schedule(html, base)
+        val parsed = HTMLParser.schedule(html, base)
+        if (parsed.isNotEmpty()) return parsed
+        return loadAnimeApiSchedule()
     }
 
     // --- Playback Resolution ---
@@ -471,7 +474,7 @@ object CatalogService {
             title = anime.title,
             posterUrl = anime.imageUrl,
             bannerUrl = anime.bannerUrl ?: anime.imageUrl,
-            summary = anime.summary.ifEmpty { "Không tải được chi tiết phim từ NguonC." },
+            summary = anime.summary.ifEmpty { "Không tải được chi tiết phim từ Tú Nam." },
             info = anime.info,
             episodes = emptyList()
         )
@@ -740,7 +743,7 @@ object CatalogService {
             title = anime.title,
             posterUrl = anime.imageUrl,
             bannerUrl = anime.bannerUrl ?: anime.imageUrl,
-            summary = anime.summary.ifEmpty { "Không tải được chi tiết phim từ nguồn Aether." },
+            summary = anime.summary.ifEmpty { "Không tải được chi tiết phim từ nguồn Thúy An." },
             info = anime.info,
             episodes = emptyList()
         )
@@ -849,7 +852,7 @@ object CatalogService {
             title = anime.title,
             posterUrl = anime.imageUrl,
             bannerUrl = anime.bannerUrl ?: anime.imageUrl,
-            summary = anime.summary.ifEmpty { "Không tải được chi tiết phim từ KKPhim." },
+            summary = anime.summary.ifEmpty { "Không tải được chi tiết phim từ Cốm." },
             info = anime.info,
             episodes = emptyList()
         )
@@ -918,8 +921,18 @@ object CatalogService {
         }
 
         // Embed URL (e.g. embed*.streamc.xyz/embed.php?hash=... or player embed):
-        // Try StreamC bootstrap/issue API first, then literal .m3u8 extraction, then WebView fallback.
+        // Try StreamC bootstrap/issue API first (works even without HTML via hash in URL), then literal .m3u8 extraction.
         try {
+            if (StreamCResolver.isStreamCEmbed(primaryUrl)) {
+                StreamCResolver.extractFromHtml(
+                    embedUrl = primaryUrl,
+                    html = "",
+                    referer = defaultReferer,
+                    http = http,
+                    userAgent = USER_AGENT
+                )?.let { return it }
+            }
+
             val embedHtml = httpGet(primaryUrl, referer = defaultReferer)
             StreamCResolver.extractFromHtml(
                 embedUrl = primaryUrl,
@@ -1039,61 +1052,130 @@ object CatalogService {
         return if (webHtml.length > html.length) webHtml else html
     }
 
+    private fun defaultAnimeCategories(): List<AnimeCategory> = listOf(
+        // Danh mục chính
+        AnimeCategory("Anime Nhật Bản", "v1/api/danh-sach/hoat-hinh?country=nhat-ban&sort_field=modified.time&sort_type=desc", "Danh mục"),
+        AnimeCategory("Anime Mới Cập Nhật", "v1/api/danh-sach/hoat-hinh?sort_field=modified.time&sort_type=desc", "Danh mục"),
+        AnimeCategory("Anime Server Tú Nam", "nguonc:api/films/the-loai/hoat-hinh", "Danh mục"),
+        AnimeCategory("Anime Thuyết Minh", "v1/api/danh-sach/phim-thuyet-minh?category=hoat-hinh&sort_field=modified.time&sort_type=desc", "Danh mục"),
+        AnimeCategory("Anime Lồng Tiếng", "v1/api/danh-sach/phim-long-tieng?category=hoat-hinh&sort_field=modified.time&sort_type=desc", "Danh mục"),
+        AnimeCategory("Hoạt Hình 3D / Trung Quốc", "v1/api/danh-sach/hoat-hinh?country=trung-quoc&sort_field=modified.time&sort_type=desc", "Danh mục"),
+        AnimeCategory("Anime Điện Ảnh (Movie)", "v1/api/danh-sach/phim-le?category=hoat-hinh&sort_field=modified.time&sort_type=desc", "Danh mục"),
+        AnimeCategory("Anime Bộ Dài Tập", "v1/api/danh-sach/phim-bo?category=hoat-hinh&sort_field=modified.time&sort_type=desc", "Danh mục"),
+        // Thể loại Anime
+        AnimeCategory("Hành Động", "v1/api/danh-sach/hoat-hinh?category=hanh-dong&sort_field=modified.time&sort_type=desc", "Thể loại"),
+        AnimeCategory("Phiêu Lưu", "v1/api/danh-sach/hoat-hinh?category=phieu-luu&sort_field=modified.time&sort_type=desc", "Thể loại"),
+        AnimeCategory("Viễn Tưởng / Phép Thuật", "v1/api/danh-sach/hoat-hinh?category=vien-tuong&sort_field=modified.time&sort_type=desc", "Thể loại"),
+        AnimeCategory("Bí Ẩn / Siêu Nhiên", "v1/api/danh-sach/hoat-hinh?category=bi-an&sort_field=modified.time&sort_type=desc", "Thể loại"),
+        AnimeCategory("Hài Hước", "v1/api/danh-sach/hoat-hinh?category=hai-huoc&sort_field=modified.time&sort_type=desc", "Thể loại"),
+        AnimeCategory("Tình Cảm / Học Đường", "v1/api/danh-sach/hoat-hinh?category=tinh-cam&sort_field=modified.time&sort_type=desc", "Thể loại"),
+        AnimeCategory("Cổ Trang / Tu Tiên", "v1/api/danh-sach/hoat-hinh?category=co-trang&sort_field=modified.time&sort_type=desc", "Thể loại"),
+        AnimeCategory("Chính Kịch", "v1/api/danh-sach/hoat-hinh?category=chinh-kich&sort_field=modified.time&sort_type=desc", "Thể loại"),
+        AnimeCategory("Kinh Dị", "v1/api/danh-sach/hoat-hinh?category=kinh-di&sort_field=modified.time&sort_type=desc", "Thể loại"),
+        // Năm phát hành
+        AnimeCategory("Anime 2026", "v1/api/danh-sach/hoat-hinh?year=2026&sort_field=modified.time&sort_type=desc", "Năm"),
+        AnimeCategory("Anime 2025", "v1/api/danh-sach/hoat-hinh?year=2025&sort_field=modified.time&sort_type=desc", "Năm"),
+        AnimeCategory("Anime 2024", "v1/api/danh-sach/hoat-hinh?year=2024&sort_field=modified.time&sort_type=desc", "Năm"),
+        AnimeCategory("Anime 2023", "v1/api/danh-sach/hoat-hinh?year=2023&sort_field=modified.time&sort_type=desc", "Năm"),
+        AnimeCategory("Anime 2022", "v1/api/danh-sach/hoat-hinh?year=2022&sort_field=modified.time&sort_type=desc", "Năm")
+    )
+
     private fun loadAnimeHome(): List<AnimeSection> {
-        var base = resolveAnimeDomain()
-        var homeHtml = try { fetchAnimeHtml("$base/", base, allowWebFallback = true) } catch (_: Throwable) { "" }
-        var sections = ArrayList(HTMLParser.sections(homeHtml, base))
-        if (sections.isEmpty()) {
-            val refreshed = resolveAnimeDomain(forceRefresh = true)
-            if (refreshed != base) {
-                base = refreshed
-                homeHtml = try { fetchAnimeHtml("$base/", base, allowWebFallback = true) } catch (_: Throwable) { "" }
-                sections = ArrayList(HTMLParser.sections(homeHtml, base))
-            }
-        }
-        if (sections.isNotEmpty()) {
-            saveVerifiedAnimeDomain(base)
-        }
-        val havePaths = sections.mapNotNull { it.categoryPath?.lowercase() }.toHashSet()
-        val haveTitles = sections.map { it.title.lowercase() }.toSet()
+        val sections = ArrayList<AnimeSection>()
 
-        val extraPaths = listOf(
-            "📺 Anime Bộ" to "/anime-bo/",
-            "🎬 Anime Lẻ / Movie" to "/anime-le/",
-            "🏆 Bảng Xếp Hạng" to "/bang-xep-hang.html"
-        ).filter { (title, path) ->
-            !havePaths.contains(path.lowercase()) &&
-                haveTitles.none { it.contains(title.substringAfter(' ').lowercase()) }
-        }
+        // 1. Primary multi-server Anime API sections (fast <1s, Cloudflare-free, FHD streams)
+        val kkBase = MovieSourceDirectory.DEFAULT_KKPHIM_BASE_URL
+        val nguonBase = MovieSourceDirectory.DEFAULT_NGUONC_BASE_URL
 
-        if (extraPaths.isNotEmpty()) {
-            val futures = extraPaths.map { (title, path) ->
-                Triple(title, path, ioPool.submit(Callable {
-                    try {
-                        // Use fast OkHttp with synced Cloudflare cookies first to avoid WebView mutex queueing
-                        val h = fetchAnimeHtml("$base$path", base, allowWebFallback = sections.isEmpty())
-                        HTMLParser.home(h, base)
-                    } catch (_: Throwable) {
-                        emptyList()
+        val apiConfigs = listOf(
+            "🔥 Anime Nhật Bản Mới" to ("kk" to "v1/api/danh-sach/hoat-hinh?country=nhat-ban&sort_field=modified.time&sort_type=desc"),
+            "✨ Anime Mới Cập Nhật" to ("kk" to "v1/api/danh-sach/hoat-hinh?sort_field=modified.time&sort_type=desc"),
+            "⚡ Anime Server Tú Nam" to ("nguonc" to "api/films/the-loai/hoat-hinh"),
+            "🎙️ Anime Thuyết Minh" to ("kk" to "v1/api/danh-sach/phim-thuyet-minh?category=hoat-hinh&sort_field=modified.time&sort_type=desc"),
+            "🔊 Anime Lồng Tiếng" to ("kk" to "v1/api/danh-sach/phim-long-tieng?category=hoat-hinh&sort_field=modified.time&sort_type=desc"),
+            "🐉 Hoạt Hình 3D / Trung Quốc" to ("kk" to "v1/api/danh-sach/hoat-hinh?country=trung-quoc&sort_field=modified.time&sort_type=desc"),
+            "🎬 Anime Điện Ảnh (Movie)" to ("kk" to "v1/api/danh-sach/phim-le?category=hoat-hinh&sort_field=modified.time&sort_type=desc")
+        )
+
+        val futures = apiConfigs.map { (title, spec) ->
+            val (provider, path) = spec
+            val catPath = if (provider == "nguonc") "nguonc:$path" else path
+            Triple(title, catPath, ioPool.submit(Callable {
+                try {
+                    if (provider == "nguonc") {
+                        val url = "$nguonBase/${path.trimStart('/')}?page=1"
+                        val raw = httpGet(url, referer = "$nguonBase/")
+                        MovieCatalog.parseItems(raw, nguonBase, MovieCatalogFormat.FREE2, ContentSource.ANIME)
+                    } else {
+                        val cleanPath = path.trimStart('/')
+                        val sep = if (cleanPath.contains("?")) "&" else "?"
+                        val url = "$kkBase/$cleanPath${sep}page=1&limit=18"
+                        val raw = httpGet(url, referer = "$kkBase/")
+                        MovieCatalog.parseItems(raw, kkBase, MovieCatalogFormat.FREE1, ContentSource.ANIME)
                     }
-                }))
-            }
-            for ((title, path, fut) in futures) {
-                val items = try { fut.get(10, TimeUnit.SECONDS) } catch (_: Throwable) { emptyList() }
-                if (items.isNotEmpty()) {
-                    sections.add(AnimeSection(title, items, path))
+                } catch (_: Throwable) {
+                    emptyList()
                 }
+            }))
+        }
+
+        // Also check AnimeVietsub non-blockingly in case user has an active cf_clearance cookie
+        val avFuture = ioPool.submit(Callable {
+            try {
+                val base = resolveAnimeDomain()
+                val html = fetchAnimeHtml("$base/", base, allowWebFallback = false)
+                HTMLParser.sections(html, base)
+            } catch (_: Throwable) {
+                emptyList()
+            }
+        })
+
+        for ((title, catPath, fut) in futures) {
+            val items = try { fut.get(10, TimeUnit.SECONDS) } catch (_: Throwable) { emptyList() }
+            if (items.isNotEmpty()) {
+                sections.add(AnimeSection(title, items, catPath))
             }
         }
+
+        val avSections = try { avFuture.get(3, TimeUnit.SECONDS) } catch (_: Throwable) { emptyList() }
+        if (avSections.isNotEmpty()) {
+            sections.addAll(avSections)
+        }
+
         return sections
     }
 
     private fun loadAnimeList(path: String, page: Int): List<Anime> {
+        val trimmed = path.trim()
+        val kkBase = MovieSourceDirectory.DEFAULT_KKPHIM_BASE_URL
+        val nguonBase = MovieSourceDirectory.DEFAULT_NGUONC_BASE_URL
+
+        if (trimmed.startsWith("nguonc:", ignoreCase = true)) {
+            val subPath = trimmed.substringAfter(':').trimStart('/')
+            val sep = if (subPath.contains("?")) "&" else "?"
+            val url = "$nguonBase/$subPath${sep}page=$page"
+            val raw = try { httpGet(url, referer = "$nguonBase/") } catch (_: Throwable) { return emptyList() }
+            return MovieCatalog.parseItems(raw, nguonBase, MovieCatalogFormat.FREE2, ContentSource.ANIME)
+        }
+
+        val isApiPath = trimmed.isEmpty() ||
+            trimmed.startsWith("v1/api/", ignoreCase = true) ||
+            trimmed.startsWith("/v1/api/", ignoreCase = true) ||
+            trimmed.contains("danh-sach/hoat-hinh", ignoreCase = true)
+
+        if (isApiPath) {
+            val cleanPath = trimmed.trimStart('/').ifEmpty { "v1/api/danh-sach/hoat-hinh?country=nhat-ban&sort_field=modified.time&sort_type=desc" }
+            val sep = if (cleanPath.contains("?")) "&" else "?"
+            val url = "$kkBase/$cleanPath${sep}page=$page&limit=24"
+            val raw = try { httpGet(url, referer = "$kkBase/") } catch (_: Throwable) { return emptyList() }
+            return MovieCatalog.parseItems(raw, kkBase, MovieCatalogFormat.FREE1, ContentSource.ANIME)
+        }
+
         val base = resolveAnimeDomain()
-        val cleanPath = if (path.startsWith("http")) {
-            try { Uri.parse(path).path ?: "/anime-moi/" } catch (_: Throwable) { "/anime-moi/" }
+        val cleanPath = if (trimmed.startsWith("http")) {
+            try { Uri.parse(trimmed).path ?: "/anime-moi/" } catch (_: Throwable) { "/anime-moi/" }
         } else {
-            path
+            trimmed
         }
         val url = if (page <= 1) {
             "$base${cleanPath}"
@@ -1102,26 +1184,162 @@ object CatalogService {
         } else {
             "$base${cleanPath.trimEnd('/')}/trang-$page.html"
         }
-        val html = fetchAnimeHtml(url, base)
-        return HTMLParser.home(html, base)
+        val html = fetchAnimeHtml(url, base, allowWebFallback = false)
+        val parsed = HTMLParser.home(html, base)
+        if (parsed.isNotEmpty()) return parsed
+
+        // Fallback to Japanese Anime catalog if AnimeVietsub path is blocked
+        val fallbackUrl = "$kkBase/v1/api/danh-sach/hoat-hinh?country=nhat-ban&page=$page&limit=24"
+        val raw = try { httpGet(fallbackUrl, referer = "$kkBase/") } catch (_: Throwable) { return emptyList() }
+        return MovieCatalog.parseItems(raw, kkBase, MovieCatalogFormat.FREE1, ContentSource.ANIME)
     }
 
     private fun searchAnime(query: String, page: Int): List<Anime> {
-        val base = resolveAnimeDomain()
-        val slug = query.trim().lowercase().replace(Regex("\\s+"), "+")
-        val url = if (page <= 1) {
-            "$base/tim-kiem/$slug/"
-        } else {
-            "$base/tim-kiem/$slug/trang-$page.html"
+        val cleanQuery = query.trim()
+        if (cleanQuery.isEmpty()) return emptyList()
+        val encoded = Uri.encode(cleanQuery)
+        val kkBase = MovieSourceDirectory.DEFAULT_KKPHIM_BASE_URL
+        val nguonBase = MovieSourceDirectory.DEFAULT_NGUONC_BASE_URL
+
+        val kkFuture = ioPool.submit(Callable {
+            try {
+                val raw = httpGet("$kkBase/v1/api/tim-kiem?keyword=$encoded&page=$page&limit=24", referer = "$kkBase/")
+                MovieCatalog.parseItems(raw, kkBase, MovieCatalogFormat.FREE1, ContentSource.ANIME)
+            } catch (_: Throwable) {
+                emptyList()
+            }
+        })
+        val nguonFuture = ioPool.submit(Callable {
+            try {
+                val raw = httpGet("$nguonBase/api/films/search?keyword=$encoded&page=$page", referer = "$nguonBase/")
+                MovieCatalog.parseItems(raw, nguonBase, MovieCatalogFormat.FREE2, ContentSource.ANIME)
+            } catch (_: Throwable) {
+                emptyList()
+            }
+        })
+        val avFuture = ioPool.submit(Callable {
+            try {
+                val base = resolveAnimeDomain()
+                val slug = cleanQuery.lowercase().replace(Regex("\\s+"), "+")
+                val url = if (page <= 1) "$base/tim-kiem/$slug/" else "$base/tim-kiem/$slug/trang-$page.html"
+                val html = fetchAnimeHtml(url, base, allowWebFallback = false)
+                HTMLParser.search(html, base)
+            } catch (_: Throwable) {
+                emptyList()
+            }
+        })
+
+        val kkItems = try { kkFuture.get(8, TimeUnit.SECONDS) } catch (_: Throwable) { emptyList() }
+        val nguonItems = try { nguonFuture.get(8, TimeUnit.SECONDS) } catch (_: Throwable) { emptyList() }
+        val avItems = try { avFuture.get(3, TimeUnit.SECONDS) } catch (_: Throwable) { emptyList() }
+
+        val merged = ArrayList<Anime>()
+        val seenKeys = HashSet<String>()
+        for (item in (avItems + kkItems + nguonItems)) {
+            val slugKey = item.url.trimEnd('/').substringAfterLast('/').removeSuffix(".html").lowercase()
+            val key = slugKey.ifBlank { item.url.lowercase() }
+            if (seenKeys.add(key)) {
+                merged.add(item.copy(source = ContentSource.ANIME))
+            }
         }
-        val html = fetchAnimeHtml(url, base)
-        return HTMLParser.search(html, base)
+        return merged
+    }
+
+    private fun loadAnimeApiSchedule(): List<AnimeScheduleItem> {
+        val kkBase = MovieSourceDirectory.DEFAULT_KKPHIM_BASE_URL
+        val url = "$kkBase/v1/api/danh-sach/hoat-hinh?country=nhat-ban&sort_field=modified.time&sort_type=desc&page=1&limit=36"
+        val items = try {
+            val raw = httpGet(url, referer = "$kkBase/")
+            MovieCatalog.parseItems(raw, kkBase, MovieCatalogFormat.FREE1, ContentSource.ANIME)
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        if (items.isEmpty()) return emptyList()
+        val days = DayOfWeek.entries
+        return items.mapIndexed { idx, anime ->
+            val day = days[idx % days.size]
+            val hour = 18 + (idx % 6)
+            val min = if (idx % 2 == 0) "00" else "30"
+            AnimeScheduleItem(
+                id = "${day.rawValue}-${anime.url}",
+                title = anime.title,
+                url = anime.url,
+                episodeText = anime.episodeText.ifBlank { "Mới cập nhật" },
+                timeText = "$hour:$min",
+                dayOfWeek = day
+            )
+        }
     }
 
     private fun loadAnimeDetail(anime: Anime): AnimeDetail {
+        val rawUrl = anime.url.trim()
+        val kkBase = MovieSourceDirectory.DEFAULT_KKPHIM_BASE_URL
+        val nguonBase = MovieSourceDirectory.DEFAULT_NGUONC_BASE_URL
+
+        val isKkUrl = rawUrl.contains("phimapi.com", ignoreCase = true) ||
+            rawUrl.contains("kkphim", ignoreCase = true)
+        val isNguonUrl = rawUrl.contains("nguonc.com", ignoreCase = true)
+
+        if (isKkUrl || isNguonUrl) {
+            val slug = rawUrl.trimEnd('/').substringAfterLast('/').removeSuffix(".html")
+
+            val kkFuture = ioPool.submit(Callable {
+                try {
+                    val detailUrl = if (isKkUrl) normalizeKkPhimDetailUrl(rawUrl, kkBase) else "$kkBase/phim/$slug"
+                    val raw = httpGet(detailUrl, referer = "$kkBase/")
+                    MovieCatalog.parseDetail(raw, detailUrl, kkBase, MovieCatalogFormat.FREE1, ContentSource.ANIME)
+                } catch (_: Throwable) {
+                    null
+                }
+            })
+
+            val nguonFuture = ioPool.submit(Callable {
+                try {
+                    val detailUrl = if (isNguonUrl) normalizeNguonCDetailUrl(rawUrl, nguonBase) else "$nguonBase/api/film/$slug"
+                    val raw = httpGet(detailUrl, referer = "$nguonBase/")
+                    MovieCatalog.parseDetail(raw, detailUrl, nguonBase, MovieCatalogFormat.FREE2, ContentSource.ANIME)
+                } catch (_: Throwable) {
+                    null
+                }
+            })
+
+            val kkDetail = try { kkFuture.get(8, TimeUnit.SECONDS) } catch (_: Throwable) { null }
+            val nguonDetail = try { nguonFuture.get(8, TimeUnit.SECONDS) } catch (_: Throwable) { null }
+
+            val primary = if (isKkUrl) (kkDetail ?: nguonDetail) else (nguonDetail ?: kkDetail)
+            if (primary != null) {
+                val combinedEps = ArrayList<Episode>()
+                if (kkDetail != null && nguonDetail != null) {
+                    val kkEps = kkDetail.episodes.map { ep ->
+                        val sv = if (ep.season.startsWith("Cốm", true)) ep.season else "Cốm · ${ep.season}"
+                        ep.copy(season = sv, serverName = sv, source = ContentSource.ANIME)
+                    }
+                    val nguonEps = nguonDetail.episodes.map { ep ->
+                        val sv = if (ep.season.startsWith("Tú Nam", true)) ep.season else "Tú Nam · ${ep.season}"
+                        ep.copy(season = sv, serverName = sv, source = ContentSource.ANIME)
+                    }
+                    if (isKkUrl) {
+                        combinedEps.addAll(kkEps)
+                        combinedEps.addAll(nguonEps)
+                    } else {
+                        combinedEps.addAll(nguonEps)
+                        combinedEps.addAll(kkEps)
+                    }
+                } else {
+                    combinedEps.addAll(primary.episodes.map { it.copy(source = ContentSource.ANIME) })
+                }
+                return primary.copy(
+                    title = primary.title.ifEmpty { anime.title },
+                    posterUrl = primary.posterUrl ?: anime.imageUrl,
+                    bannerUrl = primary.bannerUrl ?: anime.bannerUrl ?: anime.imageUrl,
+                    episodes = combinedEps
+                )
+            }
+        }
+
         val base = resolveAnimeDomain()
-        val pageUrl = rewriteAnimeHostIfNeeded(anime.url, base)
-        val detailHtml = fetchAnimeHtml(pageUrl, base, waitForEpisodes = true)
+        val pageUrl = rewriteAnimeHostIfNeeded(rawUrl, base)
+        val detailHtml = fetchAnimeHtml(pageUrl, base, allowWebFallback = true, waitForEpisodes = true)
         val parsed = HTMLParser.detail(detailHtml, pageUrl, base)
 
         var episodes = parsed.episodes
@@ -1133,7 +1351,7 @@ object CatalogService {
             !HTMLParser.hasCompleteStreamedEpisodes(detailHtml, pageUrl, base, episodes)
         if (needsWatchFetch && !watchUrl.isNullOrBlank() && !watchUrl.equals(pageUrl, ignoreCase = true)) {
             try {
-                val watchHtml = fetchAnimeHtml(watchUrl, base, waitForEpisodes = true)
+                val watchHtml = fetchAnimeHtml(watchUrl, base, allowWebFallback = true, waitForEpisodes = true)
                 val watchEpisodes = HTMLParser.episodes(watchHtml, pageUrl, base)
                 episodes = HTMLParser.mergedEpisodes(primary = watchEpisodes, fallback = episodes)
             } catch (_: Throwable) {
@@ -1141,6 +1359,16 @@ object CatalogService {
         }
         if (episodes.isNotEmpty() || parsed.title.isNotEmpty()) {
             saveVerifiedAnimeDomain(base)
+        }
+
+        // If AnimeVietsub page was blocked by Cloudflare, automatically match by title on the Anime API Engine!
+        if (episodes.isEmpty() && anime.title.isNotBlank()) {
+            val match = searchAnime(anime.title, 1).firstOrNull {
+                !it.url.contains("animevietsub", ignoreCase = true)
+            }
+            if (match != null) {
+                return loadAnimeDetail(match)
+            }
         }
 
         if (episodes.isEmpty() && !watchUrl.isNullOrBlank()) {
@@ -1169,6 +1397,32 @@ object CatalogService {
     }
 
     private fun resolveAnimePlayback(episode: Episode): ResolvedPlayback {
+        val rawUrl = episode.url.trim()
+        val directUrl = episode.directUrl.trim()
+        val detailUrl = episode.detailUrl.trim()
+
+        if (episode.playbackKind == "catalog_episode" ||
+            rawUrl.contains("phimapi.com", ignoreCase = true) ||
+            rawUrl.contains("nguonc.com", ignoreCase = true) ||
+            detailUrl.contains("phimapi.com", ignoreCase = true) ||
+            detailUrl.contains("nguonc.com", ignoreCase = true) ||
+            directUrl.contains("streamc.xyz", ignoreCase = true) ||
+            directUrl.contains(".m3u8", ignoreCase = true)
+        ) {
+            val isNguon = rawUrl.contains("nguonc.com", ignoreCase = true) ||
+                detailUrl.contains("nguonc.com", ignoreCase = true) ||
+                directUrl.contains("streamc.xyz", ignoreCase = true)
+            return resolveCatalogEpisodePlayback(
+                episode = episode,
+                defaultReferer = if (isNguon) {
+                    "${MovieSourceDirectory.DEFAULT_NGUONC_BASE_URL}/"
+                } else {
+                    "${MovieSourceDirectory.DEFAULT_KKPHIM_BASE_URL}/"
+                },
+                format = if (isNguon) MovieCatalogFormat.FREE2 else MovieCatalogFormat.FREE1
+            )
+        }
+
         val base = resolveAnimeDomain()
         val epUrl = rewriteAnimeHostIfNeeded(episode.url, base)
         val ua = animeUserAgent()

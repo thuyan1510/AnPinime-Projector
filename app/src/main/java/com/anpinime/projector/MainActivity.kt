@@ -510,7 +510,7 @@ class MainActivity : AppCompatActivity() {
             UiHelper.makeFocusableButton(
                 view = btn,
                 normalBgColor = UiHelper.COLOR_CARD,
-                focusedBgColor = Color.parseColor("#352256"),
+                focusedBgColor = UiHelper.COLOR_RED,
                 focusedStrokeColor = Color.WHITE,
                 radiusDp = 10,
                 scaleOnFocus = 1.03f,
@@ -558,19 +558,19 @@ class MainActivity : AppCompatActivity() {
         }
         sidebar.addView(dividerLabel)
 
-        addMenuButton("src_film4k", "🎬  Nguồn 1 · NguonC") {
+        addMenuButton("src_film4k", "🎬  Nguồn 1 · Tú Nam") {
             switchSource(ContentSource.FILM4K)
         }
 
-        addMenuButton("src_aether", "⚡  Nguồn 2 · Aether") {
+        addMenuButton("src_aether", "⚡  Nguồn 2 · Thúy An") {
             switchSource(ContentSource.AETHER)
         }
 
-        addMenuButton("src_kkphim", "🍿  Nguồn 3 · KKPhim") {
+        addMenuButton("src_kkphim", "🍿  Nguồn 3 · Cốm") {
             switchSource(ContentSource.KKPHIM)
         }
 
-        addMenuButton("src_anime", "✨  AnimeVietsub") {
+        addMenuButton("src_anime", "✨  Nguồn 4 · Anime") {
             switchSource(ContentSource.ANIME)
         }
 
@@ -1045,7 +1045,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 UiHelper.makeFocusableButton(
                     view = chip,
-                    normalBgColor = Color.parseColor("#222638"),
+                    normalBgColor = Color.parseColor("#1D161A"),
                     focusedBgColor = UiHelper.COLOR_ACCENT,
                     focusedStrokeColor = Color.WHITE,
                     radiusDp = 16
@@ -1564,7 +1564,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderSchedule(selectedDay: DayOfWeek) {
         loadJob?.cancel()
-        showLoading("Đang tải lịch chiếu AnimeVietsub…")
+        showLoading("Đang tải lịch chiếu Anime…")
         loadJob = uiScope.launch {
             val allItems = try {
                 withContext(Dispatchers.IO) { CatalogService.loadSchedule() }
@@ -1685,7 +1685,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("Tên miền AnimeVietsub (Đang dùng: $activeDomain)")
+            .setTitle("Tên miền Anime (Đang dùng: $activeDomain)")
             .setView(input)
             .setPositiveButton("Lưu & Áp dụng") { _, _ ->
                 CatalogService.setCustomAnimeDomain(this, input.text.toString())

@@ -14,7 +14,7 @@ object AetherCatalog {
     const val TMDB_FALLBACK_BASE_URL = "https://api.tmdb.org/3"
     const val TMDB_IMAGE_POSTER_BASE = "https://image.tmdb.org/t/p/w500"
     const val TMDB_IMAGE_BACKDROP_BASE = "https://image.tmdb.org/t/p/w780"
-    const val LABEL_AETHER = "Nguồn 2 · Aether"
+    const val LABEL_AETHER = "Nguồn 2 · Thúy An"
 
     // Public read-only TMDB v4 Bearer token used by Aether web client
     const val TMDB_READ_TOKEN =
@@ -534,7 +534,7 @@ object AetherCatalog {
                         info = listOfNotNull(
                             year.takeIf { it.isNotEmpty() },
                             typeLabel,
-                            "Aether"
+                            "Thúy An"
                         ).joinToString(" • "),
                         source = source,
                         catalogLabel = LABEL_AETHER
@@ -577,7 +577,7 @@ object AetherCatalog {
             val cast = parseCast(obj.optJSONObject("credits"))
             val overview = obj.optString("overview").trim()
                 .ifBlank { fallbackOverview.trim() }
-                .ifBlank { "Phim lẻ phát trực tiếp qua nguồn Aether với phụ đề đa ngôn ngữ & dịch tự động sang Tiếng Việt." }
+                .ifBlank { "Phim lẻ phát trực tiếp qua nguồn Thúy An với phụ đề đa ngôn ngữ & dịch tự động sang Tiếng Việt." }
 
             val primaryDomain = domains.firstOrNull { it.isNotBlank() } ?: FALLBACK_DOMAINS.first()
             val playUrl = buildMovieUrl(idStr, primaryDomain)
@@ -694,7 +694,7 @@ object AetherCatalog {
             val cast = parseCast(obj.optJSONObject("credits"))
             val overview = obj.optString("overview").trim()
                 .ifBlank { fallbackOverview.trim() }
-                .ifBlank { "Phim bộ phát trực tiếp qua nguồn Aether với phụ đề đa ngôn ngữ & dịch tự động sang Tiếng Việt." }
+                .ifBlank { "Phim bộ phát trực tiếp qua nguồn Thúy An với phụ đề đa ngôn ngữ & dịch tự động sang Tiếng Việt." }
 
             val seasonsInfo = parseTvSeasonsList(rawShowJson)
             val episodes = ArrayList<Episode>()

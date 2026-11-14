@@ -5,10 +5,10 @@ import org.json.JSONObject
 import java.util.Calendar
 
 enum class ContentSource(val id: String, val title: String, val subtitle: String, val isMovie: Boolean) {
-    FILM4K("film4k", "Nguồn phim 1", "Nguồn 1 · NguonC", true),
-    AETHER("aether", "Nguồn 2 · Aether", "Nguồn 2 · Aether", true),
-    KKPHIM("kkphim", "Nguồn phim 3", "Nguồn 3 · KKPhim", true),
-    ANIME("anime", "AnimeVietsub", "AnimeVietsub", false);
+    FILM4K("film4k", "Tú Nam", "Nguồn 1 · Tú Nam", true),
+    AETHER("aether", "Thúy An", "Nguồn 2 · Thúy An", true),
+    KKPHIM("kkphim", "Cốm", "Nguồn 3 · Cốm", true),
+    ANIME("anime", "Anime", "Nguồn 4 · Anime", false);
 
     companion object {
         fun fromId(id: String?): ContentSource {

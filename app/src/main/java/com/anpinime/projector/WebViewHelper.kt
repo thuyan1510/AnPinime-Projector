@@ -63,7 +63,7 @@ object WebViewHelper {
             return WebViewCompatibility(
                 isSupported = false,
                 chromeMajorVersion = 0,
-                message = "Không tìm thấy Android System WebView trên thiết bị để chạy trình phát Aether.\nVui lòng cài đặt/bật Android System WebView hoặc đổi sang Nguồn 1 / Nguồn 3."
+                message = "Không tìm thấy Android System WebView trên thiết bị để chạy trình phát Thúy An.\nVui lòng cài đặt/bật Android System WebView hoặc đổi sang Tú Nam / Cốm."
             )
         }
         val major = parseChromeMajorVersion(rawUa)
@@ -71,7 +71,7 @@ object WebViewHelper {
             return WebViewCompatibility(
                 isSupported = false,
                 chromeMajorVersion = major,
-                message = "WebView hệ thống trên máy chiếu quá cũ (Chrome $major, cần >= $MIN_AETHER_CHROME_MAJOR) nên không tương thích với JavaScript của Aether.\nVui lòng cập nhật Android System WebView hoặc đổi sang Nguồn 1 / Nguồn 3."
+                message = "WebView hệ thống trên máy chiếu quá cũ (Chrome $major, cần >= $MIN_AETHER_CHROME_MAJOR) nên không tương thích với JavaScript của Thúy An.\nVui lòng cập nhật Android System WebView hoặc đổi sang Tú Nam / Cốm."
             )
         }
         return WebViewCompatibility(
@@ -388,13 +388,21 @@ object WebViewHelper {
                             };
                             var sel = 'iframe[src*="challenges.cloudflare.com"],iframe[src*="turnstile"],iframe[src*="recaptcha"],iframe[src*="hcaptcha"],.cf-turnstile,.g-recaptcha,.h-captcha,#challenge-stage input[type="checkbox"]';
                             var interactive = Array.prototype.some.call(document.querySelectorAll(sel), visible);
+                            var title = document.title || '';
                             var challengeDom = !!(window._cf_chl_opt) ||
-                              !!document.querySelector('.captcha-placeholder, .cf-turnstile, #challenge-stage, #challenge-form, #cf-please-wait');
+                              /xác minh an toàn|just a moment|attention required/i.test(title) ||
+                              !!document.querySelector('.captcha-placeholder, .cf-turnstile, #challenge-stage, #challenge-form, #cf-please-wait, .challenge-card');
                             var epCount = document.querySelectorAll('.list-episode a, .list_episode a, .episodes a, .episode-list a, a.btn-episode, [data-hash], [data-play]').length;
-                            var html = document.documentElement ? document.documentElement.outerHTML : '';
+                            var html = '';
+                            if (!challengeDom && document.documentElement) {
+                              html = document.documentElement.outerHTML
+                                .replace(/<style[\s\S]*?<\/style>/gi, '')
+                                .replace(/data:image\/[^"'\s)]+/gi, '')
+                                .replace(/data:font\/[^"'\s)]+/gi, '');
+                            }
                             return JSON.stringify({
                               href: window.location.href || '',
-                              title: document.title || '',
+                              title: title,
                               interactive: interactive,
                               challengeDom: challengeDom,
                               epCount: epCount,

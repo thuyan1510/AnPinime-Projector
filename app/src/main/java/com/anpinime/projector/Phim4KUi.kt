@@ -309,10 +309,10 @@ object Phim4KUi {
         var dialogRef: AlertDialog? = null
 
         val sourceEntries = listOf(
-            ContentSource.FILM4K to "🎬  Nguồn 1 · NguonC (Phim bộ & Lẻ Full HD)",
-            ContentSource.AETHER to "⚡  Nguồn 2 · Aether (Phim 4K · Sub Việt)",
-            ContentSource.KKPHIM to "🍿  Nguồn 3 · KKPhim (Kho phim đa dạng)",
-            ContentSource.ANIME to "✨  AnimeVietsub (Anime Vietsub chọn lọc)"
+            ContentSource.FILM4K to "🎬  Nguồn 1 · Tú Nam (Phim bộ & Lẻ Full HD)",
+            ContentSource.AETHER to "⚡  Nguồn 2 · Thúy An (Phim 4K · Sub Việt)",
+            ContentSource.KKPHIM to "🍿  Nguồn 3 · Cốm (Kho phim đa dạng)",
+            ContentSource.ANIME to "✨  Nguồn 4 · Anime (Anime Vietsub & Thuyết minh)"
         )
 
         for ((src, label) in sourceEntries) {
@@ -353,7 +353,7 @@ object Phim4KUi {
 
         val utilityActions = listOf(
             "🔄  Làm mới trang chủ" to onRefresh,
-            "🌐  Tên miền AnimeVietsub" to onAnimeDomain,
+            "🌐  Cấu hình tên miền Anime" to onAnimeDomain,
             "🚀  Kiểm tra cập nhật (${BuildConfig.VERSION_NAME})" to onCheckUpdate
         )
         for ((label, action) in utilityActions) {
@@ -409,7 +409,7 @@ object Phim4KUi {
             ).apply {
                 bottomMargin = UiHelper.dp(context, if (isCompact) 14 else 16)
             }
-            background = UiHelper.roundedBg(UiHelper.COLOR_CARD, 18, context, Color.parseColor("#2BFFFFFF"), 1)
+            background = UiHelper.roundedBg(UiHelper.COLOR_CARD, 18, context, Color.parseColor("#38FF2A36"), 1)
             outlineProvider = ViewOutlineProvider.BACKGROUND
             clipToOutline = true
         }
@@ -429,9 +429,9 @@ object Phim4KUi {
             background = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
                 intArrayOf(
-                    Color.parseColor("#24080A0F"),
-                    Color.parseColor("#99080A0F"),
-                    Color.parseColor("#F5080A0F")
+                    Color.parseColor("#24060608"),
+                    Color.parseColor("#99060608"),
+                    Color.parseColor("#F8060608")
                 )
             )
             layoutParams = FrameLayout.LayoutParams(
@@ -480,7 +480,7 @@ object Phim4KUi {
             val slideBtn = UiHelper.createBadge(
                 context,
                 "${safeIdx + 1}/${featuredItems.size}  ❯",
-                Color.parseColor("#990F121B"),
+                Color.parseColor("#99141216"),
                 Color.WHITE,
                 radiusDp = 999
             ).apply {

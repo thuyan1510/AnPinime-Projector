@@ -30,12 +30,12 @@ import androidx.annotation.DrawableRes
  */
 object Phim4KPlayerUi {
 
-    const val COLOR_PHIM4K_RED = 0xFFED1C24.toInt()
-    const val COLOR_PHIM4K_RED_PRESSED = 0xFFC9181F.toInt()
-    const val COLOR_PHIM4K_BLUE = 0xFF1976D2.toInt()
-    const val COLOR_ACCENT_CYAN = 0xFF4FC3F7.toInt()
-    const val COLOR_GLASS_DARK = 0xEB0B0D12.toInt()
-    const val COLOR_GLASS_SURFACE = 0xF511151E.toInt()
+    const val COLOR_PHIM4K_RED = 0xFFE50914.toInt()
+    const val COLOR_PHIM4K_RED_PRESSED = 0xFFB80710.toInt()
+    const val COLOR_PHIM4K_BLUE = 0xFFE50914.toInt()
+    const val COLOR_ACCENT_CYAN = 0xFFFF4D5A.toInt()
+    const val COLOR_GLASS_DARK = 0xEC060608.toInt()
+    const val COLOR_GLASS_SURFACE = 0xF5141216.toInt()
 
     enum class AspectMode(val label: String) {
         FIT("Vừa màn hình"),
@@ -61,17 +61,17 @@ object Phim4KPlayerUi {
 
     fun createTopBottomScrim(isTop: Boolean): GradientDrawable {
         val colors = if (isTop) {
-            intArrayOf(0xD905060A.toInt(), 0x7305060A, Color.TRANSPARENT)
+            intArrayOf(0xDE060608.toInt(), 0x80060608.toInt(), Color.TRANSPARENT)
         } else {
-            intArrayOf(Color.TRANSPARENT, 0x8005060A.toInt(), 0xEB05060A.toInt())
+            intArrayOf(Color.TRANSPARENT, 0x8C060608.toInt(), 0xF0060608.toInt())
         }
         return GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, colors)
     }
 
     fun createGlassPillDrawable(
         context: Context,
-        fillColor: Int = 0x8C05060A.toInt(),
-        strokeColor: Int = 0x2EFFFFFF,
+        fillColor: Int = 0x99060608.toInt(),
+        strokeColor: Int = 0x38FF2A36,
         cornerDp: Int = 18
     ): GradientDrawable {
         return GradientDrawable().apply {
@@ -85,9 +85,9 @@ object Phim4KPlayerUi {
     fun createGlassPanelDrawable(context: Context): GradientDrawable {
         return GradientDrawable(
             GradientDrawable.Orientation.LEFT_RIGHT,
-            intArrayOf(0xF506080D.toInt(), 0xF70B0D12.toInt(), 0xFA141821.toInt())
+            intArrayOf(0xF5060608.toInt(), 0xF70C0B0E.toInt(), 0xFA181114.toInt())
         ).apply {
-            setStroke(maxOf(1, dp(context, 1)), 0x33FFFFFF)
+            setStroke(maxOf(1, dp(context, 1)), 0x40FF2A36)
         }
     }
 
@@ -106,14 +106,14 @@ object Phim4KPlayerUi {
         }
 
         val normalFill = when {
-            isPrimaryCenter -> 0x4DFFFFFF
-            isFeatureActive -> 0x384FC3F7
+            isPrimaryCenter -> 0x4DE50914
+            isFeatureActive -> 0x47E50914
             else -> 0x26FFFFFF
         }
         val normalStroke = when {
-            isPrimaryCenter -> 0x80FFFFFF.toInt()
-            isFeatureActive -> 0xB34FC3F7.toInt()
-            else -> 0x33FFFFFF
+            isPrimaryCenter -> 0xB3FF2A36.toInt()
+            isFeatureActive -> 0xCCFF2A36.toInt()
+            else -> 0x38FFFFFF
         }
 
         val focusedDrawable = oval(COLOR_PHIM4K_RED, strokeFocus, Color.WHITE)
@@ -123,7 +123,7 @@ object Phim4KPlayerUi {
         return StateListDrawable().apply {
             addState(intArrayOf(android.R.attr.state_pressed), pressedDrawable)
             addState(intArrayOf(android.R.attr.state_focused), focusedDrawable)
-            addState(intArrayOf(android.R.attr.state_selected), oval(0x474FC3F7, strokeFocus, COLOR_ACCENT_CYAN))
+            addState(intArrayOf(android.R.attr.state_selected), oval(0x5AE50914, strokeFocus, COLOR_ACCENT_CYAN))
             addState(intArrayOf(), defaultDrawable)
         }
     }
@@ -164,8 +164,90 @@ object Phim4KPlayerUi {
             isFeatureActive = isActive
         )
         button.imageTintList = ColorStateList.valueOf(
-            if (isActive) 0xFFE1F5FE.toInt() else Color.WHITE
+            if (isActive) 0xFFFFD6D9.toInt() else Color.WHITE
         )
+    }
+
+    fun createPillControlDrawable(
+        context: Context,
+        isFeatureActive: Boolean = false
+    ): StateListDrawable {
+        val strokeThin = maxOf(1, dp(context, 1))
+        val strokeFocus = maxOf(2, dp(context, 2))
+        val corner = dp(context, 20).toFloat()
+
+        fun pill(fill: Int, strokeW: Int, strokeCol: Int) = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = corner
+            setColor(fill)
+            if (strokeW > 0) setStroke(strokeW, strokeCol)
+        }
+
+        val normalFill = if (isFeatureActive) 0x5AE50914 else 0x80141216.toInt()
+        val normalStroke = if (isFeatureActive) 0xCCFF2A36.toInt() else 0x3DFFFFFF
+
+        return StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_pressed), pill(COLOR_PHIM4K_RED_PRESSED, strokeFocus, Color.WHITE))
+            addState(intArrayOf(android.R.attr.state_focused), pill(COLOR_PHIM4K_RED, strokeFocus, Color.WHITE))
+            addState(intArrayOf(android.R.attr.state_selected), pill(0x66E50914, strokeFocus, COLOR_ACCENT_CYAN))
+            addState(intArrayOf(), pill(normalFill, strokeThin, normalStroke))
+        }
+    }
+
+    fun createLabeledControlButton(
+        context: Context,
+        iconRes: Int,
+        label: String,
+        compact: Boolean,
+        contentDesc: String,
+        onClick: () -> Unit
+    ): android.widget.LinearLayout {
+        val hPad = dp(context, if (compact) 10 else 13)
+        val vPad = dp(context, if (compact) 7 else 9)
+        val iconSize = dp(context, if (compact) 16 else 18)
+
+        return android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            isFocusable = true
+            isFocusableInTouchMode = false
+            isClickable = true
+            contentDescription = contentDesc
+            background = createPillControlDrawable(context, isFeatureActive = false)
+            setPadding(hPad, vPad, hPad, vPad)
+
+            addView(ImageView(context).apply {
+                id = android.R.id.icon
+                setImageResource(iconRes)
+                imageTintList = ColorStateList.valueOf(Color.WHITE)
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                layoutParams = android.widget.LinearLayout.LayoutParams(iconSize, iconSize).apply {
+                    marginEnd = dp(context, if (compact) 5 else 6)
+                }
+            })
+
+            addView(android.widget.TextView(context).apply {
+                id = android.R.id.text1
+                text = label
+                setTextColor(Color.WHITE)
+                setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, if (compact) 11.5f else 12.5f)
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                isSingleLine = true
+            })
+
+            setOnClickListener { onClick() }
+        }
+    }
+
+    fun styleLabeledControlButton(
+        button: android.widget.LinearLayout,
+        context: Context,
+        isActive: Boolean
+    ) {
+        button.background = createPillControlDrawable(context, isFeatureActive = isActive)
+        val tint = if (isActive) 0xFFFFD6D9.toInt() else Color.WHITE
+        button.findViewById<ImageView>(android.R.id.icon)?.imageTintList = ColorStateList.valueOf(tint)
+        button.findViewById<android.widget.TextView>(android.R.id.text1)?.setTextColor(tint)
     }
 
     fun createSeekBarProgressDrawable(context: Context): Drawable {
@@ -176,9 +258,9 @@ object Phim4KPlayerUi {
             setColor(color)
         }
 
-        val bg = bar(0x40FFFFFF)
-        val secondary = ClipDrawable(bar(0x80E3F2FD.toInt()), Gravity.START, ClipDrawable.HORIZONTAL)
-        val progress = ClipDrawable(bar(COLOR_PHIM4K_BLUE), Gravity.START, ClipDrawable.HORIZONTAL)
+        val bg = bar(0x38FFFFFF)
+        val secondary = ClipDrawable(bar(0x55FF6B74), Gravity.START, ClipDrawable.HORIZONTAL)
+        val progress = ClipDrawable(bar(COLOR_PHIM4K_RED), Gravity.START, ClipDrawable.HORIZONTAL)
 
         val trackH = dp(context, 4)
         return LayerDrawable(arrayOf(bg, secondary, progress)).apply {
@@ -225,11 +307,11 @@ object Phim4KPlayerUi {
             setColor(fill)
             setStroke(sW, sCol)
         }
-        val baseFill = if (isSelected) 0x334FC3F7 else 0x1EFFFFFF
-        val baseStroke = if (isSelected) 0xCC4FC3F7.toInt() else 0x33FFFFFF
+        val baseFill = if (isSelected) 0x47E50914 else 0x1EFFFFFF
+        val baseStroke = if (isSelected) 0xCCFF2A36.toInt() else 0x38FFFFFF
         return StateListDrawable().apply {
-            addState(intArrayOf(android.R.attr.state_pressed), rect(0xFFE6EEF8.toInt(), strokeFocus, COLOR_ACCENT_CYAN))
-            addState(intArrayOf(android.R.attr.state_focused), rect(0xFFF2FFFFFF.toInt(), strokeFocus, Color.WHITE))
+            addState(intArrayOf(android.R.attr.state_pressed), rect(0xFFFFE5E7.toInt(), strokeFocus, COLOR_ACCENT_CYAN))
+            addState(intArrayOf(android.R.attr.state_focused), rect(0xFFF5FFFFFF.toInt(), strokeFocus, COLOR_PHIM4K_RED))
             addState(intArrayOf(), rect(baseFill, stroke, baseStroke))
         }
     }
@@ -244,8 +326,8 @@ object Phim4KPlayerUi {
             setColor(fill)
             setStroke(sW, sCol)
         }
-        val baseFill = if (isActive) 0x2E4FC3F7 else 0x16FFFFFF
-        val baseStroke = if (isActive) 0xAA4FC3F7.toInt() else 0x24FFFFFF
+        val baseFill = if (isActive) 0x40E50914 else 0x16FFFFFF
+        val baseStroke = if (isActive) 0xCCFF2A36.toInt() else 0x24FFFFFF
         return StateListDrawable().apply {
             addState(intArrayOf(android.R.attr.state_pressed), rect(0x47ED1C24, strokeFocus, Color.WHITE))
             addState(intArrayOf(android.R.attr.state_focused), rect(0x3BED1C24, strokeFocus, Color.WHITE))
@@ -311,7 +393,7 @@ object Phim4KPlayerUi {
             orientation = LinearLayout.VERTICAL
             background = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(0xFA121620.toInt(), 0xFA090B10.toInt())
+                intArrayOf(0xFA141216.toInt(), 0xFA060608.toInt())
             ).apply {
                 cornerRadius = dp(activity, 16).toFloat()
                 setStroke(maxOf(1, dp(activity, 1)), 0x3DFFFFFF)
@@ -415,7 +497,7 @@ object Phim4KPlayerUi {
                     text = "ĐANG CHỌN"
                     textSize = 10f
                     typeface = Typeface.DEFAULT_BOLD
-                    setTextColor(0xFF06131C.toInt())
+                    setTextColor(0xFF060608.toInt())
                     setPadding(dp(activity, 8), dp(activity, 3), dp(activity, 8), dp(activity, 3))
                     background = createGlassPillDrawable(activity, fillColor = COLOR_ACCENT_CYAN, strokeColor = Color.TRANSPARENT, cornerDp = 10)
                 })
@@ -482,7 +564,7 @@ object Phim4KPlayerUi {
             orientation = LinearLayout.VERTICAL
             background = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(0xFA121620.toInt(), 0xFA090B10.toInt())
+                intArrayOf(0xFA141216.toInt(), 0xFA060608.toInt())
             ).apply {
                 cornerRadius = dp(activity, 16).toFloat()
                 setStroke(maxOf(1, dp(activity, 1)), 0x3DFFFFFF)

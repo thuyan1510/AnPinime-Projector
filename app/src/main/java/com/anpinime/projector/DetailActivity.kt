@@ -175,9 +175,9 @@ class DetailActivity : AppCompatActivity() {
             background = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
                 intArrayOf(
-                    Color.parseColor("#CC080A0F"),
-                    Color.parseColor("#E8080A0F"),
-                    Color.parseColor("#FA080A0F")
+                    Color.parseColor("#CC060608"),
+                    Color.parseColor("#E8060608"),
+                    Color.parseColor("#FA060608")
                 )
             )
             layoutParams = FrameLayout.LayoutParams(
@@ -340,7 +340,7 @@ class DetailActivity : AppCompatActivity() {
             }
             if (firstEp.audioLabel.isNotBlank()) {
                 playRow.addView(
-                    UiHelper.createBadge(this, "🔊 ${firstEp.audioLabel}", Color.parseColor("#2A3B5C"), Color.WHITE).apply {
+                    UiHelper.createBadge(this, "🔊 ${firstEp.audioLabel}", Color.parseColor("#26181C"), Color.WHITE).apply {
                         layoutParams = LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.WRAP_CONTENT,
                             ViewGroup.LayoutParams.WRAP_CONTENT
@@ -350,7 +350,7 @@ class DetailActivity : AppCompatActivity() {
             }
             if (firstEp.subtitleLabel.isNotBlank()) {
                 playRow.addView(
-                    UiHelper.createBadge(this, "💬 ${firstEp.subtitleLabel}", Color.parseColor("#3B1E6D"), Color.WHITE)
+                    UiHelper.createBadge(this, "💬 ${firstEp.subtitleLabel}", Color.parseColor("#4A1118"), Color.WHITE)
                 )
             }
         }
@@ -507,9 +507,9 @@ class DetailActivity : AppCompatActivity() {
             background = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
                 intArrayOf(
-                    Color.parseColor("#38080A0F"),
-                    Color.parseColor("#9E080A0F"),
-                    Color.parseColor("#FF080A0F")
+                    Color.parseColor("#38060608"),
+                    Color.parseColor("#9E060608"),
+                    Color.parseColor("#FF060608")
                 )
             )
             layoutParams = FrameLayout.LayoutParams(
@@ -535,7 +535,7 @@ class DetailActivity : AppCompatActivity() {
         }
         UiHelper.makeFocusableButton(
             view = backBtn,
-            normalBgColor = Color.parseColor("#B30F121B"),
+            normalBgColor = Color.parseColor("#B3141216"),
             focusedBgColor = accent,
             radiusDp = 999
         ) {
@@ -648,14 +648,14 @@ class DetailActivity : AppCompatActivity() {
                 })
             }
             if (firstEp.audioLabel.isNotBlank()) {
-                badgeRow.addView(UiHelper.createBadge(this, "🔊 ${firstEp.audioLabel}", Color.parseColor("#2A3B5C"), Color.WHITE).apply {
+                badgeRow.addView(UiHelper.createBadge(this, "🔊 ${firstEp.audioLabel}", Color.parseColor("#26181C"), Color.WHITE).apply {
                     layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                         rightMargin = UiHelper.dp(context, 6)
                     }
                 })
             }
             if (firstEp.subtitleLabel.isNotBlank()) {
-                badgeRow.addView(UiHelper.createBadge(this, "💬 ${firstEp.subtitleLabel}", Color.parseColor("#3B1E6D"), Color.WHITE))
+                badgeRow.addView(UiHelper.createBadge(this, "💬 ${firstEp.subtitleLabel}", Color.parseColor("#4A1118"), Color.WHITE))
             }
             badgeScroll.addView(badgeRow)
             bodyCol.addView(badgeScroll)

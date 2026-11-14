@@ -83,11 +83,12 @@ class FilmMediaRelay(
         val encoded = URLEncoder.encode(remoteUrl, "UTF-8")
         val clean = remoteUrl.substringBefore('?').lowercase()
         val ext = when {
-            forcePlaylistExt || clean.endsWith(".m3u8") || clean.contains("/stream/hls") || clean.contains("hls") -> ".m3u8"
+            forcePlaylistExt || clean.endsWith(".m3u8") || clean.contains("/stream/hls") -> ".m3u8"
             clean.endsWith(".vtt") -> ".vtt"
             clean.endsWith(".srt") -> ".srt"
             clean.endsWith(".key") -> ".key"
-            clean.endsWith(".ts") -> ".ts"
+            clean.endsWith(".ts") || clean.endsWith(".png") || clean.endsWith(".jpg") ||
+                clean.endsWith(".jpeg") || clean.endsWith(".webp") || clean.endsWith(".f4k") -> ".ts"
             else -> ""
         }
         return "http://127.0.0.1:$port/proxy$ext?u=$encoded"
@@ -117,6 +118,7 @@ class FilmMediaRelay(
 
             val reqBuilder = Request.Builder().url(targetUrl)
             for ((k, v) in baseHeaders) {
+                if (k.startsWith("X-StreamC-", ignoreCase = true)) continue
                 reqBuilder.header(k, v)
             }
             if (baseHeaders.keys.none { it.equals("User-Agent", true) }) {
@@ -153,13 +155,18 @@ class FilmMediaRelay(
                     val isPlaylist = cleanTarget.endsWith(".m3u8") ||
                         cleanTarget.contains("/stream/hls") ||
                         contentType.contains("mpegurl", ignoreCase = true) ||
-                        headUtf8.startsWith("#EXTM3U")
+                        headUtf8.startsWith("#EXTM3U") ||
+                        headUtf8.startsWith("#ENC-AESGCM")
 
                     if (isPlaylist) {
                         val baos = ByteArrayOutputStream()
                         if (headLen > 0) baos.write(head, 0, headLen)
                         bis.copyTo(baos, 32 * 1024)
-                        val text = String(baos.toByteArray(), Charsets.UTF_8)
+                        val rawText = String(baos.toByteArray(), Charsets.UTF_8)
+                        val text = StreamCResolver.unwrapEncryptedM3u8IfNeeded(
+                            rawText,
+                            baseHeaders["X-StreamC-Hash"]
+                        )
                         val rewritten = rewritePlaylist(text, remote)
                         val bytes = rewritten.toByteArray(Charsets.UTF_8)
                         val header = "HTTP/1.1 200 OK\r\n" +
@@ -186,7 +193,7 @@ class FilmMediaRelay(
                         return
                     }
 
-                    val isTs = cleanTarget.endsWith(".ts") ||
+                    val isTs = cleanTarget.endsWith(".ts") || cleanTarget.endsWith(".png") ||
                         contentType.contains("mp2t", ignoreCase = true) ||
                         (headLen > 0 && head[0] == 0x47.toByte())
                     val isVtt = cleanTarget.endsWith(".vtt") || contentType.contains("text/vtt", true) ||
@@ -294,16 +301,24 @@ class FilmMediaRelay(
 
     private fun rewritePlaylist(text: String, baseUrl: URL): String {
         val uriRegex = Regex("""URI="([^"]+)"""")
+        var expectVariantPlaylist = false
         return text.lines().joinToString("\n") { line ->
             val trimmed = line.trim()
-            if (trimmed.isNotEmpty() && !trimmed.startsWith("#")) {
+            if (trimmed.startsWith("#EXT-X-STREAM-INF", ignoreCase = true)) {
+                expectVariantPlaylist = true
+                line
+            } else if (trimmed.isNotEmpty() && !trimmed.startsWith("#")) {
+                val isVariant = expectVariantPlaylist
+                expectVariantPlaylist = false
                 val resolved = URL(baseUrl, trimmed).toString()
-                proxyUrlFor(resolved)
+                proxyUrlFor(resolved, forcePlaylistExt = isVariant)
             } else if (line.contains("URI=\"")) {
+                val forceM3u8 = trimmed.startsWith("#EXT-X-MEDIA", ignoreCase = true) &&
+                    trimmed.contains("TYPE=AUDIO", ignoreCase = true)
                 uriRegex.replace(line) { m ->
                     val raw = m.groupValues[1]
                     val resolved = URL(baseUrl, raw).toString()
-                    "URI=\"${proxyUrlFor(resolved)}\""
+                    "URI=\"${proxyUrlFor(resolved, forcePlaylistExt = forceM3u8)}\""
                 }
             } else {
                 line
