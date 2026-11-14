@@ -231,6 +231,19 @@ object AetherCatalog {
                 }
                 if (ok) reachable.add(domain) else unreachable.add(domain)
             }
+            if (reachable.isEmpty()) {
+                for (fb in FALLBACK_DOMAINS) {
+                    val normFb = normalizeHttpsDomain(fb) ?: continue
+                    if (normFb !in candidates) {
+                        val fbOk = try {
+                            reachabilityProbe(normFb)
+                        } catch (_: Throwable) {
+                            false
+                        }
+                        if (fbOk) reachable.add(normFb) else unreachable.add(normFb)
+                    }
+                }
+            }
             reachable + unreachable
         } else {
             candidates.toList()

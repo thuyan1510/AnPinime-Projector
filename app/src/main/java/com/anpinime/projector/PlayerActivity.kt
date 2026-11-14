@@ -414,10 +414,28 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
+    private fun findWebFallbackUrl(ep: Episode, preferredWebUrl: String = lastWebUrl): String {
+        val candidates = listOf(preferredWebUrl, ep.refererUrl, ep.url)
+        for (cand in candidates) {
+            if (!cand.startsWith("http", ignoreCase = true)) continue
+            if (cand.contains("embed", ignoreCase = true) ||
+                cand.contains("player", ignoreCase = true) ||
+                cand.contains("phimapi", ignoreCase = true) ||
+                cand.contains("streamc", ignoreCase = true)
+            ) {
+                return cand
+            }
+        }
+        if (!ep.source.isMovie && ep.url.startsWith("http", ignoreCase = true)) {
+            return ep.url
+        }
+        return ""
+    }
+
     private fun setWebSurfaceVisible(visible: Boolean, focusable: Boolean = false) {
         if (visible) {
             if (::surfaceView.isInitialized) {
-                surfaceView.visibility = View.INVISIBLE
+                surfaceView.visibility = View.GONE
             }
             if (::headlessWebContainer.isInitialized) {
                 headlessWebContainer.visibility = View.VISIBLE
@@ -1823,14 +1841,25 @@ class PlayerActivity : AppCompatActivity() {
                     startWebFallback(resolved.url, resolved.headers["Referer"] ?: episode.url, resumeSeekMs)
                     return@launch
                 }
+                val cleanResolvedUrl = resolved.url.substringBefore('?').lowercase(Locale.US)
                 val needsRelay = resolved.isF4kWrapped ||
                     resolved.url.contains("/stream/hls", ignoreCase = true) ||
                     resolved.url.contains("streamc.xyz", ignoreCase = true) ||
-                    (resolved.url.substringBefore('?').lowercase().endsWith(".m3u8") && resolved.url.contains("film4k", ignoreCase = true))
+                    cleanResolvedUrl.endsWith(".png") ||
+                    cleanResolvedUrl.endsWith(".jpg") ||
+                    cleanResolvedUrl.endsWith(".jpeg") ||
+                    cleanResolvedUrl.endsWith(".webp") ||
+                    cleanResolvedUrl.endsWith(".f4k") ||
+                    resolved.url.contains("rousav.tech", ignoreCase = true) ||
+                    resolved.url.contains("tnmr.org", ignoreCase = true) ||
+                    resolved.url.contains("goldenkite.top", ignoreCase = true) ||
+                    resolved.url.contains("workers.dev", ignoreCase = true) ||
+                    (cleanResolvedUrl.endsWith(".m3u8") && resolved.url.contains("film4k", ignoreCase = true))
                 val hlsHint = resolved.mediaKind == StreamMediaKind.HLS ||
                     resolved.url.contains(".m3u8", true) ||
                     resolved.url.contains("streamc.xyz", true)
-                val ua = resolved.headers["User-Agent"] ?: CatalogService.USER_AGENT
+                val ua = resolved.headers["User-Agent"]
+                    ?: if (aetherMode) AetherSourceResolver.USER_AGENT else CatalogService.USER_AGENT
                 val playUrl = if (needsRelay) {
                     filmRelay?.stop()
                     val relay = FilmMediaRelay(resolved.headers, ua)
@@ -1858,8 +1887,11 @@ class PlayerActivity : AppCompatActivity() {
                 if (t is CancellationException) throw t
                 if (generation != playbackGeneration) return@launch
                 if (!trySwitchToBackupServer(0L)) {
-                    if (!isAetherEpisode(episode) && episode.url.startsWith("http", ignoreCase = true) && !episode.source.isMovie) {
-                        startWebFallback(episode.url, CatalogService.currentAnimeBaseUrl())
+                    val fallbackUrl = if (!isAetherEpisode(episode)) findWebFallbackUrl(episode) else ""
+                    if (fallbackUrl.isNotBlank()) {
+                        val ref = episode.detailUrl.takeIf { it.startsWith("http", ignoreCase = true) }
+                            ?: if (episode.source == ContentSource.ANIME) CatalogService.currentAnimeBaseUrl() else episode.url
+                        startWebFallback(fallbackUrl, ref, allowNativeHandoff = false)
                     } else {
                         loadingOverlay.visibility = View.VISIBLE
                         loadingText.text = "Không tải được luồng phát: ${t.message ?: "Nguồn tạm thời không phản hồi"}\nBấm phím Lên/Xuống -> Đổi Server khác."
@@ -2030,14 +2062,18 @@ class PlayerActivity : AppCompatActivity() {
         val smoothHlsStream = aetherStream || currentEpisode.source == ContentSource.FILM4K || streamUrl.contains("127.0.0.1")
         val videoMediaSource: MediaSource = when (effectiveKind) {
             StreamMediaKind.HLS -> {
-                val hlsExtractorFactory = DefaultHlsExtractorFactory(
-                    DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
-                        DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS,
-                    true
-                )
+                val hlsExtractorFactory = if (smoothHlsStream) {
+                    DefaultHlsExtractorFactory(0, true)
+                } else {
+                    DefaultHlsExtractorFactory(
+                        DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
+                            DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS,
+                        true
+                    )
+                }
                 HlsMediaSource.Factory(httpFactory)
                     .setExtractorFactory(hlsExtractorFactory)
-                    .setAllowChunklessPreparation(smoothHlsStream)
+                    .setAllowChunklessPreparation(false)
                     .createMediaSource(mediaItem)
             }
             StreamMediaKind.DASH -> {
@@ -2164,23 +2200,16 @@ class PlayerActivity : AppCompatActivity() {
                             }
                             return@post
                         }
-                        if (currentEpisode.source.isMovie) {
-                            if (!trySwitchToBackupServer(lastPos)) startCompatibilityPlayback(lastPos)
+                        if (trySwitchToBackupServer(lastPos)) {
                             return@post
                         }
-                        val fallbackUrl = when {
-                            lastWebUrl.startsWith("http", ignoreCase = true) &&
-                                (lastWebUrl.contains("embed", ignoreCase = true) ||
-                                    lastWebUrl.contains("player", ignoreCase = true) ||
-                                    !currentEpisode.source.isMovie) -> lastWebUrl
-                            currentEpisode.url.contains("embed", ignoreCase = true) ||
-                                currentEpisode.url.contains("player", ignoreCase = true) -> currentEpisode.url
-                            else -> ""
-                        }
-
+                        val fallbackUrl = findWebFallbackUrl(currentEpisode)
                         if (fallbackUrl.isNotBlank()) {
-                            startWebFallback(fallbackUrl, currentEpisode.url, initialSeekMs = lastPos, allowNativeHandoff = false)
-                        } else if (!trySwitchToBackupServer(lastPos)) {
+                            val ref = currentEpisode.detailUrl.ifBlank { currentEpisode.url }
+                            startWebFallback(fallbackUrl, ref, initialSeekMs = lastPos, allowNativeHandoff = false)
+                        } else if (!preferSoftwareAudio && lastNativeUrl.isNotBlank()) {
+                            startCompatibilityPlayback(lastPos)
+                        } else {
                             loadingOverlay.visibility = View.VISIBLE
                             loadingText.text = "Máy chủ hiện tại bị gián đoạn.\nHãy chọn [Đổi Server] ở thanh bên dưới."
                             showOsd(focusPlayButton = true)
@@ -2213,8 +2242,10 @@ class PlayerActivity : AppCompatActivity() {
         destroyWebPlayer()
         val aetherMode = isAetherEpisode()
         allowNativeWebHandoff = allowNativeHandoff
-        // NEVER set surfaceView to GONE - keep it visible so its native Surface is preserved and never black-screens!
-        surfaceView.visibility = View.VISIBLE
+        // Keep HW SurfaceView ready for fast native handoff in Aether background extraction; non-Aether hides it immediately below
+        if (aetherMode) {
+            surfaceView.visibility = View.VISIBLE
+        }
         if (::subtitleView.isInitialized) subtitleView.visibility = View.VISIBLE
         loadingOverlay.visibility = View.VISIBLE
 
@@ -2637,7 +2668,10 @@ class PlayerActivity : AppCompatActivity() {
               function needsWebsiteDecoder(){
                 return streamC && window.streamAccess && window.streamAccess.shouldUseSealedLoader && window.streamAccess.shouldUseSealedLoader() === true;
               }
-              var hidden = [
+              var hidden = streamC ? [
+                'header', 'footer', '.footer', '.header', '.sidebar', '.breadcrumb', '.comments',
+                'nav', '.navbar', '.menu'
+              ] : [
                 '.Adv', '.ad-center', '.ads', '.advertisement', '[class*="ads"]', '[class*="banner"]', '[id*="ads"]',
                 'iframe[src*="ads"]', '.popup', '.modal-backdrop', '.header-ads-pc', '.Adv.ad-center-header',
                 'header', 'footer', '.footer', '.header', '.sidebar', '.breadcrumb', '.comments', '.film-info',
@@ -2840,9 +2874,20 @@ class PlayerActivity : AppCompatActivity() {
                   try { f.contentWindow.postMessage(c, '*'); } catch(e){}
                 });
               });
+              function keepProtectedNode(el){
+                return !!(el && (
+                  (el.matches && el.matches('#verification, .cf-turnstile, #player, .jwplayer')) ||
+                  (el.closest && el.closest('#verification, .cf-turnstile, #player, .jwplayer')) ||
+                  (el.querySelector && el.querySelector('#verification, .cf-turnstile, #player, .jwplayer'))
+                ));
+              }
               function hideChrome(){
                 hidden.forEach(function(s){
-                  try { document.querySelectorAll(s).forEach(function(e){ important(e, 'display', 'none'); }); } catch(e){}
+                  try {
+                    document.querySelectorAll(s).forEach(function(e){
+                      if (!keepProtectedNode(e)) important(e, 'display', 'none');
+                    });
+                  } catch(e){}
                 });
                 hideAccessNotices();
                 important(document.documentElement, 'margin', '0'); important(document.documentElement, 'padding', '0');
@@ -2858,7 +2903,7 @@ class PlayerActivity : AppCompatActivity() {
                   var parent = node.parentElement;
                   if (!parent) break;
                   Array.prototype.forEach.call(parent.children, function(sibling){
-                    if (sibling !== node) important(sibling, 'display', 'none');
+                    if (sibling !== node && !keepProtectedNode(sibling)) important(sibling, 'display', 'none');
                   });
                   important(parent, 'display', 'block'); important(parent, 'visibility', 'visible'); important(parent, 'opacity', '1');
                   important(parent, 'position', 'static'); important(parent, 'width', '100%'); important(parent, 'height', '100%');
@@ -2875,10 +2920,13 @@ class PlayerActivity : AppCompatActivity() {
               function watch(v){
                 if (!v) return false;
                 activeVideo = v;
-                isolate(v);
-                important(v, 'object-fit', 'contain');
-                v.setAttribute('playsinline', '');
-                v.controls = false;
+                if (!v.__aaIsolated) {
+                  v.__aaIsolated = true;
+                  isolate(v);
+                  important(v, 'object-fit', 'contain');
+                  v.setAttribute('playsinline', '');
+                  v.controls = false;
+                }
                 reportSource(v);
                 if (!v.__aa){
                   v.__aa = true;
@@ -2904,6 +2952,10 @@ class PlayerActivity : AppCompatActivity() {
               function focus(){
                 if (!window.document || !document.documentElement) return false;
                 if (notifyChallengeIfNeeded()) return false;
+                if (activeVideo && document.contains(activeVideo) && activeVideo.__aaIsolated) {
+                  if (activeVideo.readyState >= 2) sendReady();
+                  return true;
+                }
                 hideChrome();
                 var videos = document.querySelectorAll('video');
                 if (videos.length) return watch(videos[0]);
@@ -3005,9 +3057,9 @@ class PlayerActivity : AppCompatActivity() {
                                 if (body.isNotBlank()) {
                                     val exportHook = """
                                         ;try {
-                                            window.__anpinimePlayerStore = I;
-                                            window.__anpinimeSubStore = ve;
-                                            window.__anpinimePrefStore = ne;
+                                            if (typeof I !== 'undefined') window.__anpinimePlayerStore = I;
+                                            if (typeof ve !== 'undefined') window.__anpinimeSubStore = ve;
+                                            if (typeof ne !== 'undefined') window.__anpinimePrefStore = ne;
                                             if (typeof Cs === 'function') window.__anpinimeCs = Cs;
                                             if (typeof Ss === 'function') window.__anpinimeSs = Ss;
                                             if (typeof g0 === 'function') window.__anpinimeScrapeAndPlay = g0;
@@ -3146,6 +3198,9 @@ class PlayerActivity : AppCompatActivity() {
         fallbackWebView = wv
         headlessWebContainer.removeAllViews()
         headlessWebContainer.addView(wv)
+        if (!aetherMode) {
+            setWebSurfaceVisible(true, focusable = true)
+        }
         if (aetherMode) {
             wv.loadUrl(webUrl)
         } else if (referer.isNotBlank()) {
@@ -4266,21 +4321,52 @@ class PlayerActivity : AppCompatActivity() {
             startEpisodePlayback(targetEp, resetPosition = false, initialPositionMs = resumePos)
             return true
         }
-        // Film4K's "Phần" denotes real seasons, not interchangeable servers.
-        if (currentEpisode.source == ContentSource.FILM4K && currentEpisode.seasonNum > 0) return false
+        val hasDistinctServerForEp = currentEpisode.serverName.isNotBlank() && allEpisodes.any {
+            it.number == currentEpisode.number &&
+                it.serverName.isNotBlank() &&
+                !it.serverName.equals(currentEpisode.serverName, ignoreCase = true)
+        }
+        // Film4K's "Phần" denotes real seasons, not interchangeable servers unless another distinct server exists for this episode.
+        if (currentEpisode.source == ContentSource.FILM4K && currentEpisode.seasonNum > 0 && !hasDistinctServerForEp) {
+            return false
+        }
         val seasons = ArrayList<String>()
         for (ep in allEpisodes) {
             if (!seasons.contains(ep.season)) seasons.add(ep.season)
         }
         val currentIdx = seasons.indexOf(currentEpisode.season)
-        if (currentIdx >= 0) {
-            val backupEp = seasons.drop(currentIdx + 1).firstNotNullOfOrNull { nextSeason ->
-                allEpisodes.firstOrNull { it.season == nextSeason && it.number == currentEpisode.number }
+        val backupBySeason = if (currentIdx >= 0) {
+            seasons.drop(currentIdx + 1).firstNotNullOfOrNull { nextSeason ->
+                allEpisodes.firstOrNull {
+                    it.season == nextSeason &&
+                        it.number == currentEpisode.number &&
+                        (currentEpisode.source != ContentSource.FILM4K || currentEpisode.seasonNum <= 0 ||
+                            it.seasonNum == currentEpisode.seasonNum)
+                }
             }
-            if (backupEp != null) {
-                startEpisodePlayback(backupEp, resetPosition = false, initialPositionMs = resumePosMs)
-                return true
+        } else {
+            null
+        }
+        val backupEp = backupBySeason ?: if (hasDistinctServerForEp) {
+            val servers = allEpisodes.mapNotNull { it.serverName.takeIf(String::isNotBlank) }.distinct()
+            val curSrvIdx = servers.indexOfFirst { it.equals(currentEpisode.serverName, ignoreCase = true) }
+            if (curSrvIdx >= 0) {
+                servers.drop(curSrvIdx + 1).firstNotNullOfOrNull { nextSrv ->
+                    allEpisodes.firstOrNull {
+                        it.serverName.equals(nextSrv, ignoreCase = true) &&
+                            it.number == currentEpisode.number &&
+                            (currentEpisode.seasonNum <= 0 || it.seasonNum == currentEpisode.seasonNum)
+                    }
+                }
+            } else {
+                null
             }
+        } else {
+            null
+        }
+        if (backupEp != null) {
+            startEpisodePlayback(backupEp, resetPosition = false, initialPositionMs = resumePosMs)
+            return true
         }
         return false
     }

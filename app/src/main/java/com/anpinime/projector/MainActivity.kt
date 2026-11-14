@@ -570,11 +570,11 @@ class MainActivity : AppCompatActivity() {
             switchSource(ContentSource.KKPHIM)
         }
 
-        addMenuButton("src_anime", "✨  Nguồn 4 · Anime") {
+        addMenuButton("src_anime", "✨  Nguồn 4 · AnimeVietsub") {
             switchSource(ContentSource.ANIME)
         }
 
-        addMenuButton("settings_domain", "🌐  Tên miền Anime") {
+        addMenuButton("settings_domain", "🌐  Tên miền AnimeVietsub") {
             showAnimeDomainDialog()
         }
 
@@ -1564,7 +1564,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderSchedule(selectedDay: DayOfWeek) {
         loadJob?.cancel()
-        showLoading("Đang tải lịch chiếu Anime…")
+        showLoading("Đang tải lịch chiếu AnimeVietsub…")
         loadJob = uiScope.launch {
             val allItems = try {
                 withContext(Dispatchers.IO) { CatalogService.loadSchedule() }
@@ -1685,7 +1685,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("Tên miền Anime (Đang dùng: $activeDomain)")
+            .setTitle("Tên miền AnimeVietsub (Đang dùng: $activeDomain)")
             .setView(input)
             .setPositiveButton("Lưu & Áp dụng") { _, _ ->
                 CatalogService.setCustomAnimeDomain(this, input.text.toString())

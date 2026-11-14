@@ -79,14 +79,19 @@ class FilmMediaRelay(
         executor.shutdownNow()
     }
 
-    private fun proxyUrlFor(remoteUrl: String, forcePlaylistExt: Boolean = false): String {
+    private fun proxyUrlFor(
+        remoteUrl: String,
+        forcePlaylistExt: Boolean = false,
+        forceKeyExt: Boolean = false
+    ): String {
         val encoded = URLEncoder.encode(remoteUrl, "UTF-8")
         val clean = remoteUrl.substringBefore('?').lowercase()
         val ext = when {
-            forcePlaylistExt || clean.endsWith(".m3u8") || clean.contains("/stream/hls") -> ".m3u8"
             clean.endsWith(".vtt") -> ".vtt"
             clean.endsWith(".srt") -> ".srt"
-            clean.endsWith(".key") -> ".key"
+            forcePlaylistExt || clean.endsWith(".m3u8") || clean.contains("/stream/hls") -> ".m3u8"
+            forceKeyExt || clean.endsWith(".key") -> ".key"
+            clean.endsWith(".aac") -> ".aac"
             clean.endsWith(".ts") || clean.endsWith(".png") || clean.endsWith(".jpg") ||
                 clean.endsWith(".jpeg") || clean.endsWith(".webp") || clean.endsWith(".f4k") -> ".ts"
             else -> ""
@@ -179,34 +184,20 @@ class FilmMediaRelay(
                         return
                     }
 
-                    val hasPngSig = headLen >= PNG_SIG.size && PNG_SIG.indices.all { head[it] == PNG_SIG[it] }
+                    val isKeyRequest = pathAndQuery.substringBefore('?').endsWith(".key", ignoreCase = true) ||
+                        cleanTarget.endsWith(".key")
+                    val hasPngSig = !isKeyRequest && headLen >= PNG_SIG.size && PNG_SIG.indices.all { head[it] == PNG_SIG[it] }
                     if (hasPngSig) {
                         val baos = ByteArrayOutputStream(if (upstreamLength > headLen) upstreamLength.toInt() else 65536)
                         baos.write(head, 0, headLen)
                         bis.copyTo(baos, 32 * 1024)
                         val unwrapped = unwrapPng(baos.toByteArray())
-                        val isTs = cleanTarget.endsWith(".ts") || cleanTarget.endsWith(".png") ||
-                            contentType.contains("mp2t", ignoreCase = true) ||
-                            (unwrapped.isNotEmpty() && unwrapped[0] == 0x47.toByte())
-                        val mime = detectSegmentMime(cleanTarget, contentType, unwrapped, isTs)
+                        val mime = detectSegmentMime(cleanTarget, contentType, unwrapped, unwrapped.size, isKeyRequest = false)
                         writeBufferedResponse(out, unwrapped, mime, rangeHeader)
                         return
                     }
 
-                    val isTs = cleanTarget.endsWith(".ts") || cleanTarget.endsWith(".png") ||
-                        contentType.contains("mp2t", ignoreCase = true) ||
-                        (headLen > 0 && head[0] == 0x47.toByte())
-                    val isVtt = cleanTarget.endsWith(".vtt") || contentType.contains("text/vtt", true) ||
-                        headUtf8.startsWith("WEBVTT")
-                    val isSrt = cleanTarget.endsWith(".srt") || contentType.contains("subrip", true)
-                    val mime = when {
-                        isVtt -> "text/vtt"
-                        isSrt -> "application/x-subrip"
-                        cleanTarget.endsWith(".key") -> "application/octet-stream"
-                        isTs -> "video/mp2t"
-                        contentType.isNotBlank() && !contentType.startsWith("image/") && !contentType.startsWith("text/plain") -> contentType
-                        else -> "video/mp4"
-                    }
+                    val mime = detectSegmentMime(cleanTarget, contentType, head, headLen, isKeyRequest = isKeyRequest)
 
                     // If client requested a Range on a small un-PNG-wrapped asset and upstream returned 200 (ignored Range)
                     if (rangeHeader != null && code == 200) {
@@ -256,15 +247,37 @@ class FilmMediaRelay(
         return total
     }
 
-    private fun detectSegmentMime(cleanTarget: String, contentType: String, data: ByteArray, isTs: Boolean): String {
-        val isVtt = cleanTarget.endsWith(".vtt") || contentType.contains("text/vtt", true) ||
-            (data.size >= 6 && String(data, 0, 6, Charsets.UTF_8) == "WEBVTT")
+    private fun detectSegmentMime(
+        cleanTarget: String,
+        contentType: String,
+        data: ByteArray,
+        dataLen: Int = data.size,
+        isKeyRequest: Boolean = false
+    ): String {
+        val len = minOf(dataLen, data.size)
+        val headText = if (len > 0) String(data, 0, minOf(len, 16), Charsets.UTF_8).removePrefix("\uFEFF").trimStart() else ""
+        val isVtt = cleanTarget.endsWith(".vtt") || contentType.contains("text/vtt", true) || headText.startsWith("WEBVTT")
         val isSrt = cleanTarget.endsWith(".srt") || contentType.contains("subrip", true)
+        val isKey = isKeyRequest || cleanTarget.endsWith(".key")
+        val isTsSync = len > 0 && data[0] == 0x47.toByte()
+        val isAdtsOrId3 = (len >= 2 && data[0] == 0xFF.toByte() && (data[1].toInt() and 0xF0) == 0xF0) ||
+            (len >= 3 && data[0] == 'I'.code.toByte() && data[1] == 'D'.code.toByte() && data[2] == '3'.code.toByte())
+        val isFmp4Box = len >= 8 && (
+            (data[4] == 'f'.code.toByte() && data[5] == 't'.code.toByte() && data[6] == 'y'.code.toByte() && data[7] == 'p'.code.toByte()) ||
+                (data[4] == 'm'.code.toByte() && data[5] == 'o'.code.toByte() && data[6] == 'o'.code.toByte() && data[7] == 'f'.code.toByte()) ||
+                (data[4] == 's'.code.toByte() && data[5] == 't'.code.toByte() && data[6] == 'y'.code.toByte() && data[7] == 'p'.code.toByte())
+            )
+        val isDisguisedTsExt = cleanTarget.endsWith(".ts") || cleanTarget.endsWith(".png") ||
+            cleanTarget.endsWith(".jpg") || cleanTarget.endsWith(".jpeg") ||
+            cleanTarget.endsWith(".webp") || cleanTarget.endsWith(".f4k")
         return when {
             isVtt -> "text/vtt"
             isSrt -> "application/x-subrip"
-            cleanTarget.endsWith(".key") -> "application/octet-stream"
-            isTs -> "video/mp2t"
+            isKey -> "application/octet-stream"
+            isTsSync -> "video/mp2t"
+            isAdtsOrId3 || cleanTarget.endsWith(".aac") || contentType.contains("audio/aac", ignoreCase = true) -> "audio/aac"
+            isFmp4Box -> "video/mp4"
+            isDisguisedTsExt || contentType.contains("mp2t", ignoreCase = true) -> "video/mp2t"
             contentType.isNotBlank() && !contentType.startsWith("image/") && !contentType.startsWith("text/plain") -> contentType
             else -> "video/mp4"
         }
@@ -314,11 +327,14 @@ class FilmMediaRelay(
                 proxyUrlFor(resolved, forcePlaylistExt = isVariant)
             } else if (line.contains("URI=\"")) {
                 val forceM3u8 = trimmed.startsWith("#EXT-X-MEDIA", ignoreCase = true) &&
-                    trimmed.contains("TYPE=AUDIO", ignoreCase = true)
+                    (trimmed.contains("TYPE=AUDIO", ignoreCase = true) ||
+                        trimmed.contains("TYPE=SUBTITLES", ignoreCase = true))
+                val forceKey = trimmed.startsWith("#EXT-X-KEY", ignoreCase = true) ||
+                    trimmed.startsWith("#EXT-X-SESSION-KEY", ignoreCase = true)
                 uriRegex.replace(line) { m ->
                     val raw = m.groupValues[1]
                     val resolved = URL(baseUrl, raw).toString()
-                    "URI=\"${proxyUrlFor(resolved, forcePlaylistExt = forceM3u8)}\""
+                    "URI=\"${proxyUrlFor(resolved, forcePlaylistExt = forceM3u8, forceKeyExt = forceKey)}\""
                 }
             } else {
                 line

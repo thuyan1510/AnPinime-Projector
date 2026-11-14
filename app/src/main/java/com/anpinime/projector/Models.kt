@@ -8,7 +8,7 @@ enum class ContentSource(val id: String, val title: String, val subtitle: String
     FILM4K("film4k", "Tú Nam", "Nguồn 1 · Tú Nam", true),
     AETHER("aether", "Thúy An", "Nguồn 2 · Thúy An", true),
     KKPHIM("kkphim", "Cốm", "Nguồn 3 · Cốm", true),
-    ANIME("anime", "Anime", "Nguồn 4 · Anime", false);
+    ANIME("anime", "AnimeVietsub", "Nguồn 4 · AnimeVietsub", false);
 
     companion object {
         fun fromId(id: String?): ContentSource {

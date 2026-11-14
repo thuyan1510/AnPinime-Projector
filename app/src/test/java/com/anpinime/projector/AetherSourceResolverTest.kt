@@ -19,6 +19,7 @@ class AetherSourceResolverTest {
         assertTrue(servers.any { it.id == "ly" })
         assertTrue(servers.any { it.id == "lil" })
         assertTrue(servers.any { it.id == "rock" })
+        assertTrue(servers.any { it.id == "shore" })
     }
 
     @Test
@@ -91,6 +92,7 @@ class AetherSourceResolverTest {
         assertFalse(lulResolved.isWeb)
         assertTrue(lulResolved.url.startsWith("http"))
         assertEquals(AetherSourceResolver.DEFAULT_ORIGIN, lulResolved.headers["Origin"])
+        assertTrue("lul must enable FilmMediaRelay", lulResolved.isF4kWrapped)
         assertTrue(progressCalls >= 1)
 
         val lyResolved = AetherSourceResolver.resolve(movieEp, preferredServerId = "ly")
@@ -98,11 +100,16 @@ class AetherSourceResolverTest {
         assertEquals("ly", lyResolved.providerId)
         assertFalse("ly must not use justice proxy directly", lyResolved.url.contains("justice.raccoon"))
         assertEquals("https://vidly.pro", lyResolved.headers["Origin"])
+        assertTrue("ly must enable FilmMediaRelay", lyResolved.isF4kWrapped)
 
         val rockResolved = AetherSourceResolver.resolve(movieEp, preferredServerId = "rock")
         assertFalse(rockResolved.isWeb)
         assertEquals("rock", rockResolved.providerId)
         assertTrue("rock must enable FilmMediaRelay", rockResolved.isF4kWrapped)
+
+        val shoreResolved = AetherSourceResolver.resolve(movieEp, preferredServerId = "shore")
+        assertFalse(shoreResolved.isWeb)
+        assertTrue("shore must enable FilmMediaRelay", shoreResolved.isF4kWrapped)
 
         val tvEp = Episode(
             title = "S1E1",

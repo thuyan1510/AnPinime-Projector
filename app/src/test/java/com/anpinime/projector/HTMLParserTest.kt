@@ -191,4 +191,56 @@ class HTMLParserTest {
         assertFalse(eps.any { it.number == 4 || it.number == 1080 || it.number == 2026 || it.number == 99 || it.number == 18 })
         assertFalse(eps.any { it.url.contains("other-show-a999") })
     }
+
+    @Test
+    fun handlesLargeNextPushPayloadsWithoutStackOverflow() {
+        val padding = "x".repeat(130_000)
+        val escapedEpJson = """{\"episodes\":[{\"hash\":\"H_LARGE\",\"name\":\"Tập 12\",\"url\":\"/phim/frieren-a77/tap-12.html\"}]}"""
+        val bigPayload = padding + escapedEpJson
+        val html = """
+            <html><head><title>Frieren - AnimeVietsub</title></head><body>
+            <script>self.__next_f.push([1,"$bigPayload"])</script>
+            </body></html>
+        """.trimIndent()
+
+        val canonical = "https://animevietsub.xyz/phim/frieren-a77/"
+        val eps = HTMLParser.episodes(html, canonical, "https://animevietsub.xyz")
+        assertTrue("Expected extracted episode from 130KB+ __next_f payload", eps.any { it.number == 12 && it.animeHash == "H_LARGE" })
+    }
+
+    @Test
+    fun animeSourceRemainsStrictlyIsolatedToAnimeVietsub() {
+        assertEquals("AnimeVietsub", ContentSource.ANIME.title)
+        assertFalse(ContentSource.ANIME.isMovie)
+        assertEquals("https://animevietsub.xyz", CatalogService.animeFallbackHosts.first())
+        assertTrue(CatalogService.animeFallbackHosts.all { it.contains("animevietsub", ignoreCase = true) })
+        assertFalse(CatalogService.animeFallbackHosts.any {
+            it.contains("phimapi", ignoreCase = true) || it.contains("nguonc", ignoreCase = true) || it.contains("kkphim", ignoreCase = true)
+        })
+
+        val homeHtml = """
+            <html><body>
+              <nav>
+                <a href="/the-loai/hanh-dong/">Hành Động</a>
+                <a href="/the-loai/phieu-luu/">Phiêu Lưu</a>
+                <a href="/anime-bo/">Anime Bộ</a>
+              </nav>
+            </body></html>
+        """.trimIndent()
+        val cats = HTMLParser.categories(homeHtml, "https://animevietsub.xyz")
+        assertTrue(cats.isNotEmpty())
+        assertFalse(cats.any { it.path.contains("phimapi", ignoreCase = true) || it.path.contains("nguonc", ignoreCase = true) })
+
+        val detailHtml = """
+            <html><head><title>Bleach - AnimeVietsub</title></head><body>
+              <ul class="list-episode">
+                <li><a class="btn-episode" href="/phim/bleach-a5985/tap-1.html" data-hash="BLEACH_H1">Tập 1</a></li>
+              </ul>
+            </body></html>
+        """.trimIndent()
+        val eps = HTMLParser.episodes(detailHtml, "https://animevietsub.xyz/phim/bleach-a5985/", "https://animevietsub.xyz")
+        assertEquals(1, eps.size)
+        assertEquals(ContentSource.ANIME, eps[0].source)
+        assertEquals("anime", eps[0].playbackKind)
+    }
 }

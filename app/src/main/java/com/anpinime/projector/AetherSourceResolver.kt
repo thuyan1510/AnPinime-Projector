@@ -46,7 +46,8 @@ object AetherSourceResolver {
         ServerOption("lul", "Lul", "Nguồn chính 1080p · Tốc độ cao", "1080p"),
         ServerOption("ly", "Edge (Ly)", "Nguồn 1080p Multi Audio & Sub", "1080p"),
         ServerOption("lil", "Lil", "Nguồn trực tiếp 1080p (Phim lẻ)", "1080p"),
-        ServerOption("rock", "VidRock", "Nguồn 1080p ổn định", "1080p")
+        ServerOption("rock", "VidRock", "Nguồn 1080p ổn định", "1080p"),
+        ServerOption("shore", "Shore", "Nguồn dự phòng 1080p", "1080p")
     )
 
     data class StreamResult(
@@ -155,7 +156,7 @@ object AetherSourceResolver {
         onProgress: ((sourceName: String, current: Int, total: Int) -> Unit)?,
         excludeId: String? = null
     ): StreamResult? {
-        val order = listOf("lul", "ly", "lil", "rock")
+        val order = listOf("lul", "ly", "lil", "rock", "shore")
             .filterNot { excludeId != null && it.equals(excludeId, ignoreCase = true) }
         val total = order.size.coerceAtLeast(1)
         for ((idx, scraperId) in order.withIndex()) {
@@ -255,7 +256,8 @@ object AetherSourceResolver {
             ),
             sourceId = "lul",
             sourceName = "Lul",
-            quality = "1080p"
+            quality = "1080p",
+            needsRelay = true
         )
     }
 
@@ -274,7 +276,8 @@ object AetherSourceResolver {
             ),
             sourceId = "lil",
             sourceName = "Lil",
-            quality = "1080p"
+            quality = "1080p",
+            needsRelay = true
         )
     }
 
@@ -288,7 +291,7 @@ object AetherSourceResolver {
         val referer = proxyHeaders?.optString("Referer")?.takeIf { it.isNotEmpty() } ?: "https://vidly.pro/"
         val ua = proxyHeaders?.optString("User-Agent")?.takeIf { it.isNotEmpty() } ?: USER_AGENT
 
-        // Direct CDN access with upstream vidly.pro headers avoids proxy 403 and preserves native audio/sub tracks
+        // Route via FilmMediaRelay so OkHttp headers + `.png`-disguised TS MIME + multi-audio playlists work cleanly
         return StreamResult(
             streamUrl = stream,
             headers = mapOf(
@@ -298,7 +301,8 @@ object AetherSourceResolver {
             ),
             sourceId = "ly",
             sourceName = "Edge (Ly)",
-            quality = json.optString("quality", "1080p")
+            quality = json.optString("quality", "1080p"),
+            needsRelay = true
         )
     }
 
@@ -329,25 +333,37 @@ object AetherSourceResolver {
         val json = fetchJson(url) ?: return null
         var stream = json.optString("stream").trim()
         if (stream.isEmpty()) return null
+        val shoreHeaders = mapOf(
+            "Origin" to activeOrigin(),
+            "Referer" to activeReferer(),
+            "User-Agent" to USER_AGENT
+        )
         if (stream.startsWith("/")) {
-            val wrapped = runCatching {
-                val u = URI("https://shore.raccoonunbutteredbagel.zip$stream")
+            val rawProxyUrl = "https://shore.raccoonunbutteredbagel.zip$stream"
+            val unwrapped = runCatching {
+                val u = URI(rawProxyUrl)
                 val q = u.rawQuery.orEmpty()
                 q.split('&').firstOrNull { it.startsWith("url=") }?.substringAfter("url=")
                     ?.let { java.net.URLDecoder.decode(it, "UTF-8") }
-            }.getOrNull()
-            stream = wrapped?.takeIf { it.startsWith("http") } ?: "https://shore.raccoonunbutteredbagel.zip$stream"
+            }.getOrNull()?.takeIf { it.startsWith("http") }
+            stream = if (unwrapped != null) {
+                val probed = runCatching { fetchPlaylistHead(unwrapped, shoreHeaders, maxBytes = 4096) }.getOrNull()
+                if (probed != null && probed.second.trimStart('\uFEFF', ' ', '\t', '\r', '\n').startsWith("#EXTM3U")) {
+                    unwrapped
+                } else {
+                    rawProxyUrl
+                }
+            } else {
+                rawProxyUrl
+            }
         }
         return StreamResult(
             streamUrl = stream,
-            headers = mapOf(
-                "Origin" to activeOrigin(),
-                "Referer" to activeReferer(),
-                "User-Agent" to USER_AGENT
-            ),
+            headers = shoreHeaders,
             sourceId = "shore",
             sourceName = "Shore",
-            quality = "1080p"
+            quality = "1080p",
+            needsRelay = true
         )
     }
 

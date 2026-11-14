@@ -709,12 +709,57 @@ object HTMLParser {
 
     private fun decodedNextPushLiterals(html: String): List<String> {
         val out = ArrayList<String>()
-        val pushRegex = Regex(
-            """self\.__next_f\.push\(\s*\[\s*\d+\s*,\s*("(?:\\.|[^"\\])*")\s*\]\s*\)""",
-            RegexOption.DOT_MATCHES_ALL
-        )
-        for (m in pushRegex.findAll(html)) {
-            val rawLiteral = m.groupValues[1]
+        val marker = "self.__next_f.push("
+        var searchFrom = 0
+        val len = html.length
+        while (searchFrom < len) {
+            val hit = html.indexOf(marker, searchFrom)
+            if (hit < 0) break
+            var i = hit + marker.length
+            while (i < len && html[i].isWhitespace()) i++
+            if (i >= len || html[i] != '[') {
+                searchFrom = hit + marker.length
+                continue
+            }
+            i++
+            while (i < len && html[i].isWhitespace()) i++
+            val digitStart = i
+            while (i < len && html[i].isDigit()) i++
+            if (i == digitStart) {
+                searchFrom = hit + marker.length
+                continue
+            }
+            while (i < len && html[i].isWhitespace()) i++
+            if (i >= len || html[i] != ',') {
+                searchFrom = i
+                continue
+            }
+            i++
+            while (i < len && html[i].isWhitespace()) i++
+            if (i >= len || html[i] != '"') {
+                searchFrom = i
+                continue
+            }
+            val quoteStart = i
+            i++
+            var escaped = false
+            while (i < len) {
+                val c = html[i]
+                if (escaped) {
+                    escaped = false
+                } else if (c == '\\') {
+                    escaped = true
+                } else if (c == '"') {
+                    break
+                }
+                i++
+            }
+            if (i >= len || html[i] != '"') {
+                searchFrom = quoteStart + 1
+                continue
+            }
+            val rawLiteral = html.substring(quoteStart, i + 1)
+            searchFrom = i + 1
             try {
                 val decoded = JSONArray("[$rawLiteral]").optString(0)
                 if (decoded.isNotEmpty()) out.add(decoded)
