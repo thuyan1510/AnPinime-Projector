@@ -242,5 +242,22 @@ class HTMLParserTest {
         assertEquals(1, eps.size)
         assertEquals(ContentSource.ANIME, eps[0].source)
         assertEquals("anime", eps[0].playbackKind)
+
+        // Ensure comment-box captcha placeholders on real AnimeVietsub pages do not trigger false verification blocks
+        val realPageWithCommentCaptcha = """
+            <html><head><title>Xem phim Bleach Tập 1 - AnimeVietsub</title></head><body>
+              <script>var filmInfo = { filmID: parseInt('5985') };</script>
+              <ul class="list-episode"><li><a class="btn-episode" href="/phim/bleach-a5985/tap-1.html" data-hash="H1">Tập 1</a></li></ul>
+              <div id="comments"><div class="captcha-placeholder"></div><div class="cf-turnstile"></div></div>
+            </body></html>
+        """.trimIndent()
+        assertFalse(WebViewHelper.containsVerification(realPageWithCommentCaptcha))
+
+        val genuineCloudflareChallenge = """
+            <html><head><title>Just a moment...</title></head><body>
+              <form id="challenge-form" action="/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1"></form>
+            </body></html>
+        """.trimIndent()
+        assertTrue(WebViewHelper.containsVerification(genuineCloudflareChallenge))
     }
 }

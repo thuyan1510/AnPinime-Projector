@@ -485,6 +485,28 @@ class MainActivity : AppCompatActivity() {
         brandRow.addView(brandTextCol)
         sidebar.addView(brandRow)
 
+        val menuScroll = ScrollView(this).apply {
+            isFillViewport = true
+            isVerticalScrollBarEnabled = true
+            isFocusable = false
+            isFocusableInTouchMode = false
+            descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        }
+
+        val menuCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, UiHelper.dp(context, 2), 0, UiHelper.dp(context, 12))
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+
         fun addMenuButton(key: String, label: String, onClick: () -> Unit) {
             val btn = TextView(this).apply {
                 text = label
@@ -515,14 +537,30 @@ class MainActivity : AppCompatActivity() {
                 radiusDp = 10,
                 scaleOnFocus = 1.03f,
                 onFocusChange = { hasFocus ->
-                    if (hasFocus) activeSidebarKey = key
+                    if (hasFocus) {
+                        activeSidebarKey = key
+                        menuScroll.post {
+                            val pad = UiHelper.dp(this, 28)
+                            val top = (btn.top - pad).coerceAtLeast(0)
+                            val bottom = btn.bottom + pad
+                            val curY = menuScroll.scrollY
+                            val h = menuScroll.height
+                            if (h > 0) {
+                                if (top < curY) {
+                                    menuScroll.smoothScrollTo(0, top)
+                                } else if (bottom > curY + h) {
+                                    menuScroll.smoothScrollTo(0, (bottom - h).coerceAtLeast(0))
+                                }
+                            }
+                        }
+                    }
                 }
             ) {
                 activeSidebarKey = key
                 closeSidebar(restoreFocus = false)
                 onClick()
             }
-            sidebar.addView(btn)
+            menuCol.addView(btn)
         }
 
         addMenuButton("tab_home", "🏠  Trang chủ") {
@@ -556,7 +594,7 @@ class MainActivity : AppCompatActivity() {
             typeface = Typeface.DEFAULT_BOLD
             setPadding(UiHelper.dp(context, 6), UiHelper.dp(context, 10), 0, UiHelper.dp(context, 6))
         }
-        sidebar.addView(dividerLabel)
+        menuCol.addView(dividerLabel)
 
         addMenuButton("src_film4k", "🎬  Nguồn 1 · Tú Nam") {
             switchSource(ContentSource.FILM4K)
@@ -587,12 +625,15 @@ class MainActivity : AppCompatActivity() {
         }
 
         val hintTv = TextView(this).apply {
-            text = "Mẹo: Ấn ▶ sang phải hoặc nút Quay lại để đóng thanh bên."
+            text = "Mẹo: Ấn ▲/▼ để cuộn menu, ▶ sang phải hoặc nút Quay lại để đóng."
             setTextColor(UiHelper.COLOR_TEXT_SECONDARY)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             setPadding(UiHelper.dp(context, 4), UiHelper.dp(context, 8), UiHelper.dp(context, 4), 0)
         }
-        sidebar.addView(hintTv)
+        menuCol.addView(hintTv)
+
+        menuScroll.addView(menuCol)
+        sidebar.addView(menuScroll)
 
         return sidebar
     }
@@ -743,7 +784,13 @@ class MainActivity : AppCompatActivity() {
                 if (targetSource != currentSource || currentTab != "home") return@launch
                 homeSections = SourceIsolation.sections(targetSource, sections)
                 featuredIndex = 0
-                renderHome()
+                if (homeSections.isEmpty()) {
+                    showError("Không tải được danh sách phim từ ${targetSource.title}. Hãy bấm Thử lại hoặc kiểm tra kết nối mạng.") {
+                        loadHomeData()
+                    }
+                } else {
+                    renderHome()
+                }
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
                 if (targetSource != currentSource || currentTab != "home") return@launch

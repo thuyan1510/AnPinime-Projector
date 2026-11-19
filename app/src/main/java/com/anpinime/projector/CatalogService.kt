@@ -76,7 +76,9 @@ object CatalogService {
     @Volatile
     private var cachedAnimeHomeAtMs: Long = 0L
 
-    private val ioPool = Executors.newFixedThreadPool(6)
+    private val animeHtmlCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, String>>()
+
+    private val ioPool = Executors.newCachedThreadPool()
 
     private val syncedCookieJar = object : okhttp3.CookieJar {
         override fun saveFromResponse(url: okhttp3.HttpUrl, cookies: List<okhttp3.Cookie>) {
@@ -929,20 +931,18 @@ object CatalogService {
             headers["User-Agent"] = USER_AGENT
             headers["Referer"] = defaultReferer
             headers["Origin"] = origin
-            if (isDirectStreamReachable(primaryUrl, headers) || !embedFallback.startsWith("http", ignoreCase = true)) {
-                return ResolvedPlayback(
-                    url = primaryUrl,
-                    headers = headers,
-                    isF4kWrapped = primaryUrl.contains(".f4k", ignoreCase = true) ||
-                        primaryUrl.contains("cryboiz.workers.dev", ignoreCase = true) ||
-                        primaryUrl.substringBefore('?').lowercase().endsWith(".png"),
-                    isWeb = false,
-                    webUrl = embedFallback,
-                    mediaKind = Phim4KMediaProbe.mediaKind(primaryUrl)
-                )
-            }
-            // Direct CDN returned 404/HTML (e.g. regional restriction on raw .m3u8); fall through to link_embed
-            primaryUrl = embedFallback
+            // Match iOS MovieProvider.swift: play direct HLS/MP4 streams natively in ExoPlayer first;
+            // PlayerActivity automatically falls back to webUrl (link_embed) via onPlayerError if CDN 404s.
+            return ResolvedPlayback(
+                url = primaryUrl,
+                headers = headers,
+                isF4kWrapped = primaryUrl.contains(".f4k", ignoreCase = true) ||
+                    primaryUrl.contains("cryboiz.workers.dev", ignoreCase = true) ||
+                    primaryUrl.substringBefore('?').lowercase().endsWith(".png"),
+                isWeb = false,
+                webUrl = embedFallback,
+                mediaKind = Phim4KMediaProbe.mediaKind(primaryUrl)
+            )
         }
 
         // Embed URL (e.g. embed*.streamc.xyz/embed.php?hash=... or player embed):
@@ -1098,20 +1098,45 @@ object CatalogService {
         allowWebFallback: Boolean = true,
         waitForEpisodes: Boolean = false
     ): String {
+        val now = System.currentTimeMillis()
+        animeHtmlCache[url]?.let { (savedAt, cachedHtml) ->
+            if ((now - savedAt) < 120_000L && !isChallengeHtml(cachedHtml)) {
+                return cachedHtml
+            }
+        }
         val ua = animeUserAgent()
         val html = try {
             httpGet(url, referer = "$base/", userAgent = ua)
         } catch (_: Throwable) {
             ""
         }
-        if (!isChallengeHtml(html)) return html
+        if (!isChallengeHtml(html)) {
+            if (animeHtmlCache.size >= 60) animeHtmlCache.clear()
+            animeHtmlCache[url] = System.currentTimeMillis() to html
+            return html
+        }
         if (!allowWebFallback) return html
-        val webHtml = try {
+        val (webHtml, finalUrl) = try {
             kotlinx.coroutines.runBlocking {
-                WebViewHelper.fetchHtml(url, waitForEpisodes = waitForEpisodes).first
+                WebViewHelper.fetchHtml(url, waitForEpisodes = waitForEpisodes)
             }
         } catch (_: Throwable) {
-            ""
+            "" to url
+        }
+        if (webHtml.isNotBlank() && !isChallengeHtml(webHtml)) {
+            if (animeHtmlCache.size >= 60) animeHtmlCache.clear()
+            animeHtmlCache[url] = System.currentTimeMillis() to webHtml
+            if (finalUrl != url) {
+                animeHtmlCache[finalUrl] = System.currentTimeMillis() to webHtml
+                runCatching {
+                    val u = URL(finalUrl)
+                    val hostBase = "${u.protocol}://${u.host}"
+                    if (u.host.contains("animevietsub", ignoreCase = true) && getCustomAnimeDomain() == null) {
+                        saveVerifiedAnimeDomain(hostBase)
+                    }
+                }
+            }
+            return webHtml
         }
         return if (webHtml.length > html.length) webHtml else html
     }
@@ -1394,18 +1419,32 @@ object CatalogService {
     // --- HTTP Helpers ---
 
     private fun httpGet(url: String, referer: String? = null, userAgent: String = USER_AGENT): String {
-        val builder = Request.Builder()
-            .url(url)
-            .header("User-Agent", userAgent)
-            .header("Accept", "application/json, text/html, */*")
-            .header("Accept-Language", "vi-VN,vi;q=0.9,en-US;q=0.8")
-        if (!referer.isNullOrEmpty()) {
-            builder.header("Referer", referer)
+        var lastError: Throwable? = null
+        for (attempt in 1..2) {
+            try {
+                val builder = Request.Builder()
+                    .url(url)
+                    .header("User-Agent", userAgent)
+                    .header("Accept", "application/json, text/html, */*")
+                    .header("Accept-Language", "vi-VN,vi;q=0.9,en-US;q=0.8")
+                if (!referer.isNullOrEmpty()) {
+                    builder.header("Referer", referer)
+                }
+                return http.newCall(builder.build()).execute().use { resp ->
+                    if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code} for $url")
+                    resp.body?.string().orEmpty()
+                }
+            } catch (t: Throwable) {
+                lastError = t
+                val msg = t.message.orEmpty()
+                // Do not retry 403/404 client errors
+                if (msg.contains("HTTP 403") || msg.contains("HTTP 404")) throw t
+                if (attempt < 2) {
+                    try { Thread.sleep(180) } catch (_: Throwable) {}
+                }
+            }
         }
-        return http.newCall(builder.build()).execute().use { resp ->
-            if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code} for $url")
-            resp.body?.string().orEmpty()
-        }
+        throw (lastError ?: RuntimeException("HTTP error for $url"))
     }
 
     private fun stripDiacritics(input: String): String {

@@ -2059,7 +2059,10 @@ class PlayerActivity : AppCompatActivity() {
             .build()
 
         val aetherStream = isAetherEpisode()
-        val smoothHlsStream = aetherStream || currentEpisode.source == ContentSource.FILM4K || streamUrl.contains("127.0.0.1")
+        val smoothHlsStream = aetherStream ||
+            currentEpisode.source == ContentSource.FILM4K ||
+            currentEpisode.source == ContentSource.KKPHIM ||
+            streamUrl.contains("127.0.0.1")
         val videoMediaSource: MediaSource = when (effectiveKind) {
             StreamMediaKind.HLS -> {
                 val hlsExtractorFactory = if (smoothHlsStream) {
@@ -2788,8 +2791,12 @@ class PlayerActivity : AppCompatActivity() {
                 });
               }
               function challenge(){
-                return /just a moment|xác minh an toàn|xác minh bảo mật|đang kiểm tra|verify you are human|checking your browser/i.test(document.title)
-                  || !!document.querySelector('#challenge-form, #cf-please-wait, .captcha-placeholder, .cf-turnstile')
+                var hasContent = !!document.querySelector('video, #media-player, .player-container, .watching_player, #player, .jwplayer, .TPost, .ml-item, .film-item, .movie-item, .btn-episode, .list-episode, [data-hash]')
+                  || !!(window.filmInfo && window.filmInfo.filmID);
+                var isChallengeTitle = /just a moment|xác minh an toàn|xác minh bảo mật|đang kiểm tra|verify you are human|checking your browser|attention required/i.test(document.title);
+                if (hasContent && !isChallengeTitle) return false;
+                return isChallengeTitle
+                  || !!document.querySelector('#challenge-form, #cf-please-wait, #challenge-stage, #verification:not([hidden])')
                   || !!(window._cf_chl_opt);
               }
               function notifyChallengeIfNeeded(){

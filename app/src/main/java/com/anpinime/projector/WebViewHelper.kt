@@ -126,13 +126,25 @@ object WebViewHelper {
         try {
             val rawUa = WebSettings.getDefaultUserAgent(context)
             if (!rawUa.isNullOrBlank()) {
-                // Clean "; wv" and "Version/4.0" so Cloudflare treats WebView & OkHttp identically as Chrome
+                // Clean "; wv" and "Version/4.0" so Cloudflare treats WebView & OkHttp identically as Chrome Mobile
                 userAgent = rawUa
                     .replace("; wv", "")
                     .replace(Regex("""Version/\d+\.\d+\s*"""), "")
                     .trim()
             }
         } catch (_: Throwable) {}
+    }
+
+    private fun setMultiCookies(cm: CookieManager, url: String, rawCookieString: String) {
+        for (token in rawCookieString.split(";")) {
+            val trimmed = token.trim()
+            if (trimmed.isNotBlank() && trimmed.contains("=")) {
+                val key = trimmed.substringBefore("=").trim().lowercase()
+                if (key !in setOf("path", "domain", "expires", "max-age", "secure", "httponly", "samesite")) {
+                    cm.setCookie(url, "$trimmed; Path=/")
+                }
+            }
+        }
     }
 
     fun init(context: Context) {
@@ -172,7 +184,7 @@ object WebViewHelper {
                 val prefs = ctx?.getSharedPreferences(PREFS_COOKIES, Context.MODE_PRIVATE)
                 cookie = prefs?.getString(url, null)?.takeIf { it.isNotBlank() }
                 if (cookie != null) {
-                    cm.setCookie(url, cookie)
+                    setMultiCookies(cm, url, cookie)
                     cm.flush()
                 }
             }
@@ -223,19 +235,20 @@ object WebViewHelper {
             "403 forbidden"
         )
         val hasChallengeTitle = challengeTitles.any { title.contains(it) }
-        val hasContent = Regex("""class=["'][^"']*(?:tpost|ml-item|film-item|movie-item|btn-episode)[^"']*["']""")
-            .containsMatchIn(lower) || lower.contains("filminfo.filmid")
+        // Match iOS HTMLParser.containsVerification: a normal AnimeVietsub page can contain comment/login
+        // captcha scripts (.cf-turnstile / .captcha-placeholder) without asking for site verification.
+        val hasContent = Regex("""class=["'][^"']*(?:tpost|ml-item|film-item|movie-item|btn-episode|movielist)[^"']*["']""")
+            .containsMatchIn(lower) ||
+            lower.contains("filminfo.filmid") ||
+            (Regex("""(?is)<h1\b[^>]*>""").containsMatchIn(lower) && lower.contains("og:image") &&
+                (lower.contains("xem phim") || lower.contains("tập")))
         if (hasContent && !hasChallengeTitle) return false
         return hasChallengeTitle ||
             lower.contains("id=\"challenge-form\"") ||
             lower.contains("id='challenge-form'") ||
             lower.contains("_cf_chl_opt") ||
             lower.contains("/cdn-cgi/challenge-platform/") ||
-            lower.contains("challenge-error-text") ||
-            lower.contains("captcha-placeholder") ||
-            lower.contains("cf-turnstile") ||
-            lower.contains("g-recaptcha") ||
-            lower.contains("h-captcha")
+            lower.contains("challenge-error-text")
     }
 
     /**
@@ -358,7 +371,30 @@ object WebViewHelper {
                         }
                     }
 
+                    val stealthChromeJs = """
+                        (function() {
+                          try {
+                            Object.defineProperty(navigator, 'webdriver', { get: function() { return false; }, configurable: true });
+                            if (!window.chrome) { window.chrome = { runtime: {}, app: {} }; }
+                            if (navigator.userAgentData && navigator.userAgentData.brands) {
+                              var cleanBrands = navigator.userAgentData.brands.map(function(b) {
+                                return {
+                                  brand: (b.brand === 'Android WebView') ? 'Google Chrome' : b.brand,
+                                  version: b.version
+                                };
+                              });
+                              Object.defineProperty(navigator.userAgentData, 'brands', { get: function() { return cleanBrands; } });
+                            }
+                          } catch(e) {}
+                        })();
+                    """.trimIndent()
+
                     wv.webViewClient = object : WebViewClient() {
+                        override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                            super.onPageStarted(view, url, favicon)
+                            view?.evaluateJavascript(stealthChromeJs, null)
+                        }
+
                         override fun shouldOverrideUrlLoading(
                             view: WebView?,
                             request: WebResourceRequest?
@@ -386,15 +422,20 @@ object WebViewHelper {
                               var s = window.getComputedStyle(e);
                               return r.width > 10 && r.height > 10 && s.display !== 'none' && s.visibility !== 'hidden';
                             };
-                            var sel = 'iframe[src*="challenges.cloudflare.com"],iframe[src*="turnstile"],iframe[src*="recaptcha"],iframe[src*="hcaptcha"],.cf-turnstile,.g-recaptcha,.h-captcha,#challenge-stage input[type="checkbox"]';
+                            var sel = 'iframe[src*="challenges.cloudflare.com"],iframe[src*="turnstile"],iframe[src*="recaptcha"],iframe[src*="hcaptcha"],#challenge-stage input[type="checkbox"]';
                             var interactive = Array.prototype.some.call(document.querySelectorAll(sel), visible);
                             var title = document.title || '';
-                            var challengeDom = !!(window._cf_chl_opt) ||
-                              /xác minh an toàn|just a moment|attention required/i.test(title) ||
-                              !!document.querySelector('.captcha-placeholder, .cf-turnstile, #challenge-stage, #challenge-form, #cf-please-wait, .challenge-card');
+                            var hasRealContent = !!document.querySelector('.TPost, .ml-item, .film-item, .movie-item, .btn-episode, .MovieList, .list-episode, [data-hash]') ||
+                              !!(window.filmInfo && window.filmInfo.filmID);
+                            var isChallengeTitle = /xác minh an toàn|xác minh bảo mật|just a moment|attention required|verify you are human|checking your browser/i.test(title);
+                            var challengeDom = !hasRealContent && (
+                              isChallengeTitle ||
+                              !!(window._cf_chl_opt) ||
+                              !!document.querySelector('#challenge-stage, #challenge-form, #cf-please-wait, .challenge-card')
+                            );
                             var epCount = document.querySelectorAll('.list-episode a, .list_episode a, .episodes a, .episode-list a, a.btn-episode, [data-hash], [data-play]').length;
                             var html = '';
-                            if (!challengeDom && document.documentElement) {
+                            if (document.documentElement) {
                               html = document.documentElement.outerHTML
                                 .replace(/<style[\s\S]*?<\/style>/gi, '')
                                 .replace(/data:image\/[^"'\s)]+/gi, '')
@@ -403,7 +444,7 @@ object WebViewHelper {
                             return JSON.stringify({
                               href: window.location.href || '',
                               title: title,
-                              interactive: interactive,
+                              interactive: interactive && !hasRealContent,
                               challengeDom: challengeDom,
                               epCount: epCount,
                               html: html
@@ -443,7 +484,11 @@ object WebViewHelper {
                                                 lastEpChangeAt = System.currentTimeMillis()
                                             }
                                             val isBitly = href.contains("bit.ly", ignoreCase = true)
-                                            val challengeActive = containsVerification(html) || challengeDom
+                                            val challengeActive = if (html.isNotBlank()) {
+                                                containsVerification(html)
+                                            } else {
+                                                challengeDom
+                                            }
 
                                             if (!isBitly && html.length > 400 && !challengeActive) {
                                                 val hasMarkers = Regex(
@@ -458,66 +503,68 @@ object WebViewHelper {
                                                 }
                                             }
 
-                                            val needsChallengeUi = (interactive && elapsed > 1200L) ||
-                                                (challengeActive && elapsed > 2800L)
+                                            // Like iOS VerificationView.swift: keep silent background verification hidden;
+                                            // only surface the WebView in-place (without detaching from Window) if interactive challenge remains after 8s.
+                                            val needsChallengeUi = challengeActive && interactive && elapsed > 8000L
                                             if (needsChallengeUi && verifyDialog == null && activity != null && !activity.isFinishing) {
-                                                wv.settings.loadsImagesAutomatically = true
-                                                (wv.parent as? ViewGroup)?.removeView(wv)
-                                                val dlg = Dialog(activity).apply {
-                                                    requestWindowFeature(Window.FEATURE_NO_TITLE)
-                                                    setCancelable(true)
-                                                    setOnCancelListener {
+                                                val holder = hiddenHolder
+                                                if (holder != null) {
+                                                    // Keep WebView in the same Window so Turnstile iframe never resets on detach!
+                                                    holder.setBackgroundColor(UiHelper.COLOR_SIDEBAR)
+                                                    holder.isClickable = true
+                                                    holder.isFocusable = true
+                                                    val headerRow = LinearLayout(activity).apply {
+                                                        orientation = LinearLayout.HORIZONTAL
+                                                        gravity = Gravity.CENTER_VERTICAL
+                                                        setBackgroundColor(UiHelper.COLOR_SIDEBAR)
+                                                        setPadding(
+                                                            UiHelper.dp(activity, 16),
+                                                            UiHelper.dp(activity, 10),
+                                                            UiHelper.dp(activity, 16),
+                                                            UiHelper.dp(activity, 10)
+                                                        )
+                                                        layoutParams = FrameLayout.LayoutParams(
+                                                            ViewGroup.LayoutParams.MATCH_PARENT,
+                                                            UiHelper.dp(activity, 52),
+                                                            Gravity.TOP
+                                                        )
+                                                    }
+                                                    val titleTv = TextView(activity).apply {
+                                                        text = "Xác minh kết nối ${runCatching { URL(href).host }.getOrDefault("AnimeVietsub")}…"
+                                                        setTextColor(Color.WHITE)
+                                                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                                                        typeface = Typeface.DEFAULT_BOLD
+                                                        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                                                    }
+                                                    val closeBtn = TextView(activity).apply {
+                                                        text = "Đóng"
+                                                        setTextColor(Color.WHITE)
+                                                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                                                        typeface = Typeface.DEFAULT_BOLD
+                                                        setPadding(
+                                                            UiHelper.dp(activity, 14),
+                                                            UiHelper.dp(activity, 6),
+                                                            UiHelper.dp(activity, 14),
+                                                            UiHelper.dp(activity, 6)
+                                                        )
+                                                    }
+                                                    UiHelper.makeFocusableButton(closeBtn, normalBgColor = UiHelper.COLOR_RED, radiusDp = 12) {
                                                         cleanupAndResume("", wv.url ?: targetUrl)
                                                     }
+                                                    headerRow.addView(titleTv)
+                                                    headerRow.addView(closeBtn)
+                                                    (wv.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
+                                                        lp.topMargin = UiHelper.dp(activity, 52)
+                                                        wv.layoutParams = lp
+                                                    }
+                                                    holder.addView(headerRow)
+                                                    holder.bringToFront()
+                                                    wv.isFocusable = true
+                                                    wv.isFocusableInTouchMode = true
+                                                    wv.requestFocus()
+                                                    // Use dummy non-shown Dialog marker so effectiveTimeout extends to 180s and we only surface once
+                                                    verifyDialog = Dialog(activity)
                                                 }
-                                                val box = LinearLayout(activity).apply {
-                                                    orientation = LinearLayout.VERTICAL
-                                                    setBackgroundColor(UiHelper.COLOR_SIDEBAR)
-                                                    setPadding(
-                                                        UiHelper.dp(activity, 16),
-                                                        UiHelper.dp(activity, 14),
-                                                        UiHelper.dp(activity, 16),
-                                                        UiHelper.dp(activity, 16)
-                                                    )
-                                                }
-                                                val headerRow = LinearLayout(activity).apply {
-                                                    orientation = LinearLayout.HORIZONTAL
-                                                    gravity = Gravity.CENTER_VERTICAL
-                                                    setPadding(0, 0, 0, UiHelper.dp(activity, 10))
-                                                }
-                                                val titleTv = TextView(activity).apply {
-                                                    text = "Xác minh kết nối ${URL(href).host}…"
-                                                    setTextColor(Color.WHITE)
-                                                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                                                    typeface = Typeface.DEFAULT_BOLD
-                                                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                                                }
-                                                val closeBtn = TextView(activity).apply {
-                                                    text = "Đóng"
-                                                    setTextColor(Color.WHITE)
-                                                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                                                    typeface = Typeface.DEFAULT_BOLD
-                                                    setPadding(
-                                                        UiHelper.dp(activity, 14),
-                                                        UiHelper.dp(activity, 6),
-                                                        UiHelper.dp(activity, 14),
-                                                        UiHelper.dp(activity, 6)
-                                                    )
-                                                }
-                                                UiHelper.makeFocusableButton(closeBtn, normalBgColor = UiHelper.COLOR_RED, radiusDp = 12) {
-                                                    cleanupAndResume("", wv.url ?: targetUrl)
-                                                }
-                                                headerRow.addView(titleTv)
-                                                headerRow.addView(closeBtn)
-                                                box.addView(headerRow)
-                                                val dm = activity.resources.displayMetrics
-                                                val dlgW = (dm.widthPixels * 0.92f).toInt().coerceAtMost(UiHelper.dp(activity, 520))
-                                                val dlgH = (dm.heightPixels * 0.65f).toInt().coerceAtMost(UiHelper.dp(activity, 420))
-                                                box.addView(wv, LinearLayout.LayoutParams(dlgW, dlgH))
-                                                dlg.setContentView(box)
-                                                dlg.show()
-                                                verifyDialog = dlg
-                                                wv.requestFocus()
                                             }
                                         }
                                     }
