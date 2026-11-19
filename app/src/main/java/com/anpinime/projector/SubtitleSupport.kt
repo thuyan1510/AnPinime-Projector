@@ -554,7 +554,8 @@ object SubtitleSupport {
     fun createExoSubtitleDataSourceFactory(
         context: Context,
         baseClient: OkHttpClient,
-        mimeByUrl: Map<String, String>
+        mimeByUrl: Map<String, String>,
+        headersByUrl: Map<String, Map<String, String>> = emptyMap()
     ): DataSource.Factory {
         val appContext = context.applicationContext
         val memCache = ConcurrentHashMap<String, ByteArray>()
@@ -570,11 +571,12 @@ object SubtitleSupport {
                     activeUri = dataSpec.uri
                     val urlStr = dataSpec.uri.toString()
                     val expectedMime = mimeByUrl[urlStr] ?: detectSubtitleFormat(urlStr)
+                    val reqHeaders = headersByUrl[urlStr].orEmpty()
                     val cacheKey = "$urlStr|$expectedMime"
 
                     transferInitializing(dataSpec)
                     val normalized = memCache[cacheKey] ?: run {
-                        val raw = fetchRawBytes(appContext, urlStr, emptyMap(), baseClient)
+                        val raw = fetchRawBytes(appContext, urlStr, reqHeaders, baseClient)
                             ?: throw IOException("Failed to fetch subtitle: $urlStr")
                         val converted = normalizeSubtitleForMime(raw, expectedMime, urlStr)
                         if (memCache.size < 24) {

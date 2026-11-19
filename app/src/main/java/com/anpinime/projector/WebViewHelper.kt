@@ -240,6 +240,8 @@ object WebViewHelper {
         val hasContent = Regex("""class=["'][^"']*(?:tpost|ml-item|film-item|movie-item|btn-episode|movielist)[^"']*["']""")
             .containsMatchIn(lower) ||
             lower.contains("filminfo.filmid") ||
+            lower.contains("__sveltekit_") ||
+            lower.contains("href=\"/watch/") ||
             (Regex("""(?is)<h1\b[^>]*>""").containsMatchIn(lower) && lower.contains("og:image") &&
                 (lower.contains("xem phim") || lower.contains("tập")))
         if (hasContent && !hasChallengeTitle) return false
@@ -407,6 +409,8 @@ object WebViewHelper {
                             if (reqUrl.isBlank()) return false
                             val host = request?.url?.host?.lowercase().orEmpty()
                             val allowed = host == URL(targetUrl).host || host.contains("animevietsub") ||
+                                host.contains("miruro") ||
+                                host.contains("anivault") ||
                                 host.contains("bit.ly") ||
                                 host.contains("cloudflare") ||
                                 host.contains("challenges.cloudflare.com")
@@ -425,7 +429,7 @@ object WebViewHelper {
                             var sel = 'iframe[src*="challenges.cloudflare.com"],iframe[src*="turnstile"],iframe[src*="recaptcha"],iframe[src*="hcaptcha"],#challenge-stage input[type="checkbox"]';
                             var interactive = Array.prototype.some.call(document.querySelectorAll(sel), visible);
                             var title = document.title || '';
-                            var hasRealContent = !!document.querySelector('.TPost, .ml-item, .film-item, .movie-item, .btn-episode, .MovieList, .list-episode, [data-hash]') ||
+                            var hasRealContent = !!document.querySelector('.TPost, .ml-item, .film-item, .movie-item, .btn-episode, .MovieList, .list-episode, [data-hash], a[href*="/watch/"]') ||
                               !!(window.filmInfo && window.filmInfo.filmID);
                             var isChallengeTitle = /xác minh an toàn|xác minh bảo mật|just a moment|attention required|verify you are human|checking your browser/i.test(title);
                             var challengeDom = !hasRealContent && (
@@ -492,7 +496,7 @@ object WebViewHelper {
 
                                             if (!isBitly && html.length > 400 && !challengeActive) {
                                                 val hasMarkers = Regex(
-                                                    """(?is)(?:TPost|ml-item|film-item|movie-item|btn-episode|filmInfo\.filmID|Description|MovieList)"""
+                                                    """(?is)(?:TPost|ml-item|film-item|movie-item|btn-episode|filmInfo\.filmID|Description|MovieList|__sveltekit_|/watch/)"""
                                                 ).containsMatchIn(html)
                                                 val epStable = !waitForEpisodes ||
                                                     (lastEpCount > 0 && (System.currentTimeMillis() - lastEpChangeAt) >= 600L) ||
@@ -687,6 +691,127 @@ object WebViewHelper {
                     mainHandler.postAtTime({
                         cleanup(null)
                     }, cont, android.os.SystemClock.uptimeMillis() + timeoutMs)
+
+                    cont.invokeOnCancellation {
+                        mainHandler.post { cleanup(null) }
+                    }
+                } catch (_: Throwable) {
+                    cleanup(null)
+                }
+            }
+        }
+    }
+
+    /**
+     * Executes a same-origin GET fetch inside Android WebView using synced browser cookies
+     * (e.g. Miruro /api/search/browse, /api/sources, /__data.json, /watch/.../__data.json).
+     */
+    @SuppressLint("SetJavaScriptEnabled")
+    suspend fun fetchTextInWebView(
+        originUrl: String,
+        targetPathOrUrl: String,
+        timeoutMs: Long = 16_000L
+    ): String? = mutex.withLock {
+        withContext(Dispatchers.Main) {
+            suspendCancellableCoroutine { cont ->
+                val activity = activityRef?.get()?.takeIf { !it.isFinishing && !it.isDestroyed }
+                val ctx = activity ?: appContext
+                if (ctx == null) {
+                    if (cont.isActive) cont.resume(null)
+                    return@suspendCancellableCoroutine
+                }
+
+                var finished = false
+                var webView: WebView? = null
+                val baseOrigin = try {
+                    val u = URL(originUrl)
+                    "${u.protocol}://${u.host}/"
+                } catch (_: Throwable) {
+                    originUrl.trimEnd('/') + "/"
+                }
+
+                fun cleanup(result: String?) {
+                    if (finished) return
+                    finished = true
+                    mainHandler.removeCallbacksAndMessages(cont)
+                    try {
+                        val cm = CookieManager.getInstance()
+                        cm.flush()
+                        val cookie = cm.getCookie(baseOrigin)
+                        if (!cookie.isNullOrBlank()) {
+                            persistCookie(baseOrigin, cookie)
+                        }
+                    } catch (_: Throwable) {}
+                    try {
+                        webView?.stopLoading()
+                        (webView?.parent as? ViewGroup)?.removeView(webView)
+                        webView?.destroy()
+                    } catch (_: Throwable) {}
+                    webView = null
+                    if (cont.isActive) {
+                        cont.resume(result)
+                    }
+                }
+
+                try {
+                    val wv = WebView(ctx)
+                    webView = wv
+                    val cm = CookieManager.getInstance()
+                    cm.setAcceptCookie(true)
+                    cm.setAcceptThirdPartyCookies(wv, true)
+
+                    wv.settings.apply {
+                        javaScriptEnabled = true
+                        domStorageEnabled = true
+                        userAgentString = userAgent
+                        mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                    }
+
+                    wv.addJavascriptInterface(object {
+                        @JavascriptInterface
+                        fun onPayload(payload: String) {
+                            mainHandler.post { cleanup(payload.takeIf { it.isNotBlank() }) }
+                        }
+
+                        @JavascriptInterface
+                        fun onError(msg: String) {
+                            mainHandler.post { cleanup(null) }
+                        }
+                    }, "AnPinimeTextBridge")
+
+                    val target64 = Base64.encodeToString(targetPathOrUrl.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+                    val html = """
+                        <!doctype html><html><head><meta name="viewport" content="width=device-width">
+                        </head><body><script>
+                        (function() {
+                          var url = atob('$target64');
+                          fetch(url, {
+                            method: 'GET',
+                            credentials: 'include',
+                            headers: { 'Accept': 'application/json, text/sveltekit-data, */*' }
+                          })
+                            .then(function(r) {
+                              if (!r.ok) throw Error('HTTP ' + r.status);
+                              return r.text();
+                            })
+                            .then(function(txt) {
+                              if (!txt || /just a moment|cf-browser-verification|_cf_chl_opt/i.test(txt.slice(0, 600))) {
+                                throw Error('Challenge');
+                              }
+                              AnPinimeTextBridge.onPayload(txt);
+                            })
+                            .catch(function(err) {
+                              AnPinimeTextBridge.onError(String(err));
+                            });
+                        })();
+                        </script></body></html>
+                    """.trimIndent()
+
+                    wv.loadDataWithBaseURL(baseOrigin, html, "text/html", "UTF-8", baseOrigin)
+
+                    mainHandler.postAtTime({
+                        cleanup(null)
+                    }, cont, SystemClock.uptimeMillis() + timeoutMs)
 
                     cont.invokeOnCancellation {
                         mainHandler.post { cleanup(null) }

@@ -312,7 +312,8 @@ object Phim4KUi {
             ContentSource.FILM4K to "🎬  Nguồn 1 · Tú Nam (Phim bộ & Lẻ Full HD)",
             ContentSource.AETHER to "⚡  Nguồn 2 · Thúy An (Phim 4K · Sub Việt)",
             ContentSource.KKPHIM to "🍿  Nguồn 3 · Cốm (Kho phim đa dạng)",
-            ContentSource.ANIME to "✨  Nguồn 4 · Anime (Anime Vietsub & Thuyết minh)"
+            ContentSource.ANIME to "✨  Nguồn 4 · AnimeVietsub (Vietsub & Thuyết minh)",
+            ContentSource.MIRURO to "🌸  Nguồn 5 · Anime Miruro (1080p · Sub Việt & Dịch AI)"
         )
 
         for ((src, label) in sourceEntries) {

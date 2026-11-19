@@ -8,7 +8,8 @@ enum class ContentSource(val id: String, val title: String, val subtitle: String
     FILM4K("film4k", "Tú Nam", "Nguồn 1 · Tú Nam", true),
     AETHER("aether", "Thúy An", "Nguồn 2 · Thúy An", true),
     KKPHIM("kkphim", "Cốm", "Nguồn 3 · Cốm", true),
-    ANIME("anime", "AnimeVietsub", "Nguồn 4 · AnimeVietsub", false);
+    ANIME("anime", "AnimeVietsub", "Nguồn 4 · AnimeVietsub", false),
+    MIRURO("miruro", "Anime Miruro", "Nguồn 5 · Anime Miruro", false);
 
     companion object {
         fun fromId(id: String?): ContentSource {
@@ -238,22 +239,41 @@ data class ExternalSubtitleTrack(
     val url: String,
     val language: String = "vi",
     val label: String = "Vietsub",
-    val mimeType: String? = null
+    val mimeType: String? = null,
+    val headers: Map<String, String> = emptyMap()
 ) {
     fun toJsonObject(): JSONObject = JSONObject().apply {
         put("url", url)
         put("language", language)
         put("label", label)
         put("mimeType", mimeType ?: "")
+        if (headers.isNotEmpty()) {
+            val hObj = JSONObject()
+            for ((k, v) in headers) hObj.put(k, v)
+            put("headers", hObj)
+        }
     }
 
     companion object {
-        fun fromJsonObject(o: JSONObject): ExternalSubtitleTrack = ExternalSubtitleTrack(
-            url = o.optString("url"),
-            language = o.optString("language", "vi"),
-            label = o.optString("label", "Vietsub"),
-            mimeType = o.optString("mimeType").takeIf { it.isNotEmpty() }
-        )
+        fun fromJsonObject(o: JSONObject): ExternalSubtitleTrack {
+            val hdrs = LinkedHashMap<String, String>()
+            val hObj = o.optJSONObject("headers")
+            if (hObj != null) {
+                val keys = hObj.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    val v = hObj.optString(k)
+                    if (k.isNotBlank() && v.isNotBlank()) hdrs[k] = v
+                }
+            }
+            return ExternalSubtitleTrack(
+                url = o.optString("url"),
+                language = o.optString("language", "vi"),
+                label = o.optString("label", "Vietsub"),
+                mimeType = o.optString("mimeType").takeIf { it.isNotEmpty() },
+                headers = hdrs
+            )
+        }
     }
 }
 

@@ -160,6 +160,8 @@ class PlayerActivity : AppCompatActivity() {
     private var availableAetherProviders: List<AetherProvider> = AetherSourceResolver.SERVERS.map {
         AetherProvider(it.id, it.name, it.description)
     }
+    private var currentMiruroServerKey: String = "auto"
+    private val triedMiruroServers = HashSet<String>()
 
     private lateinit var videoFrame: FrameLayout
     private lateinit var headlessWebContainer: FrameLayout
@@ -229,6 +231,16 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun isAetherEpisode(ep: Episode = currentEpisode): Boolean {
         return ep.source == ContentSource.AETHER || ep.playbackKind.startsWith("aether", ignoreCase = true)
+    }
+
+    private fun isMiruroEpisode(ep: Episode = currentEpisode): Boolean {
+        return ep.source == ContentSource.MIRURO || ep.playbackKind.equals("miruro", ignoreCase = true)
+    }
+
+    private fun miruroMediaAndEp(ep: Episode = currentEpisode): Pair<String, Int> {
+        val mediaId = ep.slug.trim().ifBlank { MiruroCatalog.extractWatchIdAndSlug(ep.detailUrl.ifBlank { ep.url }).first }
+        val epNum = ep.episodeNum.takeIf { it > 0 } ?: ep.number.coerceAtLeast(1)
+        return mediaId to epNum
     }
 
     private val commitPendingSeekRunnable = Runnable {
@@ -1553,8 +1565,8 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun updateSourceSpecificOsdButtons() {
         if (!::aetherTranslateBtn.isInitialized) return
-        val aether = isAetherEpisode()
-        aetherTranslateBtn.visibility = if (aether) View.VISIBLE else View.GONE
+        val supportsAiTranslate = isAetherEpisode() || isMiruroEpisode()
+        aetherTranslateBtn.visibility = if (supportsAiTranslate) View.VISIBLE else View.GONE
         val sameServer = allEpisodes.filter { it.season == currentEpisode.season }
         val idx = sameServer.indexOfFirst { it.number == currentEpisode.number && it.title == currentEpisode.title }
         if (::nextEpBtn.isInitialized) {
@@ -1564,6 +1576,45 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun showServerPicker() {
+        if (isMiruroEpisode()) {
+            val (mediaId, epNum) = miruroMediaAndEp()
+            val candidates = MiruroSourceResolver.getCachedCandidates(mediaId, epNum)
+            if (candidates.isEmpty()) {
+                showPlayerMessage("Nguồn phát Miruro", "Chưa tải xong danh sách nguồn sourcesData cho tập này.")
+                return
+            }
+            val labels = ArrayList<String>(candidates.size + 1)
+            labels.add("⚡ Tự động (Auto Failover) · Khuyên dùng")
+            candidates.forEachIndexed { idx, c ->
+                val viTag = if (MiruroSourceResolver.hasVietnameseSubtitle(c.subtitles)) " • Sub Việt" else if (c.subtitles.isNotEmpty()) " • Dịch AI" else ""
+                labels.add("Server ${idx + 1} · ${c.displayLabel}$viTag")
+            }
+            val selected = if (currentMiruroServerKey == "auto") {
+                0
+            } else {
+                val found = candidates.indexOfFirst { it.key.equals(currentMiruroServerKey, ignoreCase = true) }
+                if (found >= 0) found + 1 else 0
+            }
+            showSelection("Chọn nguồn Miruro (sourcesData)", labels, selected) { idx ->
+                val resumePos = exoPlayer?.currentPosition?.takeIf { it > 0L } ?: 0L
+                if (idx == 0) {
+                    currentMiruroServerKey = "auto"
+                    triedMiruroServers.clear()
+                    val targetEp = currentEpisode.copy(episodeKey = "auto", serverName = "Auto")
+                    startEpisodePlayback(targetEp, resetPosition = false, initialPositionMs = resumePos)
+                } else {
+                    val chosen = candidates.getOrNull(idx - 1) ?: return@showSelection
+                    currentMiruroServerKey = chosen.key
+                    triedMiruroServers.remove(chosen.key.lowercase(Locale.US))
+                    val targetEp = currentEpisode.copy(
+                        episodeKey = chosen.key,
+                        serverName = chosen.displayLabel
+                    )
+                    startEpisodePlayback(targetEp, resetPosition = false, initialPositionMs = resumePos)
+                }
+            }
+            return
+        }
         if (isAetherEpisode()) {
             val providers = availableAetherProviders
             if (providers.isEmpty()) {
@@ -1767,8 +1818,13 @@ class PlayerActivity : AppCompatActivity() {
     ) {
         val generation = ++playbackGeneration
         val prevSlug = if (::currentEpisode.isInitialized) currentEpisode.slug else ""
-        if (episode.slug != prevSlug || resetPosition) {
+        val prevEpNum = if (::currentEpisode.isInitialized) currentEpisode.number else -1
+        if (episode.slug != prevSlug || episode.number != prevEpNum || resetPosition) {
             triedAetherScrapers.clear()
+            triedMiruroServers.clear()
+            if (isMiruroEpisode(episode) && episode.episodeKey.equals("auto", ignoreCase = true)) {
+                currentMiruroServerKey = "auto"
+            }
         }
         translateSubJob?.cancel()
         releasePlayer()
@@ -1792,9 +1848,10 @@ class PlayerActivity : AppCompatActivity() {
         resolveJob = uiScope.launch {
             try {
                 val aetherMode = isAetherEpisode(episode)
-                if (aetherMode) {
+                val miruroMode = isMiruroEpisode(episode)
+                if (aetherMode || miruroMode) {
                     loadingProviderBadge.visibility = View.VISIBLE
-                    loadingProviderBadge.text = "⚡ Đang khởi tạo máy chủ…"
+                    loadingProviderBadge.text = if (miruroMode) "🌸 Đang quét nguồn Miruro…" else "⚡ Đang khởi tạo máy chủ…"
                     loadingProgressBar.visibility = View.VISIBLE
                     loadingProgressBar.isIndeterminate = true
                     loadingHintText.visibility = View.GONE
@@ -1802,13 +1859,29 @@ class PlayerActivity : AppCompatActivity() {
                     loadingProviderBadge.visibility = View.GONE
                 }
 
-                val activeServerId = if (currentAetherProviderId.isNotBlank() && currentAetherProviderId != "auto") {
+                val activeServerId = if (miruroMode) {
+                    if (currentMiruroServerKey.isNotBlank() && currentMiruroServerKey != "auto") {
+                        currentMiruroServerKey
+                    } else {
+                        episode.episodeKey.takeIf { it.isNotBlank() && it != "auto" } ?: "auto"
+                    }
+                } else if (currentAetherProviderId.isNotBlank() && currentAetherProviderId != "auto") {
                     currentAetherProviderId
                 } else {
                     episode.episodeKey.takeIf { it.isNotBlank() && it != "auto" } ?: "auto"
                 }
                 if (activeServerId != "auto") {
-                    triedAetherScrapers.add(activeServerId.lowercase(Locale.US))
+                    if (miruroMode) {
+                        triedMiruroServers.add(activeServerId.lowercase(Locale.US))
+                    } else {
+                        triedAetherScrapers.add(activeServerId.lowercase(Locale.US))
+                    }
+                }
+
+                val excludeSnapshot = if (miruroMode) {
+                    triedMiruroServers.filterNot { it.equals(activeServerId, ignoreCase = true) }.toSet()
+                } else {
+                    emptySet()
                 }
 
                 val resolved = withContext(Dispatchers.IO) {
@@ -1823,20 +1896,30 @@ class PlayerActivity : AppCompatActivity() {
                                 loadingText.text = "Đang quét nguồn $sourceName…"
                                 loadingProgressBar.visibility = View.VISIBLE
                             }
-                        }
+                        },
+                        excludeServerIds = excludeSnapshot
                     )
                 }
                 if (generation != playbackGeneration) return@launch
                 if (resolved.providerId.isNotBlank()) {
-                    triedAetherScrapers.add(resolved.providerId.lowercase(Locale.US))
-                    val pName = AetherSourceResolver.SERVERS.firstOrNull {
-                        it.id.equals(resolved.providerId, ignoreCase = true)
-                    }?.name ?: resolved.providerId
-                    topServerText.text = "${episode.title} • Nguồn $pName"
+                    if (miruroMode) {
+                        triedMiruroServers.add(resolved.providerId.lowercase(Locale.US))
+                        val (mId, eNum) = miruroMediaAndEp(episode)
+                        val candLabel = MiruroSourceResolver.getCachedCandidates(mId, eNum)
+                            .firstOrNull { it.key.equals(resolved.providerId, ignoreCase = true) }
+                            ?.displayLabel ?: resolved.providerId
+                        topServerText.text = "${episode.title} • $candLabel"
+                    } else {
+                        triedAetherScrapers.add(resolved.providerId.lowercase(Locale.US))
+                        val pName = AetherSourceResolver.SERVERS.firstOrNull {
+                            it.id.equals(resolved.providerId, ignoreCase = true)
+                        }?.name ?: resolved.providerId
+                        topServerText.text = "${episode.title} • Nguồn $pName"
+                    }
                 }
                 lastWebUrl = resolved.webUrl.ifBlank { episode.url }
                 attemptedStreamUrls.add(resolved.url)
-                if (resolved.isWeb && !aetherMode) {
+                if (resolved.isWeb && !aetherMode && !miruroMode) {
                     val resumeSeekMs = if (resetPosition) 0L else initialPositionMs
                     startWebFallback(resolved.url, resolved.headers["Referer"] ?: episode.url, resumeSeekMs)
                     return@launch
@@ -1887,7 +1970,7 @@ class PlayerActivity : AppCompatActivity() {
                 if (t is CancellationException) throw t
                 if (generation != playbackGeneration) return@launch
                 if (!trySwitchToBackupServer(0L)) {
-                    val fallbackUrl = if (!isAetherEpisode(episode)) findWebFallbackUrl(episode) else ""
+                    val fallbackUrl = if (!isAetherEpisode(episode) && !isMiruroEpisode(episode)) findWebFallbackUrl(episode) else ""
                     if (fallbackUrl.isNotBlank()) {
                         val ref = episode.detailUrl.takeIf { it.startsWith("http", ignoreCase = true) }
                             ?: if (episode.source == ContentSource.ANIME) CatalogService.currentAnimeBaseUrl() else episode.url
@@ -1910,7 +1993,8 @@ class PlayerActivity : AppCompatActivity() {
         subtitles: List<ExternalSubtitleTrack> = emptyList()
     ) {
         releasePlayer(stopRelay = false)
-        if (translatedEpisodeKey.isNotEmpty() && !translatedEpisodeKey.startsWith("${currentEpisode.slug}|")) {
+        val epTranslatePrefix = "${currentEpisode.slug}:${currentEpisode.number}|"
+        if (translatedEpisodeKey.isNotEmpty() && !translatedEpisodeKey.startsWith(epTranslatePrefix)) {
             translatedEpisodeKey = ""
             selectedSourceSubUrl = ""
             viLiveCues = emptyList()
@@ -2024,10 +2108,12 @@ class PlayerActivity : AppCompatActivity() {
         if (hasPendingSelect) {
             pendingSelectSubtitleUrl = ""
         }
+        val subHeadersMap = subtitles.associate { it.url to it.headers }.filterValues { it.isNotEmpty() }
         val subDataSourceFactory = SubtitleSupport.createExoSubtitleDataSourceFactory(
             context = this,
             baseClient = aetherHttpClient,
-            mimeByUrl = subMimeMap
+            mimeByUrl = subMimeMap,
+            headersByUrl = subHeadersMap
         )
 
         val cleanLower = streamUrl.lowercase()
@@ -2062,6 +2148,7 @@ class PlayerActivity : AppCompatActivity() {
         val smoothHlsStream = aetherStream ||
             currentEpisode.source == ContentSource.FILM4K ||
             currentEpisode.source == ContentSource.KKPHIM ||
+            currentEpisode.source == ContentSource.MIRURO ||
             streamUrl.contains("127.0.0.1")
         val videoMediaSource: MediaSource = when (effectiveKind) {
             StreamMediaKind.HLS -> {
@@ -2195,10 +2282,11 @@ class PlayerActivity : AppCompatActivity() {
                 } else {
                     mainHandler.post {
                         if (exoPlayer !== player) return@post
-                        if (isAetherEpisode()) {
+                        if (isAetherEpisode() || isMiruroEpisode()) {
                             if (!trySwitchToBackupServer(lastPos)) {
                                 loadingOverlay.visibility = View.VISIBLE
-                                loadingText.text = "Các máy chủ Thúy An tạm thời gián đoạn.\nHãy chọn [Đổi Server] ở thanh bên dưới."
+                                val srcLabel = if (isMiruroEpisode()) "Anime Miruro" else "Thúy An"
+                                loadingText.text = "Các máy chủ $srcLabel tạm thời gián đoạn.\nHãy chọn [Đổi Server] ở thanh bên dưới."
                                 showOsd(focusPlayButton = true)
                             }
                             return@post
@@ -2232,6 +2320,16 @@ class PlayerActivity : AppCompatActivity() {
             player.setPlaybackSpeed(currentPlaybackSpeed)
         }
         player.playWhenReady = true
+
+        // For Anime Miruro: prioritize native Vietnamese subtitles; if unavailable, automatically
+        // run AI Vietnamese translation on the available subtitle (English / first track) and display live.
+        if (isMiruroEpisode() && subtitles.isNotEmpty() && !MiruroSourceResolver.hasVietnameseSubtitle(subtitles)) {
+            mainHandler.post {
+                if (exoPlayer === player && !viLiveSubActive && translateSubJob?.isActive != true) {
+                    triggerAetherVietnameseTranslation(autoStarted = true)
+                }
+            }
+        }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -4307,6 +4405,28 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun trySwitchToBackupServer(resumePosMs: Long): Boolean {
+        if (isMiruroEpisode()) {
+            val (mediaId, epNum) = miruroMediaAndEp()
+            val candidates = MiruroSourceResolver.getCachedCandidates(mediaId, epNum)
+            val nextCand = candidates.firstOrNull { cand ->
+                !triedMiruroServers.contains(cand.key.lowercase(Locale.US))
+            } ?: return false
+            triedMiruroServers.add(nextCand.key.lowercase(Locale.US))
+            val savedTried = HashSet(triedMiruroServers)
+            currentMiruroServerKey = nextCand.key
+            val resumePos = exoPlayer?.currentPosition?.takeIf { it > 0L } ?: resumePosMs
+            releasePlayer()
+            destroyWebPlayer(force = true)
+            updateScrapingOverlay(nextCand.displayLabel, nextCand.key, "Đang tự động chuyển sang ${nextCand.displayLabel}…", 0)
+            val targetEp = currentEpisode.copy(
+                episodeKey = nextCand.key,
+                serverName = nextCand.displayLabel
+            )
+            triedMiruroServers.clear()
+            triedMiruroServers.addAll(savedTried)
+            startEpisodePlayback(targetEp, resetPosition = false, initialPositionMs = resumePos)
+            return true
+        }
         if (isAetherEpisode()) {
             val nextServer = AetherSourceResolver.SERVERS.firstOrNull { srv ->
                 srv.id != "auto" && !triedAetherScrapers.contains(srv.id.lowercase(Locale.US))
@@ -4679,13 +4799,14 @@ class PlayerActivity : AppCompatActivity() {
         val subKey = candidate?.url ?: "${streamUrl}|${preferredLang.orEmpty()}"
         if (subKey == cachedSubKey && cachedSubRawText.isNotBlank()) return cachedSubRawText
         val text = if (candidate != null) {
-            fetchTextUrl(
-                candidate.url,
-                mapOf(
-                    "User-Agent" to AetherSourceResolver.USER_AGENT,
-                    "X-User-Agent" to AetherSourceResolver.OPENSUBTITLES_UA
-                )
-            )
+            val subReqHeaders = LinkedHashMap<String, String>().apply {
+                put("User-Agent", AetherSourceResolver.USER_AGENT)
+                put("X-User-Agent", AetherSourceResolver.OPENSUBTITLES_UA)
+                for ((k, v) in candidate.headers) {
+                    if (k.isNotBlank() && v.isNotBlank()) put(k, v)
+                }
+            }
+            fetchTextUrl(candidate.url, subReqHeaders)
         } else {
             fetchEmbeddedHlsVtt(streamUrl, headers, preferredLang)
         }
@@ -4696,9 +4817,10 @@ class PlayerActivity : AppCompatActivity() {
         return text
     }
 
-    private fun triggerAetherVietnameseTranslation() {
+    private fun triggerAetherVietnameseTranslation(autoStarted: Boolean = false) {
         val player = exoPlayer
         if (player == null) {
+            if (autoStarted) return
             if (fallbackWebView != null) {
                 sendWebCommand("translateVi")
                 android.widget.Toast.makeText(this, "🌐 Đang kích hoạt dịch phụ đề Việt tức thì…", android.widget.Toast.LENGTH_SHORT).show()
@@ -4709,6 +4831,7 @@ class PlayerActivity : AppCompatActivity() {
         }
 
         if (viLiveSubActive) {
+            if (autoStarted) return
             stopLiveViSubtitles(clearView = true)
             showGestureFeedback("Phụ đề AI: Tắt", Gravity.CENTER)
             return
@@ -4719,7 +4842,7 @@ class PlayerActivity : AppCompatActivity() {
         val localPreferredUrl = selectedSourceSubUrl.takeIf { it.contains("/local_subs/") }
         val targetSubUrl = localPreferredUrl ?: activeTrack?.url ?: selectSubtitleSourceUrl(lastSubtitles, selectedSourceSubUrl)
         val sourceKey = targetSubUrl ?: "${lastNativeUrl}|${activeLang.orEmpty()}"
-        val epKey = "${currentEpisode.slug}|$sourceKey"
+        val epKey = "${currentEpisode.slug}:${currentEpisode.number}|$sourceKey"
 
         val isMemoryCacheComplete = viTranslatedMap.size >= (viLiveCues.size * 0.90).toInt().coerceAtLeast(1)
         if (translatedEpisodeKey == epKey && viLiveCues.isNotEmpty() && isMemoryCacheComplete) {
@@ -4748,9 +4871,12 @@ class PlayerActivity : AppCompatActivity() {
         viTranslationCompleted = false
         if (::topTranslateBadge.isInitialized) {
             topTranslateBadge.visibility = View.VISIBLE
-            topTranslateBadge.text = "⚡ Đang tải phụ đề…"
+            topTranslateBadge.text = if (autoStarted) "⚡ Tự động dịch sub Việt…" else "⚡ Đang tải phụ đề…"
         }
-        showGestureFeedback("⚡ Đang dịch sub Việt tại vị trí đang xem…", Gravity.CENTER)
+        showGestureFeedback(
+            if (autoStarted) "⚡ Chưa có sub Việt · Tự động dịch AI…" else "⚡ Đang dịch sub Việt tại vị trí đang xem…",
+            Gravity.CENTER
+        )
 
         translateSubJob = uiScope.launch {
             try {
@@ -4769,7 +4895,9 @@ class PlayerActivity : AppCompatActivity() {
                 }
                 if (rawText.isNullOrBlank()) {
                     updateTranslateStatusUi(0, 0, completed = false)
-                    showPlayerMessage("Dịch phụ đề", "Không tìm thấy phụ đề nguồn (SRT/VTT/ASS) để dịch sang Tiếng Việt.")
+                    if (!autoStarted) {
+                        showPlayerMessage("Dịch phụ đề", "Không tìm thấy phụ đề nguồn (SRT/VTT/ASS) để dịch sang Tiếng Việt.")
+                    }
                     return@launch
                 }
                 val parsedCues = withContext(Dispatchers.Default) {
@@ -4785,7 +4913,9 @@ class PlayerActivity : AppCompatActivity() {
                 }
                 if (parsedCues.isEmpty()) {
                     updateTranslateStatusUi(0, 0, completed = false)
-                    showPlayerMessage("Dịch phụ đề", "Tệp phụ đề không có dòng thoại hợp lệ để dịch.")
+                    if (!autoStarted) {
+                        showPlayerMessage("Dịch phụ đề", "Tệp phụ đề không có dòng thoại hợp lệ để dịch.")
+                    }
                     return@launch
                 }
 
@@ -4857,7 +4987,9 @@ class PlayerActivity : AppCompatActivity() {
                         mainHandler.post {
                             stopLiveViSubtitles(clearView = true)
                             translatedEpisodeKey = ""
-                            showPlayerMessage("Dịch phụ đề", "Không thể kết nối máy chủ dịch lúc này. Vui lòng thử lại.")
+                            if (!autoStarted) {
+                                showPlayerMessage("Dịch phụ đề", "Không thể kết nối máy chủ dịch lúc này. Vui lòng thử lại.")
+                            }
                         }
                         return@withContext
                     }
@@ -4886,7 +5018,9 @@ class PlayerActivity : AppCompatActivity() {
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
                 stopLiveViSubtitles(clearView = true)
-                showPlayerMessage("Dịch phụ đề", "Không thể dịch phụ đề lúc này: ${t.message ?: "Lỗi mạng"}")
+                if (!autoStarted) {
+                    showPlayerMessage("Dịch phụ đề", "Không thể dịch phụ đề lúc này: ${t.message ?: "Lỗi mạng"}")
+                }
             }
         }
     }
@@ -5155,7 +5289,7 @@ class PlayerActivity : AppCompatActivity() {
                 labels.add(details.joinToString(" • ").ifBlank { "Track ${options.size}" })
             }
         }
-        val hasAetherTranslate = type == C.TRACK_TYPE_TEXT && (isAetherEpisode() || lastSubtitles.isNotEmpty())
+        val hasAetherTranslate = type == C.TRACK_TYPE_TEXT && (isAetherEpisode() || isMiruroEpisode() || lastSubtitles.isNotEmpty())
         val aiTranslateIdx = if (hasAetherTranslate) {
             val idx = labels.size
             labels.add(if (viLiveSubActive) "✓ 🇻🇳 Tiếng Việt (AI - Đang bật)" else "🌐 [Dịch sang Tiếng Việt tức thì (AI)]")

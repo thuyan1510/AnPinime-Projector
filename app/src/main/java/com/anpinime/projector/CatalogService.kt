@@ -68,6 +68,12 @@ object CatalogService {
     private var cachedAnimeCategories: List<AnimeCategory>? = null
 
     @Volatile
+    private var cachedMiruroBase: String = MiruroCatalog.DEFAULT_BASE_URL
+
+    @Volatile
+    private var miruroWarmupAtMs: Long = 0L
+
+    @Volatile
     private var cachedAnimeHomeBase: String? = null
 
     @Volatile
@@ -341,6 +347,8 @@ object CatalogService {
             }
             parsed
         }
+
+        ContentSource.MIRURO -> MiruroCatalog.defaultCategories()
     }
 
     // --- Home Sections ---
@@ -351,6 +359,7 @@ object CatalogService {
             ContentSource.AETHER -> loadAetherHome()
             ContentSource.KKPHIM -> loadKkPhimHome()
             ContentSource.ANIME -> loadAnimeHome()
+            ContentSource.MIRURO -> loadMiruroHome()
         }
         return SourceIsolation.sections(source, raw)
     }
@@ -363,6 +372,7 @@ object CatalogService {
             ContentSource.AETHER -> loadAetherList(categoryPath, page)
             ContentSource.KKPHIM -> loadKkPhimList(categoryPath, page)
             ContentSource.ANIME -> loadAnimeList(categoryPath, page)
+            ContentSource.MIRURO -> loadMiruroList(categoryPath, page)
         }
         return SourceIsolation.items(source, raw)
     }
@@ -375,6 +385,7 @@ object CatalogService {
             ContentSource.AETHER -> searchAether(query, page)
             ContentSource.KKPHIM -> searchKkPhim(query, page)
             ContentSource.ANIME -> searchAnime(query, page)
+            ContentSource.MIRURO -> searchMiruro(query, page)
         }
         return SourceIsolation.items(source, raw)
     }
@@ -386,6 +397,7 @@ object CatalogService {
         ContentSource.AETHER -> loadAetherDetail(anime)
         ContentSource.KKPHIM -> loadKkPhimDetail(anime)
         ContentSource.ANIME -> loadAnimeDetail(anime)
+        ContentSource.MIRURO -> loadMiruroDetail(anime)
     }
 
     // --- Anime Schedule ---
@@ -406,7 +418,8 @@ object CatalogService {
     fun resolvePlayback(
         episode: Episode,
         preferredServerId: String = "auto",
-        onProgress: ((sourceName: String, current: Int, total: Int) -> Unit)? = null
+        onProgress: ((sourceName: String, current: Int, total: Int) -> Unit)? = null,
+        excludeServerIds: Set<String> = emptySet()
     ): ResolvedPlayback {
         return when (episode.source) {
             ContentSource.FILM4K -> resolveCatalogEpisodePlayback(
@@ -421,6 +434,7 @@ object CatalogService {
             )
             ContentSource.AETHER -> resolveAetherPlayback(episode, preferredServerId, onProgress)
             ContentSource.ANIME -> resolveAnimePlayback(episode)
+            ContentSource.MIRURO -> resolveMiruroPlayback(episode, preferredServerId, excludeServerIds, onProgress)
         }
     }
 
@@ -1414,6 +1428,213 @@ object CatalogService {
         } catch (_: Throwable) {
             trimmed
         }
+    }
+
+    // =========================================================================
+    // 5. NGUỒN 5: ANIME MIRURO (https://miruro.cx)
+    // =========================================================================
+
+    fun currentMiruroBaseUrl(): String = cachedMiruroBase
+
+    private fun fetchMiruroApiText(path: String, allowWebWarmup: Boolean = true): String? {
+        val cleanPath = if (path.startsWith("/")) path else "/$path"
+        val base = cachedMiruroBase.trimEnd('/')
+        val fullUrl = "$base$cleanPath"
+        val ua = animeUserAgent()
+
+        fun tryOkHttp(targetUrl: String, refBase: String): String? {
+            return try {
+                val req = Request.Builder()
+                    .url(targetUrl)
+                    .header("User-Agent", ua)
+                    .header("Referer", "$refBase/")
+                    .header("Accept", "application/json, text/sveltekit-data, */*")
+                    .header("Accept-Language", "vi-VN,vi;q=0.9,en-US;q=0.8")
+                    .build()
+                http.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return null
+                    val body = resp.body?.string().orEmpty()
+                    if (body.isBlank() || isChallengeHtml(body)) null else body
+                }
+            } catch (_: Throwable) {
+                null
+            }
+        }
+
+        // 1. Fast native OkHttp path using synced Cloudflare cookies
+        tryOkHttp(fullUrl, base)?.let { return it }
+
+        // 2. Same-origin WebView fetch using existing browser session
+        val webQuick = try {
+            kotlinx.coroutines.runBlocking {
+                WebViewHelper.fetchTextInWebView(base, cleanPath, timeoutMs = 12_000L)
+            }
+        } catch (_: Throwable) {
+            null
+        }
+        if (!webQuick.isNullOrBlank() && !isChallengeHtml(webQuick)) {
+            return webQuick
+        }
+
+        if (!allowWebWarmup) return null
+
+        // 3. Warm Cloudflare clearance on Miruro mirrors in hidden WebView, then retry
+        val hostsToTry = listOf(base) + MiruroCatalog.MIRROR_HOSTS.filterNot { it.equals(base, ignoreCase = true) }
+        for (mirror in hostsToTry) {
+            val cleanMirror = mirror.trimEnd('/')
+            val now = System.currentTimeMillis()
+            val shouldWarm = cleanMirror != base || (now - miruroWarmupAtMs) > 15_000L
+            if (shouldWarm) {
+                val (warmHtml, finalUrl) = try {
+                    kotlinx.coroutines.runBlocking {
+                        WebViewHelper.fetchHtml("$cleanMirror/", timeoutMs = 24_000L)
+                    }
+                } catch (_: Throwable) {
+                    "" to cleanMirror
+                }
+                if (warmHtml.isNotBlank() && !isChallengeHtml(warmHtml)) {
+                    miruroWarmupAtMs = System.currentTimeMillis()
+                    val resolvedOrigin = try {
+                        val u = URL(finalUrl)
+                        "${u.protocol}://${u.host}"
+                    } catch (_: Throwable) {
+                        cleanMirror
+                    }
+                    cachedMiruroBase = resolvedOrigin
+                }
+            }
+
+            val activeMirror = cachedMiruroBase.trimEnd('/')
+            tryOkHttp("$activeMirror$cleanPath", activeMirror)?.let { return it }
+
+            val webAfterWarm = try {
+                kotlinx.coroutines.runBlocking {
+                    WebViewHelper.fetchTextInWebView(activeMirror, cleanPath, timeoutMs = 14_000L)
+                }
+            } catch (_: Throwable) {
+                null
+            }
+            if (!webAfterWarm.isNullOrBlank() && !isChallengeHtml(webAfterWarm)) {
+                return webAfterWarm
+            }
+        }
+        return null
+    }
+
+    private fun loadMiruroHome(): List<AnimeSection> {
+        val base = currentMiruroBaseUrl()
+        val sections = ArrayList<AnimeSection>()
+
+        // Load home __data.json first so Cloudflare session is warmed once before parallel API calls
+        val homeNdjson = fetchMiruroApiText("/__data.json", allowWebWarmup = true)
+        val activeBase = currentMiruroBaseUrl()
+        if (!homeNdjson.isNullOrBlank()) {
+            sections.addAll(MiruroCatalog.parseHomeDataJson(homeNdjson, activeBase))
+        }
+
+        // Supplement with rich browse rails in parallel (reusing warmed cookies)
+        val extraSpecs = listOf(
+            Triple("🔥 Thịnh hành", "sort=TRENDING_DESC", MiruroCatalog.buildBrowseApiPath("sort=TRENDING_DESC", 1, 18)),
+            Triple("⭐ Phổ biến nhất", "sort=POPULARITY_DESC", MiruroCatalog.buildBrowseApiPath("sort=POPULARITY_DESC", 1, 18)),
+            Triple("🏆 Điểm cao nhất", "sort=SCORE_DESC", MiruroCatalog.buildBrowseApiPath("sort=SCORE_DESC", 1, 18)),
+            Triple("🎬 Anime Movie", "format=MOVIE&sort=POPULARITY_DESC", MiruroCatalog.buildBrowseApiPath("format=MOVIE&sort=POPULARITY_DESC", 1, 18))
+        )
+        val futures = extraSpecs.map { (title, catPath, apiPath) ->
+            ioPool.submit(Callable {
+                val raw = fetchMiruroApiText(apiPath, allowWebWarmup = sections.isEmpty())
+                val items = if (!raw.isNullOrBlank()) MiruroCatalog.parseBrowseItems(raw, currentMiruroBaseUrl()) else emptyList()
+                if (items.isNotEmpty()) AnimeSection(title, items, catPath) else null
+            })
+        }
+        for (f in futures) {
+            val sec = try { f.get(18, TimeUnit.SECONDS) } catch (_: Throwable) { null }
+            if (sec != null && sections.none { it.title == sec.title }) {
+                sections.add(sec)
+            }
+        }
+        if (sections.isEmpty()) {
+            throw RuntimeException("Không thể kết nối tới Anime Miruro ($base). Vui lòng thử làm mới.")
+        }
+        return sections
+    }
+
+    private fun loadMiruroList(categoryPath: String, page: Int): List<Anime> {
+        val path = MiruroCatalog.buildBrowseApiPath(categoryPath, page = page, limit = 24)
+        val raw = fetchMiruroApiText(path, allowWebWarmup = true) ?: return emptyList()
+        return MiruroCatalog.parseBrowseItems(raw, currentMiruroBaseUrl())
+    }
+
+    private fun searchMiruro(query: String, page: Int): List<Anime> {
+        val trimmed = query.trim()
+        if (trimmed.isEmpty()) return emptyList()
+        val path = MiruroCatalog.buildSearchApiPath(trimmed, page = page, limit = 24)
+        val raw = fetchMiruroApiText(path, allowWebWarmup = true) ?: return emptyList()
+        return MiruroCatalog.parseBrowseItems(raw, currentMiruroBaseUrl())
+    }
+
+    private fun loadMiruroDetail(anime: Anime): AnimeDetail {
+        val (mediaId, slug) = MiruroCatalog.extractWatchIdAndSlug(anime.url)
+        if (mediaId.isBlank()) {
+            throw RuntimeException("Thiếu mã anime Miruro.")
+        }
+        val watchDataPath = MiruroCatalog.buildWatchDataPath(mediaId, slug, 1)
+        val ndjson = fetchMiruroApiText(watchDataPath, allowWebWarmup = true)
+            ?: throw RuntimeException("Không tải được chi tiết Anime Miruro.")
+        val parsed = MiruroCatalog.parseWatchDetail(ndjson, anime, currentMiruroBaseUrl())
+        parsed.sourcesData?.let { srcJson ->
+            MiruroSourceResolver.cacheSourcesData(parsed.mediaId, parsed.episodeNumber, srcJson)
+        }
+        return parsed.detail
+    }
+
+    private fun resolveMiruroPlayback(
+        episode: Episode,
+        preferredServerId: String = "auto",
+        excludeServerIds: Set<String> = emptySet(),
+        onProgress: ((sourceName: String, current: Int, total: Int) -> Unit)? = null
+    ): ResolvedPlayback {
+        val (urlId, urlSlug) = MiruroCatalog.extractWatchIdAndSlug(episode.detailUrl.ifBlank { episode.url })
+        val mediaId = episode.slug.trim().ifBlank { urlId }
+        val epNum = episode.episodeNum.takeIf { it > 0 } ?: episode.number.coerceAtLeast(1)
+        if (mediaId.isBlank()) {
+            throw RuntimeException("Thiếu thông tin tập Anime Miruro.")
+        }
+
+        var candidates = MiruroSourceResolver.getCachedCandidates(mediaId, epNum)
+        if (candidates.isEmpty()) {
+            onProgress?.invoke("Đang tải sourcesData Miruro…", 1, 3)
+            val sourcesRaw = fetchMiruroApiText(MiruroCatalog.buildSourcesApiPath(mediaId, epNum), allowWebWarmup = true)
+            if (!sourcesRaw.isNullOrBlank()) {
+                val jsonObj = try { JSONObject(sourcesRaw) } catch (_: Throwable) { null }
+                if (jsonObj != null) {
+                    candidates = MiruroSourceResolver.cacheSourcesData(mediaId, epNum, jsonObj)
+                }
+            }
+        }
+        if (candidates.isEmpty()) {
+            onProgress?.invoke("Đang lấy nguồn từ trang xem Miruro…", 2, 3)
+            val watchDataPath = MiruroCatalog.buildWatchDataPath(mediaId, urlSlug, epNum)
+            val ndjson = fetchMiruroApiText(watchDataPath, allowWebWarmup = true)
+            if (!ndjson.isNullOrBlank()) {
+                val fallbackAnime = Anime(title = episode.title, url = episode.url, source = ContentSource.MIRURO)
+                val watchResult = MiruroCatalog.parseWatchDetail(ndjson, fallbackAnime, currentMiruroBaseUrl())
+                watchResult.sourcesData?.let { srcJson ->
+                    candidates = MiruroSourceResolver.cacheSourcesData(mediaId, epNum, srcJson)
+                }
+            }
+        }
+
+        if (candidates.isEmpty()) {
+            throw RuntimeException("Không tìm thấy luồng phát khả dụng cho tập $epNum trên Miruro.")
+        }
+
+        return MiruroSourceResolver.resolveWithAutoFailover(
+            candidates = candidates,
+            client = http,
+            preferredKey = preferredServerId,
+            excludeKeys = excludeServerIds,
+            onProgress = onProgress
+        ) ?: throw RuntimeException("Tất cả máy chủ trong sourcesData đều đang gián đoạn.")
     }
 
     // --- HTTP Helpers ---

@@ -11,8 +11,8 @@ android {
         applicationId = "com.anpinime.projector"
         minSdk = 23
         targetSdk = 34
-        versionCode = 23
-        versionName = "1.9.6"
+        versionCode = 24
+        versionName = "1.9.7"
         manifestPlaceholders["appLabel"] = "AnPinime TV"
         manifestPlaceholders["homeOrientation"] = "sensorLandscape"
 

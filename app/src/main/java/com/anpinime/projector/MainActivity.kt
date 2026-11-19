@@ -338,6 +338,7 @@ class MainActivity : AppCompatActivity() {
                     ContentSource.AETHER -> sidebarButtons["src_aether"]
                     ContentSource.KKPHIM -> sidebarButtons["src_kkphim"]
                     ContentSource.ANIME -> sidebarButtons["src_anime"]
+                    ContentSource.MIRURO -> sidebarButtons["src_miruro"]
                 }
             }
             ?: sidebarButtons["tab_home"]
@@ -612,6 +613,10 @@ class MainActivity : AppCompatActivity() {
             switchSource(ContentSource.ANIME)
         }
 
+        addMenuButton("src_miruro", "🌸  Nguồn 5 · Anime Miruro") {
+            switchSource(ContentSource.MIRURO)
+        }
+
         addMenuButton("settings_domain", "🌐  Tên miền AnimeVietsub") {
             showAnimeDomainDialog()
         }
@@ -644,6 +649,7 @@ class MainActivity : AppCompatActivity() {
             ContentSource.AETHER -> "src_aether"
             ContentSource.KKPHIM -> "src_kkphim"
             ContentSource.ANIME -> "src_anime"
+            ContentSource.MIRURO -> "src_miruro"
         }
         activeSidebarKey = srcKey
         if (currentSource == newSource && homeSections.isNotEmpty() && currentTab == "home") return
@@ -717,6 +723,7 @@ class MainActivity : AppCompatActivity() {
         styleBtn("src_aether", currentSource == ContentSource.AETHER)
         styleBtn("src_kkphim", currentSource == ContentSource.KKPHIM)
         styleBtn("src_anime", currentSource == ContentSource.ANIME)
+        styleBtn("src_miruro", currentSource == ContentSource.MIRURO)
     }
 
     private fun showLoading(message: String) {
