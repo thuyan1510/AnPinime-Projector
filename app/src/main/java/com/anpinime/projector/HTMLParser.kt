@@ -408,7 +408,7 @@ object HTMLParser {
                         episodeText = ep,
                         quality = if (ep.isNotEmpty()) ep else "HD",
                         score = score,
-                        source = ContentSource.ANIME
+                        source = ContentSource.MIRURO
                     )
                 )
             }
@@ -433,7 +433,7 @@ object HTMLParser {
                     title = title,
                     url = resolved,
                     quality = "Vietsub",
-                    source = ContentSource.ANIME
+                    source = ContentSource.MIRURO
                 )
             )
         }
@@ -523,7 +523,7 @@ object HTMLParser {
                         number = epNumber,
                         season = serverName,
                         qualityBadge = "HD · $serverName",
-                        source = ContentSource.ANIME,
+                        source = ContentSource.MIRURO,
                         playbackKind = "anime",
                         episodeIndex = results.size,
                         refererUrl = canonicalURL,
@@ -563,7 +563,7 @@ object HTMLParser {
                         number = epNumber,
                         season = "Vietsub",
                         qualityBadge = "HD · Vietsub",
-                        source = ContentSource.ANIME,
+                        source = ContentSource.MIRURO,
                         playbackKind = "anime",
                         episodeIndex = results.size,
                         refererUrl = canonicalURL,
@@ -683,7 +683,7 @@ object HTMLParser {
             number = num,
             season = "Vietsub",
             qualityBadge = "HD · Vietsub",
-            source = ContentSource.ANIME,
+            source = ContentSource.MIRURO,
             playbackKind = if (directStream.startsWith("http")) "direct" else "anime",
             directUrl = directStream.takeIf { it.startsWith("http") } ?: "",
             refererUrl = canonicalURL,

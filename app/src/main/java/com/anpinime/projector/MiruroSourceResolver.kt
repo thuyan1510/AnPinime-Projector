@@ -6,7 +6,10 @@ import okhttp3.Request
 import org.json.JSONObject
 import java.net.URL
 import java.util.Locale
+import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 data class MiruroStreamCandidate(
     val key: String,
@@ -34,6 +37,7 @@ object MiruroSourceResolver {
     private val TRACK_PRIORITY = mapOf("ssub" to 0, "sub" to 1, "dub" to 2)
 
     private val candidateCache = ConcurrentHashMap<String, Pair<Long, List<MiruroStreamCandidate>>>()
+    private val probePool = Executors.newCachedThreadPool()
 
     fun cacheKey(mediaId: String, episodeNumber: Int): String = "${mediaId.trim()}:$episodeNumber"
 
@@ -314,8 +318,9 @@ object MiruroSourceResolver {
     }
 
     /**
-     * Picks and probes the best working candidate from [candidates], automatically failing over
-     * across `sourcesData` servers if a server returns non-200 or invalid HLS.
+     * Picks and probes the best working candidate from [candidates] using fast parallel wave probing
+     * (3 servers at a time with 4s timeout), automatically failing over across `sourcesData` servers
+     * if a server returns non-200 or invalid HLS.
      */
     fun resolveWithAutoFailover(
         candidates: List<MiruroStreamCandidate>,
@@ -342,12 +347,51 @@ object MiruroSourceResolver {
         }
         if (ordered.isEmpty()) return null
 
+        val fastClient = client.newBuilder()
+            .connectTimeout(3, TimeUnit.SECONDS)
+            .readTimeout(4, TimeUnit.SECONDS)
+            .callTimeout(5, TimeUnit.SECONDS)
+            .build()
+
         val total = ordered.size
-        for ((idx, cand) in ordered.withIndex()) {
-            onProgress?.invoke(cand.displayLabel, idx + 1, total)
-            if (probeStreamReachable(cand, client)) {
-                return candidateToPlayback(cand)
+        var checked = 0
+        for (wave in ordered.chunked(3)) {
+            onProgress?.invoke(wave.first().displayLabel, (checked + 1).coerceAtMost(total), total)
+            if (wave.size == 1) {
+                val cand = wave.first()
+                if (probeStreamReachable(cand, fastClient)) {
+                    return candidateToPlayback(cand)
+                }
+                checked++
+                continue
             }
+            val tasks = wave.map { cand ->
+                Callable {
+                    if (probeStreamReachable(cand, fastClient)) cand else null
+                }
+            }
+            val winner = try {
+                val futures = probePool.invokeAll(tasks, 5, TimeUnit.SECONDS)
+                var best: MiruroStreamCandidate? = null
+                for (f in futures) {
+                    val res = try {
+                        if (!f.isCancelled) f.get() else null
+                    } catch (_: Throwable) {
+                        null
+                    }
+                    if (res != null) {
+                        best = res
+                        break
+                    }
+                }
+                best
+            } catch (_: Throwable) {
+                null
+            }
+            if (winner != null) {
+                return candidateToPlayback(winner)
+            }
+            checked += wave.size
         }
         // If all quick probes timed out (e.g. slow network), still return the first candidate so relay/ExoPlayer can try
         return candidateToPlayback(ordered.first())

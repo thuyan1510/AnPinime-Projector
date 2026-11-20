@@ -17,7 +17,9 @@ class AetherCatalogTest {
         assertEquals("Cốm", ContentSource.KKPHIM.title)
         assertEquals(ContentSource.FILM4K, ContentSource.fromId("film4k"))
         assertEquals(ContentSource.KKPHIM, ContentSource.fromId("kkphim"))
-        assertEquals(ContentSource.ANIME, ContentSource.fromId("anime"))
+        assertEquals(ContentSource.MIRURO, ContentSource.fromId("anime"))
+        assertEquals(ContentSource.MIRURO, ContentSource.fromId("miruro"))
+        assertEquals("Nguồn 4 · Anime Miruro", ContentSource.MIRURO.subtitle)
     }
 
     @Test

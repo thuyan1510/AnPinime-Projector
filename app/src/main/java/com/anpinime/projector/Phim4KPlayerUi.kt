@@ -150,7 +150,7 @@ object Phim4KPlayerUi {
             isClickable = true
             layoutParams = LinearLayout.LayoutParams(sizePx, sizePx)
             setOnFocusChangeListener { v, hasFocus ->
-                val targetScale = if (hasFocus) 1.14f else 1.0f
+                val targetScale = if (hasFocus) 1.08f else 1.0f
                 v.animate().scaleX(targetScale).scaleY(targetScale).setDuration(110).start()
                 onFocused?.invoke(hasFocus)
             }

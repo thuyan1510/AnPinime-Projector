@@ -308,4 +308,12 @@ class MiruroCatalogTest {
         val roundTripped = ExternalSubtitleTrack.fromJsonObject(track.toJsonObject())
         assertEquals(track, roundTripped)
     }
+
+    @Test
+    fun sanitizeSourceBrandingReplacesLegacyNamesExactly() {
+        assertEquals("Server Tú Nam #1", MovieCatalog.sanitizeSourceBranding("Server NguonC #1"))
+        assertEquals("Server Cốm VIP", MovieCatalog.sanitizeSourceBranding("Server KKPhim VIP"))
+        assertEquals("Nguồn Thúy An FHD", MovieCatalog.sanitizeSourceBranding("Nguồn Aether FHD"))
+        assertEquals("Tú Nam / Thúy An / Cốm", MovieCatalog.sanitizeSourceBranding("nguonC / aether / kkphim"))
+    }
 }

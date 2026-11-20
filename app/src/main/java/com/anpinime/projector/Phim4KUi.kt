@@ -231,7 +231,6 @@ object Phim4KUi {
             NavItem("home", "🏠", "Trang chủ"),
             NavItem("search", "🔍", "Tìm kiếm"),
             NavItem("browse", "📂", "Thể loại"),
-            NavItem("schedule", "📅", "Lịch chiếu"),
             NavItem("sources", "⚡", "Nguồn")
         )
 
@@ -287,7 +286,6 @@ object Phim4KUi {
         currentSource: ContentSource,
         onSwitchSource: (ContentSource) -> Unit,
         onRefresh: () -> Unit,
-        onAnimeDomain: () -> Unit,
         onCheckUpdate: () -> Unit
     ) {
         val scroll = ScrollView(context).apply {
@@ -312,8 +310,7 @@ object Phim4KUi {
             ContentSource.FILM4K to "🎬  Nguồn 1 · Tú Nam (Phim bộ & Lẻ Full HD)",
             ContentSource.AETHER to "⚡  Nguồn 2 · Thúy An (Phim 4K · Sub Việt)",
             ContentSource.KKPHIM to "🍿  Nguồn 3 · Cốm (Kho phim đa dạng)",
-            ContentSource.ANIME to "✨  Nguồn 4 · AnimeVietsub (Vietsub & Thuyết minh)",
-            ContentSource.MIRURO to "🌸  Nguồn 5 · Anime Miruro (1080p · Sub Việt & Dịch AI)"
+            ContentSource.MIRURO to "🌸  Nguồn 4 · Anime Miruro (1080p · Sub Việt & Dịch AI)"
         )
 
         for ((src, label) in sourceEntries) {
@@ -354,7 +351,6 @@ object Phim4KUi {
 
         val utilityActions = listOf(
             "🔄  Làm mới trang chủ" to onRefresh,
-            "🌐  Cấu hình tên miền Anime" to onAnimeDomain,
             "🚀  Kiểm tra cập nhật (${BuildConfig.VERSION_NAME})" to onCheckUpdate
         )
         for ((label, action) in utilityActions) {

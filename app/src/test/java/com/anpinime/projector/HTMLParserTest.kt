@@ -209,30 +209,13 @@ class HTMLParserTest {
     }
 
     @Test
-    fun animeSourceRemainsStrictlyIsolatedToAnimeVietsub() {
-        assertEquals("AnimeVietsub", ContentSource.ANIME.title)
-        assertFalse(ContentSource.ANIME.isMovie)
-        assertEquals("https://animevietsub.xyz", CatalogService.animeFallbackHosts.first())
-        assertTrue(CatalogService.animeFallbackHosts.all { it.contains("animevietsub", ignoreCase = true) })
-        assertFalse(CatalogService.animeFallbackHosts.any {
-            it.contains("phimapi", ignoreCase = true) || it.contains("nguonc", ignoreCase = true) || it.contains("kkphim", ignoreCase = true)
-        })
-
-        val homeHtml = """
-            <html><body>
-              <nav>
-                <a href="/the-loai/hanh-dong/">Hành Động</a>
-                <a href="/the-loai/phieu-luu/">Phiêu Lưu</a>
-                <a href="/anime-bo/">Anime Bộ</a>
-              </nav>
-            </body></html>
-        """.trimIndent()
-        val cats = HTMLParser.categories(homeHtml, "https://animevietsub.xyz")
-        assertTrue(cats.isNotEmpty())
-        assertFalse(cats.any { it.path.contains("phimapi", ignoreCase = true) || it.path.contains("nguonc", ignoreCase = true) })
+    fun animeSourceMigratesCleanlyToMiruroAndVerificationGuardWorks() {
+        assertEquals("Anime Miruro", ContentSource.MIRURO.title)
+        assertFalse(ContentSource.MIRURO.isMovie)
+        assertEquals(ContentSource.MIRURO, ContentSource.fromId("anime"))
 
         val detailHtml = """
-            <html><head><title>Bleach - AnimeVietsub</title></head><body>
+            <html><head><title>Bleach</title></head><body>
               <ul class="list-episode">
                 <li><a class="btn-episode" href="/phim/bleach-a5985/tap-1.html" data-hash="BLEACH_H1">Tập 1</a></li>
               </ul>
@@ -240,12 +223,12 @@ class HTMLParserTest {
         """.trimIndent()
         val eps = HTMLParser.episodes(detailHtml, "https://animevietsub.xyz/phim/bleach-a5985/", "https://animevietsub.xyz")
         assertEquals(1, eps.size)
-        assertEquals(ContentSource.ANIME, eps[0].source)
+        assertEquals(ContentSource.MIRURO, eps[0].source)
         assertEquals("anime", eps[0].playbackKind)
 
-        // Ensure comment-box captcha placeholders on real AnimeVietsub pages do not trigger false verification blocks
+        // Ensure comment-box captcha placeholders do not trigger false verification blocks
         val realPageWithCommentCaptcha = """
-            <html><head><title>Xem phim Bleach Tập 1 - AnimeVietsub</title></head><body>
+            <html><head><title>Xem phim Bleach Tập 1</title></head><body>
               <script>var filmInfo = { filmID: parseInt('5985') };</script>
               <ul class="list-episode"><li><a class="btn-episode" href="/phim/bleach-a5985/tap-1.html" data-hash="H1">Tập 1</a></li></ul>
               <div id="comments"><div class="captcha-placeholder"></div><div class="cf-turnstile"></div></div>

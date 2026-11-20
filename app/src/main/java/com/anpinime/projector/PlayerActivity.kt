@@ -979,7 +979,9 @@ class PlayerActivity : AppCompatActivity() {
         // Bottom Control Panel (Black-Red Cinema Order: Hint -> Time Row -> SeekBar -> Transport & Action Pills)
         val bottomPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(hPad, Phim4KPlayerUi.dp(context, 28), hPad, vPadBottom)
+            clipChildren = false
+            clipToPadding = false
+            setPadding(hPad, Phim4KPlayerUi.dp(context, 24), hPad, vPadBottom)
             background = Phim4KPlayerUi.createTopBottomScrim(isTop = false)
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1115,17 +1117,29 @@ class PlayerActivity : AppCompatActivity() {
         bottomPanel.addView(seekBar)
 
         // Black-Red Optimized Player Control Bar: Transport Circles + Labeled Action Pills
-        val btnSize = if (compact) 38 else 44
-        val playBtnSize = if (compact) 48 else 56
-        val iconPad = if (compact) 9 else 11
-        val playIconPad = if (compact) 11 else 13
-        val gapPx = Phim4KPlayerUi.dp(this, if (compact) 6 else 9)
-        val pillGapPx = Phim4KPlayerUi.dp(this, if (compact) 6 else 8)
+        val btnSize = if (compact) 36 else 40
+        val playBtnSize = if (compact) 44 else 50
+        val iconPad = if (compact) 8 else 10
+        val playIconPad = if (compact) 10 else 12
+        val gapPx = Phim4KPlayerUi.dp(this, if (compact) 6 else 8)
+        val pillGapPx = Phim4KPlayerUi.dp(this, if (compact) 5 else 7)
 
         val btnRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            setPadding(Phim4KPlayerUi.dp(context, 4), Phim4KPlayerUi.dp(context, 2), Phim4KPlayerUi.dp(context, 4), Phim4KPlayerUi.dp(context, 2))
+            gravity = Gravity.CENTER_VERTICAL
+            clipChildren = false
+            clipToPadding = false
+            setPadding(
+                Phim4KPlayerUi.dp(context, 12),
+                Phim4KPlayerUi.dp(context, 10),
+                Phim4KPlayerUi.dp(context, 12),
+                Phim4KPlayerUi.dp(context, 10)
+            )
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER_HORIZONTAL
+            )
         }
 
         fun makeP4kIconBtn(
@@ -1312,6 +1326,8 @@ class PlayerActivity : AppCompatActivity() {
         val btnScroll = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             isFillViewport = true
+            clipChildren = false
+            clipToPadding = false
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -1913,7 +1929,14 @@ class PlayerActivity : AppCompatActivity() {
                         triedAetherScrapers.add(resolved.providerId.lowercase(Locale.US))
                         val pName = AetherSourceResolver.SERVERS.firstOrNull {
                             it.id.equals(resolved.providerId, ignoreCase = true)
-                        }?.name ?: resolved.providerId
+                        }?.name ?: MovieCatalog.sanitizeSourceBranding(
+                            when (resolved.providerId.lowercase(Locale.US)) {
+                                "nguonc_streamc", "nguonc", "film4k" -> "Tú Nam"
+                                "aether" -> "Thúy An"
+                                "kkphim" -> "Cốm"
+                                else -> resolved.providerId
+                            }
+                        )
                         topServerText.text = "${episode.title} • Nguồn $pName"
                     }
                 }
@@ -1973,7 +1996,7 @@ class PlayerActivity : AppCompatActivity() {
                     val fallbackUrl = if (!isAetherEpisode(episode) && !isMiruroEpisode(episode)) findWebFallbackUrl(episode) else ""
                     if (fallbackUrl.isNotBlank()) {
                         val ref = episode.detailUrl.takeIf { it.startsWith("http", ignoreCase = true) }
-                            ?: if (episode.source == ContentSource.ANIME) CatalogService.currentAnimeBaseUrl() else episode.url
+                            ?: episode.url
                         startWebFallback(fallbackUrl, ref, allowNativeHandoff = false)
                     } else {
                         loadingOverlay.visibility = View.VISIBLE

@@ -154,7 +154,7 @@ object MovieCatalog {
             ) ?: poster
 
             val rawDesc = movie.optString("content").ifEmpty { movie.optString("description") }
-            val summary = HTMLDocument.textContent(rawDesc).ifEmpty { "Chưa có nội dung mô tả." }
+            val summary = sanitizeSourceBranding(HTMLDocument.textContent(rawDesc)).ifEmpty { "Chưa có nội dung mô tả." }
 
             val quality = HTMLDocument.decodeEntities(movie.optString("quality").trim())
             val lang = HTMLDocument.decodeEntities(movie.optString("lang").ifEmpty { movie.optString("language") }.trim())
@@ -181,8 +181,10 @@ object MovieCatalog {
             val episodes = ArrayList<Episode>()
             for (sIdx in 0 until episodesArr.length()) {
                 val serverObj = episodesArr.optJSONObject(sIdx) ?: continue
-                val serverName = HTMLDocument.decodeEntities(
-                    serverObj.optString("server_name").trim().ifEmpty { "Server ${sIdx + 1}" }
+                val serverName = sanitizeSourceBranding(
+                    HTMLDocument.decodeEntities(
+                        serverObj.optString("server_name").trim().ifEmpty { "Server ${sIdx + 1}" }
+                    )
                 )
                 val dataArr = serverObj.optJSONArray("server_data")
                     ?: serverObj.optJSONArray("items")
@@ -344,6 +346,18 @@ object MovieCatalog {
             return CatalogStreamMatch(direct, isDirectM3u8 = isM3u8, embedFallbackUrl = episode.refererUrl)
         }
         return null
+    }
+
+    private val NGUONC_BRAND_REGEX = Regex("""nguon\s*c|nguồn\s*c""", RegexOption.IGNORE_CASE)
+    private val AETHER_BRAND_REGEX = Regex("""\baether\b""", RegexOption.IGNORE_CASE)
+    private val KKPHIM_BRAND_REGEX = Regex("""kk\s*phim""", RegexOption.IGNORE_CASE)
+
+    fun sanitizeSourceBranding(input: String): String {
+        if (input.isBlank()) return input
+        var out = NGUONC_BRAND_REGEX.replace(input, "Tú Nam")
+        out = AETHER_BRAND_REGEX.replace(out, "Thúy An")
+        out = KKPHIM_BRAND_REGEX.replace(out, "Cốm")
+        return out
     }
 
     private fun buildServerBadge(quality: String, serverName: String, audioLabel: String): String {

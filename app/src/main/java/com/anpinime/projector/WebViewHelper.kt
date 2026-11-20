@@ -534,7 +534,7 @@ object WebViewHelper {
                                                         )
                                                     }
                                                     val titleTv = TextView(activity).apply {
-                                                        text = "Xác minh kết nối ${runCatching { URL(href).host }.getOrDefault("AnimeVietsub")}…"
+                                                        text = "Xác minh kết nối ${runCatching { URL(href).host }.getOrDefault("Miruro")}…"
                                                         setTextColor(Color.WHITE)
                                                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
                                                         typeface = Typeface.DEFAULT_BOLD
@@ -702,38 +702,73 @@ object WebViewHelper {
         }
     }
 
+    private var warmOriginWebView: WebView? = null
+    private var warmOriginBase: String = ""
+    private var warmOriginReady: Boolean = false
+    private val warmPendingCallbacks = java.util.concurrent.ConcurrentHashMap<String, (Map<String, String>) -> Unit>()
+    private val warmReqSeq = java.util.concurrent.atomic.AtomicInteger(0)
+
+    private fun destroyWarmOriginWebView() {
+        warmOriginReady = false
+        warmOriginBase = ""
+        val old = warmOriginWebView
+        warmOriginWebView = null
+        try {
+            old?.stopLoading()
+            (old?.parent as? ViewGroup)?.removeView(old)
+            old?.destroy()
+        } catch (_: Throwable) {}
+    }
+
     /**
-     * Executes a same-origin GET fetch inside Android WebView using synced browser cookies
-     * (e.g. Miruro /api/search/browse, /api/sources, /__data.json, /watch/.../__data.json).
+     * Executes a single same-origin GET fetch inside a warm reusable Android WebView using synced cookies.
      */
     @SuppressLint("SetJavaScriptEnabled")
     suspend fun fetchTextInWebView(
         originUrl: String,
         targetPathOrUrl: String,
+        timeoutMs: Long = 14_000L
+    ): String? {
+        val batch = fetchTextsBatchInWebView(originUrl, listOf(targetPathOrUrl), timeoutMs)
+        return batch[targetPathOrUrl]
+    }
+
+    /**
+     * Executes multiple same-origin GET fetches in parallel (Promise.all over HTTP/2) inside a
+     * warm reusable Android WebView, avoiding repeated WebView creation/destruction overhead.
+     */
+    @SuppressLint("SetJavaScriptEnabled")
+    suspend fun fetchTextsBatchInWebView(
+        originUrl: String,
+        paths: List<String>,
         timeoutMs: Long = 16_000L
-    ): String? = mutex.withLock {
+    ): Map<String, String> = mutex.withLock {
+        if (paths.isEmpty()) return@withLock emptyMap()
         withContext(Dispatchers.Main) {
             suspendCancellableCoroutine { cont ->
-                val activity = activityRef?.get()?.takeIf { !it.isFinishing && !it.isDestroyed }
-                val ctx = activity ?: appContext
+                val ctx = appContext ?: activityRef?.get()?.applicationContext
                 if (ctx == null) {
-                    if (cont.isActive) cont.resume(null)
+                    if (cont.isActive) cont.resume(emptyMap())
                     return@suspendCancellableCoroutine
                 }
 
                 var finished = false
-                var webView: WebView? = null
                 val baseOrigin = try {
                     val u = URL(originUrl)
                     "${u.protocol}://${u.host}/"
                 } catch (_: Throwable) {
                     originUrl.trimEnd('/') + "/"
                 }
+                val reqId = "r${warmReqSeq.incrementAndGet()}"
 
-                fun cleanup(result: String?) {
+                fun finish(result: Map<String, String>, invalidateWarm: Boolean = false) {
                     if (finished) return
                     finished = true
+                    warmPendingCallbacks.remove(reqId)
                     mainHandler.removeCallbacksAndMessages(cont)
+                    if (invalidateWarm) {
+                        destroyWarmOriginWebView()
+                    }
                     try {
                         val cm = CookieManager.getInstance()
                         cm.flush()
@@ -742,82 +777,117 @@ object WebViewHelper {
                             persistCookie(baseOrigin, cookie)
                         }
                     } catch (_: Throwable) {}
-                    try {
-                        webView?.stopLoading()
-                        (webView?.parent as? ViewGroup)?.removeView(webView)
-                        webView?.destroy()
-                    } catch (_: Throwable) {}
-                    webView = null
                     if (cont.isActive) {
                         cont.resume(result)
                     }
                 }
 
                 try {
-                    val wv = WebView(ctx)
-                    webView = wv
-                    val cm = CookieManager.getInstance()
-                    cm.setAcceptCookie(true)
-                    cm.setAcceptThirdPartyCookies(wv, true)
+                    val needInit = warmOriginWebView == null || !warmOriginReady ||
+                        !warmOriginBase.equals(baseOrigin, ignoreCase = true)
+                    if (needInit) {
+                        destroyWarmOriginWebView()
+                        val wv = WebView(ctx)
+                        val cm = CookieManager.getInstance()
+                        cm.setAcceptCookie(true)
+                        cm.setAcceptThirdPartyCookies(wv, true)
+                        wv.settings.apply {
+                            javaScriptEnabled = true
+                            domStorageEnabled = true
+                            userAgentString = userAgent
+                            mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                        }
+                        wv.addJavascriptInterface(object {
+                            @JavascriptInterface
+                            fun onBatchResult(id: String, jsonPayload: String) {
+                                val parsed = LinkedHashMap<String, String>()
+                                try {
+                                    val obj = JSONObject(jsonPayload)
+                                    val keys = obj.keys()
+                                    while (keys.hasNext()) {
+                                        val k = keys.next()
+                                        val v = obj.optString(k)
+                                        if (v.isNotBlank()) parsed[k] = v
+                                    }
+                                } catch (_: Throwable) {}
+                                mainHandler.post {
+                                    warmPendingCallbacks.remove(id)?.invoke(parsed)
+                                }
+                            }
+                        }, "AnPinimeBatchBridge")
 
-                    wv.settings.apply {
-                        javaScriptEnabled = true
-                        domStorageEnabled = true
-                        userAgentString = userAgent
-                        mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                        val shellHtml = """
+                            <!doctype html><html><head><meta name="viewport" content="width=device-width"></head><body><script>
+                            window.__anpinimeRunBatch = function(reqId, pathsB64) {
+                              try {
+                                var paths = JSON.parse(atob(pathsB64));
+                                var out = {};
+                                Promise.all(paths.map(function(p) {
+                                  return fetch(p, {
+                                    method: 'GET',
+                                    credentials: 'include',
+                                    headers: { 'Accept': 'application/json, text/sveltekit-data, */*' }
+                                  }).then(function(r) {
+                                    if (!r.ok) return '';
+                                    return r.text();
+                                  }).then(function(txt) {
+                                    if (txt && !/just a moment|cf-browser-verification|_cf_chl_opt/i.test(txt.slice(0, 600))) {
+                                      out[p] = txt;
+                                    }
+                                  }).catch(function() {});
+                                })).then(function() {
+                                  AnPinimeBatchBridge.onBatchResult(reqId, JSON.stringify(out));
+                                }).catch(function() {
+                                  AnPinimeBatchBridge.onBatchResult(reqId, '{}');
+                                });
+                              } catch (e) {
+                                AnPinimeBatchBridge.onBatchResult(reqId, '{}');
+                              }
+                            };
+                            </script></body></html>
+                        """.trimIndent()
+
+                        warmOriginWebView = wv
+                        warmOriginBase = baseOrigin
+                        warmOriginReady = false
+                        wv.webViewClient = object : WebViewClient() {
+                            override fun onPageFinished(view: WebView?, url: String?) {
+                                super.onPageFinished(view, url)
+                                warmOriginReady = true
+                            }
+                        }
+                        wv.loadDataWithBaseURL(baseOrigin, shellHtml, "text/html", "UTF-8", baseOrigin)
                     }
 
-                    wv.addJavascriptInterface(object {
-                        @JavascriptInterface
-                        fun onPayload(payload: String) {
-                            mainHandler.post { cleanup(payload.takeIf { it.isNotBlank() }) }
+                    val pathsJson = org.json.JSONArray(paths).toString()
+                    val pathsB64 = Base64.encodeToString(pathsJson.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+                    warmPendingCallbacks[reqId] = { result -> finish(result, invalidateWarm = false) }
+
+                    fun dispatchJs(attempt: Int) {
+                        if (finished) return
+                        val wv = warmOriginWebView
+                        if (wv == null) {
+                            finish(emptyMap(), invalidateWarm = true)
+                            return
                         }
-
-                        @JavascriptInterface
-                        fun onError(msg: String) {
-                            mainHandler.post { cleanup(null) }
+                        if (!warmOriginReady && attempt < 25) {
+                            mainHandler.postAtTime({ dispatchJs(attempt + 1) }, cont, SystemClock.uptimeMillis() + 60L)
+                            return
                         }
-                    }, "AnPinimeTextBridge")
+                        wv.evaluateJavascript("window.__anpinimeRunBatch && window.__anpinimeRunBatch('$reqId', '$pathsB64');", null)
+                    }
 
-                    val target64 = Base64.encodeToString(targetPathOrUrl.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-                    val html = """
-                        <!doctype html><html><head><meta name="viewport" content="width=device-width">
-                        </head><body><script>
-                        (function() {
-                          var url = atob('$target64');
-                          fetch(url, {
-                            method: 'GET',
-                            credentials: 'include',
-                            headers: { 'Accept': 'application/json, text/sveltekit-data, */*' }
-                          })
-                            .then(function(r) {
-                              if (!r.ok) throw Error('HTTP ' + r.status);
-                              return r.text();
-                            })
-                            .then(function(txt) {
-                              if (!txt || /just a moment|cf-browser-verification|_cf_chl_opt/i.test(txt.slice(0, 600))) {
-                                throw Error('Challenge');
-                              }
-                              AnPinimeTextBridge.onPayload(txt);
-                            })
-                            .catch(function(err) {
-                              AnPinimeTextBridge.onError(String(err));
-                            });
-                        })();
-                        </script></body></html>
-                    """.trimIndent()
-
-                    wv.loadDataWithBaseURL(baseOrigin, html, "text/html", "UTF-8", baseOrigin)
+                    dispatchJs(0)
 
                     mainHandler.postAtTime({
-                        cleanup(null)
+                        finish(emptyMap(), invalidateWarm = true)
                     }, cont, SystemClock.uptimeMillis() + timeoutMs)
 
                     cont.invokeOnCancellation {
-                        mainHandler.post { cleanup(null) }
+                        mainHandler.post { finish(emptyMap(), invalidateWarm = false) }
                     }
                 } catch (_: Throwable) {
-                    cleanup(null)
+                    finish(emptyMap(), invalidateWarm = true)
                 }
             }
         }

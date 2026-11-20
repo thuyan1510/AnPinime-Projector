@@ -8,14 +8,14 @@ enum class ContentSource(val id: String, val title: String, val subtitle: String
     FILM4K("film4k", "Tú Nam", "Nguồn 1 · Tú Nam", true),
     AETHER("aether", "Thúy An", "Nguồn 2 · Thúy An", true),
     KKPHIM("kkphim", "Cốm", "Nguồn 3 · Cốm", true),
-    ANIME("anime", "AnimeVietsub", "Nguồn 4 · AnimeVietsub", false),
-    MIRURO("miruro", "Anime Miruro", "Nguồn 5 · Anime Miruro", false);
+    MIRURO("miruro", "Anime Miruro", "Nguồn 4 · Anime Miruro", false);
 
     companion object {
         fun fromId(id: String?): ContentSource {
             if (id.isNullOrBlank()) return FILM4K
             val normalized = id.trim().lowercase()
             if (normalized == "phim4k" || normalized == "aether") return AETHER
+            if (normalized == "anime" || normalized == "animevietsub") return MIRURO
             return entries.firstOrNull { it.id.equals(normalized, ignoreCase = true) } ?: FILM4K
         }
     }

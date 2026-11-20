@@ -279,14 +279,12 @@ class MainActivity : AppCompatActivity() {
         activeSidebarKey = when (tab) {
             "search" -> "tab_search"
             "browse" -> "tab_browse"
-            "schedule" -> "tab_schedule"
             else -> "tab_home"
         }
         updateSidebarState()
         when (tab) {
             "search" -> renderSearch()
             "browse" -> openCategoryBrowse(null)
-            "schedule" -> renderSchedule(DayOfWeek.today())
             else -> if (homeSections.isEmpty()) loadHomeData() else renderHome()
         }
     }
@@ -297,11 +295,11 @@ class MainActivity : AppCompatActivity() {
             currentSource = currentSource,
             onSwitchSource = { src -> switchSource(src) },
             onRefresh = {
+                CatalogService.clearMiruroHomeCache()
                 currentTab = "home"
                 updateSidebarState()
                 loadHomeData()
             },
-            onAnimeDomain = { showAnimeDomainDialog() },
             onCheckUpdate = { AppUpdateManager.checkUpdateManual(this) }
         )
     }
@@ -332,12 +330,10 @@ class MainActivity : AppCompatActivity() {
             ?: when (currentTab) {
                 "search" -> sidebarButtons["tab_search"]
                 "browse" -> sidebarButtons["tab_browse"]
-                "schedule" -> sidebarButtons["tab_schedule"]
                 else -> when (currentSource) {
                     ContentSource.FILM4K -> sidebarButtons["src_film4k"]
                     ContentSource.AETHER -> sidebarButtons["src_aether"]
                     ContentSource.KKPHIM -> sidebarButtons["src_kkphim"]
-                    ContentSource.ANIME -> sidebarButtons["src_anime"]
                     ContentSource.MIRURO -> sidebarButtons["src_miruro"]
                 }
             }
@@ -582,12 +578,6 @@ class MainActivity : AppCompatActivity() {
             openCategoryBrowse(null)
         }
 
-        addMenuButton("tab_schedule", "📅  Lịch chiếu Anime") {
-            currentTab = "schedule"
-            updateSidebarState()
-            renderSchedule(DayOfWeek.today())
-        }
-
         val dividerLabel = TextView(this).apply {
             text = "CHỌN NGUỒN PHIM"
             setTextColor(UiHelper.COLOR_TEXT_SECONDARY)
@@ -609,19 +599,12 @@ class MainActivity : AppCompatActivity() {
             switchSource(ContentSource.KKPHIM)
         }
 
-        addMenuButton("src_anime", "✨  Nguồn 4 · AnimeVietsub") {
-            switchSource(ContentSource.ANIME)
-        }
-
-        addMenuButton("src_miruro", "🌸  Nguồn 5 · Anime Miruro") {
+        addMenuButton("src_miruro", "🌸  Nguồn 4 · Anime Miruro") {
             switchSource(ContentSource.MIRURO)
         }
 
-        addMenuButton("settings_domain", "🌐  Tên miền AnimeVietsub") {
-            showAnimeDomainDialog()
-        }
-
         addMenuButton("refresh", "🔄  Làm mới") {
+            CatalogService.clearMiruroHomeCache()
             loadHomeData()
         }
 
@@ -648,7 +631,6 @@ class MainActivity : AppCompatActivity() {
             ContentSource.FILM4K -> "src_film4k"
             ContentSource.AETHER -> "src_aether"
             ContentSource.KKPHIM -> "src_kkphim"
-            ContentSource.ANIME -> "src_anime"
             ContentSource.MIRURO -> "src_miruro"
         }
         activeSidebarKey = srcKey
@@ -691,7 +673,6 @@ class MainActivity : AppCompatActivity() {
         val tabName = when (currentTab) {
             "search" -> "Tìm kiếm"
             "browse" -> "Thể loại"
-            "schedule" -> "Lịch chiếu Anime"
             else -> "Trang chủ"
         }
         topMenuBadgeText?.text = "${currentSource.subtitle} • $tabName  (Ấn ◀ sang trái hết cỡ để mở Menu)"
@@ -718,11 +699,9 @@ class MainActivity : AppCompatActivity() {
         styleBtn("tab_home", currentTab == "home")
         styleBtn("tab_search", currentTab == "search")
         styleBtn("tab_browse", currentTab == "browse")
-        styleBtn("tab_schedule", currentTab == "schedule")
         styleBtn("src_film4k", currentSource == ContentSource.FILM4K)
         styleBtn("src_aether", currentSource == ContentSource.AETHER)
         styleBtn("src_kkphim", currentSource == ContentSource.KKPHIM)
-        styleBtn("src_anime", currentSource == ContentSource.ANIME)
         styleBtn("src_miruro", currentSource == ContentSource.MIRURO)
     }
 
@@ -1610,156 +1589,6 @@ class MainActivity : AppCompatActivity() {
 
             loadPage(1)
         }
-    }
-
-    // =========================================================================
-    // ANIME SCHEDULE & CUSTOM DOMAIN DIALOG
-    // =========================================================================
-
-    private fun renderSchedule(selectedDay: DayOfWeek) {
-        loadJob?.cancel()
-        showLoading("Đang tải lịch chiếu AnimeVietsub…")
-        loadJob = uiScope.launch {
-            val allItems = try {
-                withContext(Dispatchers.IO) { CatalogService.loadSchedule() }
-            } catch (_: Throwable) {
-                emptyList()
-            }
-            ensureActive()
-            if (currentTab != "schedule") return@launch
-
-            contentContainer.removeAllViews()
-            val padH = UiHelper.dp(this@MainActivity, if (isCompactPortrait) 12 else 18)
-            val mainCol = LinearLayout(this@MainActivity).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(padH, UiHelper.dp(context, 10), padH, UiHelper.dp(context, 14))
-                layoutParams = FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
-                )
-            }
-
-            val dayRowScroll = HorizontalScrollView(this@MainActivity).apply {
-                isHorizontalScrollBarEnabled = false
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply { bottomMargin = UiHelper.dp(context, 12) }
-            }
-            val dayRow = LinearLayout(this@MainActivity).apply {
-                orientation = LinearLayout.HORIZONTAL
-            }
-
-            val activeColor = UiHelper.COLOR_ACCENT
-            for (day in DayOfWeek.entries) {
-                val isSelected = day == selectedDay
-                val chip = TextView(this@MainActivity).apply {
-                    text = day.displayName
-                    setTextColor(Color.WHITE)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-                    typeface = Typeface.DEFAULT_BOLD
-                    setPadding(UiHelper.dp(context, 15), UiHelper.dp(context, 8), UiHelper.dp(context, 15), UiHelper.dp(context, 8))
-                    layoutParams = LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT
-                    ).apply { rightMargin = UiHelper.dp(context, 8) }
-                }
-                UiHelper.makeFocusableButton(
-                    view = chip,
-                    normalBgColor = if (isSelected) activeColor else UiHelper.COLOR_CARD,
-                    focusedBgColor = UiHelper.COLOR_RED,
-                    focusedStrokeColor = Color.WHITE,
-                    radiusDp = 999
-                ) {
-                    renderSchedule(day)
-                }
-                dayRow.addView(chip)
-            }
-            dayRowScroll.addView(dayRow)
-            mainCol.addView(dayRowScroll)
-
-            val filtered = allItems.filter { it.dayOfWeek == selectedDay }.ifEmpty { allItems }
-            val animeCards = filtered.map { item ->
-                Anime(
-                    title = item.title,
-                    subtitle = listOf(item.episodeText, item.timeText).filter { it.isNotEmpty() }.joinToString(" • "),
-                    url = item.url,
-                    episodeText = item.episodeText,
-                    quality = item.timeText.ifEmpty { item.dayOfWeek.rawValue },
-                    source = ContentSource.ANIME
-                )
-            }
-
-            if (animeCards.isEmpty()) {
-                mainCol.addView(TextView(this@MainActivity).apply {
-                    text = "Chưa có lịch chiếu cho ${selectedDay.displayName}."
-                    setTextColor(UiHelper.COLOR_TEXT_SECONDARY)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                    gravity = Gravity.CENTER
-                    layoutParams = LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        0,
-                        1f
-                    )
-                })
-            } else {
-                val grid = RecyclerView(this@MainActivity).apply {
-                    layoutManager = GridLayoutManager(context, Phim4KUi.gridSpanCount(context))
-                    clipToPadding = false
-                    setHasFixedSize(true)
-                    layoutParams = LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        0,
-                        1f
-                    )
-                    adapter = PosterAdapter(animeCards, isGrid = true) { anime ->
-                        currentSource = ContentSource.ANIME
-                        updateSidebarState()
-                        openDetail(anime)
-                    }
-                }
-                mainCol.addView(grid)
-            }
-
-            contentContainer.addView(mainCol)
-        }
-    }
-
-    private fun showAnimeDomainDialog() {
-        val currentCustom = CatalogService.getCustomAnimeDomain(this).orEmpty()
-        val activeDomain = CatalogService.currentAnimeBaseUrl()
-
-        val input = EditText(this).apply {
-            hint = "Để trống để tự động tìm qua bit.ly/animevietsubtv"
-            setText(currentCustom)
-            setTextColor(Color.WHITE)
-            setHintTextColor(UiHelper.COLOR_TEXT_SECONDARY)
-            setSingleLine(true)
-            setPadding(UiHelper.dp(context, 16), UiHelper.dp(context, 12), UiHelper.dp(context, 16), UiHelper.dp(context, 12))
-        }
-
-        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("Tên miền AnimeVietsub (Đang dùng: $activeDomain)")
-            .setView(input)
-            .setPositiveButton("Lưu & Áp dụng") { _, _ ->
-                CatalogService.setCustomAnimeDomain(this, input.text.toString())
-                if (currentSource == ContentSource.ANIME) {
-                    loadHomeData()
-                }
-            }
-            .setNeutralButton("Tự động dò lại") { _, _ ->
-                CatalogService.setCustomAnimeDomain(this, null)
-                uiScope.launch {
-                    withContext(Dispatchers.IO) {
-                        CatalogService.resolveAnimeDomain(forceRefresh = true)
-                    }
-                    if (currentSource == ContentSource.ANIME) {
-                        loadHomeData()
-                    }
-                }
-            }
-            .setNegativeButton("Đóng", null)
-            .show()
     }
 
     private fun openDetail(anime: Anime) {

@@ -87,7 +87,7 @@ object StreamCResolver {
                     isWeb = false,
                     webUrl = embedUrl,
                     mediaKind = StreamMediaKind.HLS,
-                    providerId = "nguonc_streamc"
+                    providerId = "Tú Nam"
                 )
             }
         }
@@ -118,7 +118,7 @@ object StreamCResolver {
             isWeb = false,
             webUrl = embedUrl,
             mediaKind = StreamMediaKind.HLS,
-            providerId = "nguonc_streamc"
+            providerId = "Tú Nam"
         )
     }
 
