@@ -459,6 +459,9 @@ function detailPage() {
         servers.length && !state.detail?.servers?.length
             ? episodes.filter((ep) => ep.group === state.server)
             : episodes;
+    const miruroLink = state.source === 'miruro' && state.error
+        ? '<button class="cta ghost" data-act="openMiruro">Mở trang xem Miruro</button>'
+        : '';
     const panel = !state.detail
         ? status(state.error || 'Đang tải danh sách tập…', !!state.error)
         : `<div class="block-panel">
@@ -482,7 +485,7 @@ function detailPage() {
         <h1>${esc(item.title)}</h1><div class="hero-sub">${meta(item)}</div>
         <p>${esc(item.desc)}</p><div class="btn-row">${actions}</div></div></div>
         <p class="mobile-detail-desc hidden">${esc(item.desc)}</p><div class="mobile-detail-actions hidden">${actions}</div>
-        ${panel}</div>`;
+        ${panel}${miruroLink}</div>`;
 }
 
 function settingsPage() {
@@ -510,6 +513,24 @@ function settingsPage() {
       <button class="cta ghost" data-act="update">Kiểm tra cập nhật</button></section></div></div>`;
 }
 
+const playerOptions = [
+    ['server', 'tv', 'Server'],
+    ['subtitle', 'sub', 'Phụ đề'],
+    ['translate', 'spark', 'Dịch AI'],
+    ['audio', 'audio', 'Âm thanh'],
+    ['aspect', 'expand', 'Tỉ lệ'],
+    ['settings', 'settings', 'Cài đặt'],
+];
+
+function showPhonePlayerMenu() {
+    const options = playerOptions
+        .filter(([action]) => action !== 'translate' || ['aether', 'miruro'].includes(state.player?.source))
+        .map(([action, icon, label]) =>
+            `<button class="sheet-option" data-act="${action}">${ico(icon)} <b>${label}</b></button>`);
+    openOverlay('Điều khiển phát', '', `<div class="sheet-options">${options.join('')}</div>`);
+    native('menuOpened').catch((error) => toast(error.message));
+}
+
 function playerPage() {
     return `<div class="player-shell" data-act="toggleHud">
         <div class="player-header"><button class="icon-only" data-act="exit" aria-label="Quay lại">${ico('back', 'lg')}</button>
@@ -523,15 +544,9 @@ function playerPage() {
             <button class="control-btn transport play" data-act="togglePlay">${ico('play', 'lg')} <span>Phát</span></button>
             <button class="control-btn transport" data-act="forward">${ico('forward')} <span>+10s</span></button>
             <button class="control-btn transport" data-act="next">${ico('next')} <span>Tập tiếp</span></button>
-            ${[
-                ['episodes', 'list', 'Tập'],
-                ['server', 'tv', 'Server'],
-                ['subtitle', 'sub', 'Phụ đề'],
-                ['translate', 'spark', 'Dịch AI'],
-                ['audio', 'audio', 'Âm thanh'],
-                ['aspect', 'expand', 'Tỉ lệ'],
-                ['settings', 'settings', 'Cài đặt'],
-            ]
+            <button class="control-btn" data-act="episodes">${ico('list')} Tập</button>
+            <button class="control-btn phone-player-menu" data-act="playerMenu">${ico('settings')} Tùy chọn</button>
+            ${playerOptions
                 .map(
                     ([action, icon, label]) =>
                         `<button class="control-btn player-option" data-act="${action}">${ico(icon)} ${label}</button>`,
@@ -541,20 +556,24 @@ function playerPage() {
 }
 
 function updatePlayer(data) {
-    if (!state.player) render();
     const previous = state.player;
     state.player = data;
-    device.classList.toggle('miruro', data.source === 'miruro');
-    $('.play-heading').textContent = data.title;
-    $('#playerSource').textContent = [data.episode, source(data.source).name, data.server]
-        .filter(Boolean)
-        .join(' · ');
-    $('#playerQuality').textContent = data.quality;
-    $('.player-header').classList.toggle('hidden', !data.hud);
-    $('.player-controls').classList.toggle('hidden', !data.hud);
-    $('[data-act="next"]').hidden = !data.next;
-    $('[data-act="translate"]').hidden = !['aether', 'miruro'].includes(data.source);
-    $('[data-act="translate"]').classList.toggle('active', data.translated);
+    if (previous?.source !== data.source) {
+        device.classList.toggle('miruro', data.source === 'miruro');
+        $('.player-actions [data-act="translate"]').hidden = !['aether', 'miruro'].includes(data.source);
+    }
+    if (previous?.title !== data.title) $('.play-heading').textContent = data.title;
+    if (previous?.episode !== data.episode || previous?.source !== data.source || previous?.server !== data.server) {
+        $('#playerSource').textContent = [data.episode, source(data.source).name, data.server]
+            .filter(Boolean).join(' · ');
+    }
+    if (previous?.quality !== data.quality) $('#playerQuality').textContent = data.quality;
+    if (previous?.hud !== data.hud) {
+        $('.player-header').classList.toggle('hidden', !data.hud);
+        $('.player-controls').classList.toggle('hidden', !data.hud);
+    }
+    if (previous?.next !== data.next) $('[data-act="next"]').hidden = !data.next;
+    if (previous?.translated !== data.translated) $('.player-actions [data-act="translate"]').classList.toggle('active', !!data.translated);
     const play = $('[data-act="togglePlay"]');
     if (previous?.playing !== data.playing) {
         play.innerHTML = `${ico(data.playing ? 'pause' : 'play', 'lg')} <span>${data.playing ? 'Dừng' : 'Phát'}</span>`;
@@ -856,11 +875,15 @@ function back() {
 function clickAction(button) {
     const { act, id, index, value } = button.dataset;
     if (playerScreen) {
+        if (act === 'playerMenu') {
+            showPhonePlayerMenu();
+            return;
+        }
         if (act === 'close') {
             back();
             return;
         }
-        if (act === 'choice') closeOverlay();
+        if (act === 'choice' || button.closest('#overlay')) closeOverlay();
         native(act, { index: Number(index) }).catch((error) => toast(error.message));
         return;
     }
@@ -933,6 +956,9 @@ function clickAction(button) {
             break;
         case 'play':
             play();
+            break;
+        case 'openMiruro':
+            native('openMiruro', {url: state.selected.raw.url}).catch((error) => toast(error.message));
             break;
         case 'back':
             back();

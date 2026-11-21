@@ -1,6 +1,8 @@
 package com.anpinime.projector
 
+import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.View
@@ -148,6 +150,17 @@ class V8Activity : AppCompatActivity() {
                             putExtra("all_episodes_json", Episode.toJsonArray(loaded.episodes))
                             putExtra("v8", true)
                         })
+                        null
+                    }
+                    "openMiruro" -> {
+                        require(source == ContentSource.MIRURO)
+                        val url = MiruroCatalog.watchPageUrl(request.getString("url"))
+                            ?: error("Không tìm thấy trang xem Miruro.")
+                        try {
+                            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                        } catch (_: ActivityNotFoundException) {
+                            error("Thiết bị chưa có trình duyệt để mở trang xem.")
+                        }
                         null
                     }
                     "preference" -> {

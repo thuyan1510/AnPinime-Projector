@@ -201,6 +201,30 @@ class MiruroCatalogTest {
     }
 
     @Test
+    fun sameServerCanOfferAnMp4BackupToAnHlsStream() {
+        val sources = JSONObject("""
+            {"tracks":[{"track":"sub","providers":[{"provider":"sample","servers":[{
+                "server":"A","streams":[
+                    {"url":"https://test.invalid/broken.m3u8"},
+                    {"url":"https://test.invalid/stream","type":"video/mp4"}
+                ]
+            }]}]}]}
+        """.trimIndent())
+        val candidates = MiruroSourceResolver.parseSourcesData(sources)
+        assertEquals(2, candidates.map { it.key }.distinct().size)
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            val supported = chain.request().url.encodedPath == "/stream"
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
+                .code(if (supported) 200 else 404).message("fixture")
+                .body("fixture".toResponseBody()).build()
+        }.build()
+        val result = MiruroSourceResolver.resolveWithAutoFailover(candidates, client)
+        assertEquals("sample:sub:A:2", result?.providerId)
+        assertEquals(StreamMediaKind.MP4, result?.mediaKind)
+        assertFalse(result!!.isF4kWrapped)
+    }
+
+    @Test
     fun resolveWithAutoFailoverSwitchesToHealthyServerWhenPrimaryFails() {
         val mockClient = OkHttpClient.Builder()
             .addInterceptor { chain ->

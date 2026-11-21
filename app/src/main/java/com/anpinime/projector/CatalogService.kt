@@ -400,13 +400,11 @@ object CatalogService {
         return when (episode.source) {
             ContentSource.FILM4K -> resolveCatalogEpisodePlayback(
                 episode = episode,
-                defaultReferer = "${MovieSourceDirectory.DEFAULT_NGUONC_BASE_URL}/",
-                format = MovieCatalogFormat.FREE2
+                defaultReferer = "${MovieSourceDirectory.DEFAULT_NGUONC_BASE_URL}/"
             )
             ContentSource.KKPHIM -> resolveCatalogEpisodePlayback(
                 episode = episode,
-                defaultReferer = "${MovieSourceDirectory.DEFAULT_KKPHIM_BASE_URL}/",
-                format = MovieCatalogFormat.FREE1
+                defaultReferer = "${MovieSourceDirectory.DEFAULT_KKPHIM_BASE_URL}/"
             )
             ContentSource.AETHER -> resolveAetherPlayback(episode, preferredServerId, onProgress)
             ContentSource.MIRURO -> resolveMiruroPlayback(episode, preferredServerId, excludeServerIds, onProgress)
@@ -882,11 +880,13 @@ object CatalogService {
 
     private fun resolveCatalogEpisodePlayback(
         episode: Episode,
-        defaultReferer: String,
-        format: MovieCatalogFormat
+        defaultReferer: String
     ): ResolvedPlayback {
         var primaryUrl = episode.directUrl.trim()
-        var embedFallback = episode.refererUrl.trim()
+        var embedFallback = episode.refererUrl.trim().takeUnless {
+            it == episode.detailUrl || it == episode.url
+        }.orEmpty()
+        var declaredHls = false
 
         val detailUrl = episode.detailUrl.ifEmpty { episode.url }.trim()
         if (detailUrl.startsWith("http")) {
@@ -899,6 +899,7 @@ object CatalogService {
                 val match = MovieCatalog.extractStreamFromDetail(rawDetail, episode)
                 if (match != null) {
                     primaryUrl = match.primaryUrl
+                    declaredHls = match.isDirectM3u8
                     if (match.embedFallbackUrl.isNotEmpty()) {
                         embedFallback = match.embedFallbackUrl
                     }
@@ -910,9 +911,9 @@ object CatalogService {
             throw IllegalStateException("Không tìm thấy luồng phát cho tập này.")
         }
 
-        val isDirectMedia = primaryUrl.contains(".m3u8", ignoreCase = true) ||
-            primaryUrl.contains(".mp4", ignoreCase = true) ||
-            primaryUrl.contains(".mkv", ignoreCase = true)
+        val detectedKind = Phim4KMediaProbe.mediaKind(primaryUrl)
+        val directKind = if (declaredHls && detectedKind == StreamMediaKind.UNKNOWN) StreamMediaKind.HLS else detectedKind
+        val isDirectMedia = directKind != StreamMediaKind.UNKNOWN
 
         if (isDirectMedia) {
             val origin = defaultReferer.trimEnd('/')
@@ -920,6 +921,23 @@ object CatalogService {
             headers["User-Agent"] = USER_AGENT
             headers["Referer"] = defaultReferer
             headers["Origin"] = origin
+            // KKPhim sometimes publishes an expired playlist alongside its working embed.
+            if (episode.source == ContentSource.KKPHIM && directKind == StreamMediaKind.HLS &&
+                embedFallback.isNotBlank() && embedFallback != primaryUrl
+            ) {
+                val probe = Request.Builder().url(primaryUrl)
+                headers.forEach { (key, value) -> probe.header(key, value) }
+                val missing = runCatching {
+                    http.newCall(probe.build()).apply { timeout().timeout(3, TimeUnit.SECONDS) }
+                        .execute().use { it.code in listOf(403, 404, 410) }
+                }.getOrDefault(false)
+                if (missing) {
+                    return ResolvedPlayback(
+                        url = embedFallback, headers = mapOf("Referer" to defaultReferer),
+                        isWeb = true, webUrl = embedFallback
+                    )
+                }
+            }
             // Match iOS MovieProvider.swift: play direct HLS/MP4 streams natively in ExoPlayer first;
             // PlayerActivity automatically falls back to webUrl (link_embed) via onPlayerError if CDN 404s.
             return ResolvedPlayback(
@@ -930,7 +948,7 @@ object CatalogService {
                     primaryUrl.substringBefore('?').lowercase().endsWith(".png"),
                 isWeb = false,
                 webUrl = embedFallback,
-                mediaKind = Phim4KMediaProbe.mediaKind(primaryUrl)
+                mediaKind = directKind
             )
         }
 
@@ -1456,8 +1474,8 @@ object CatalogService {
         val skipOkHttp = now < miruroPreferWebViewUntilMs
 
         // 1. Try native parallel OkHttp first when Cloudflare hasn't rejected OkHttp TLS
+        val okResults = LinkedHashMap<String, String>()
         if (!skipOkHttp) {
-            val okResults = LinkedHashMap<String, String>()
             if (cleanPaths.size == 1) {
                 val p = cleanPaths.first()
                 tryMiruroOkHttp("$base$p", base)?.let { okResults[p] = it }
@@ -1478,20 +1496,21 @@ object CatalogService {
             if (okResults.size == cleanPaths.size) return okResults
         }
 
-        // 2. Fast parallel HTTP/2 batch via warm reusable WebView (0ms startup after first load!)
+        // Preserve good results and ask for only the missing paths.
+        val missingPaths = cleanPaths.filterNot(okResults::containsKey)
         val webQuick = try {
             kotlinx.coroutines.runBlocking {
-                WebViewHelper.fetchTextsBatchInWebView(base, cleanPaths, timeoutMs = 11_000L)
+                WebViewHelper.fetchTextsBatchInWebView(base, missingPaths, timeoutMs = 9_000L)
             }
         } catch (_: Throwable) {
             emptyMap()
         }
         val validQuick = webQuick.filterValues { it.isNotBlank() && !isChallengeHtml(it) }
         if (validQuick.isNotEmpty()) {
-            return validQuick
+            return okResults + validQuick
         }
 
-        if (!allowWebWarmup) return emptyMap()
+        if (okResults.isNotEmpty() || !allowWebWarmup) return okResults
 
         // 3. Warm Cloudflare clearance once on Miruro mirrors in hidden WebView, then run full batch in parallel
         val hostsToTry = listOf(base) + MiruroCatalog.MIRROR_HOSTS.filterNot { it.equals(base, ignoreCase = true) }

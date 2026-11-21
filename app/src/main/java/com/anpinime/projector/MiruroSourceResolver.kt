@@ -273,15 +273,18 @@ object MiruroSourceResolver {
                         if (!streamUrl.startsWith("http", ignoreCase = true)) continue
                         if (!seenUrls.add(streamUrl)) continue
 
-                        val fmt = stObj.optString("format").trim().lowercase(Locale.US).ifBlank { "hls" }
+                        val fmt = stObj.optString("format").trim().lowercase(Locale.US)
+                            .ifBlank { stObj.optString("type").trim().lowercase(Locale.US) }
                         val mergedHeaders = defaultHeadersForUrl(streamUrl, svHeaders)
                         val trackTag = when (trackType) {
                             "ssub" -> "SoftSub"
                             "dub" -> "Dub"
                             else -> "Sub"
                         }
-                        val candKey = "$providerId:$trackType:$svName"
-                        val display = "${providerId.uppercase(Locale.US)} · $svName ($trackTag)"
+                        val serverKey = "$providerId:$trackType:$svName"
+                        val candKey = if (stIdx == 0) serverKey else "$serverKey:${stIdx + 1}"
+                        val displayLabel = "$svName ($trackTag)" + if (streamsArr.length() > 1) " · ${stIdx + 1}" else ""
+                        val display = "${providerId.uppercase(Locale.US)} · $displayLabel"
                         val cand = MiruroStreamCandidate(
                             key = candKey,
                             providerId = providerId,
@@ -359,20 +362,18 @@ object MiruroSourceResolver {
             onProgress?.invoke(wave.first().displayLabel, (checked + 1).coerceAtMost(total), total)
             if (wave.size == 1) {
                 val cand = wave.first()
-                if (probeStreamReachable(cand, fastClient)) {
-                    return candidateToPlayback(cand)
-                }
+                probePlayback(cand, fastClient)?.let { return it }
                 checked++
                 continue
             }
             val tasks = wave.map { cand ->
                 Callable {
-                    if (probeStreamReachable(cand, fastClient)) cand else null
+                    probePlayback(cand, fastClient)
                 }
             }
             val winner = try {
                 val futures = probePool.invokeAll(tasks, 5, TimeUnit.SECONDS)
-                var best: MiruroStreamCandidate? = null
+                var best: ResolvedPlayback? = null
                 for (f in futures) {
                     val res = try {
                         if (!f.isCancelled) f.get() else null
@@ -389,7 +390,7 @@ object MiruroSourceResolver {
                 null
             }
             if (winner != null) {
-                return candidateToPlayback(winner)
+                return winner
             }
             checked += wave.size
         }
@@ -397,16 +398,14 @@ object MiruroSourceResolver {
         return candidateToPlayback(ordered.first())
     }
 
-    fun candidateToPlayback(cand: MiruroStreamCandidate): ResolvedPlayback {
-        val kind = when {
-            cand.format == "hls" || cand.streamUrl.contains(".m3u8", ignoreCase = true) -> StreamMediaKind.HLS
-            cand.format == "mp4" || cand.streamUrl.contains(".mp4", ignoreCase = true) -> StreamMediaKind.MP4
-            else -> StreamMediaKind.HLS
-        }
+    fun candidateToPlayback(cand: MiruroStreamCandidate, wrappedSegments: Boolean = false): ResolvedPlayback {
+        val kind = mediaKind(cand)
+        val path = cand.streamUrl.substringBefore('?').lowercase(Locale.US)
         return ResolvedPlayback(
             url = cand.streamUrl,
             headers = cand.headers,
-            isF4kWrapped = (kind == StreamMediaKind.HLS),
+            isF4kWrapped = kind == StreamMediaKind.HLS &&
+                (wrappedSegments || wrappedExtensions.any(path::endsWith)),
             isWeb = false,
             webUrl = "",
             mediaKind = kind,
@@ -415,7 +414,20 @@ object MiruroSourceResolver {
         )
     }
 
-    private fun probeStreamReachable(cand: MiruroStreamCandidate, client: OkHttpClient): Boolean {
+    private fun mediaKind(candidate: MiruroStreamCandidate): StreamMediaKind {
+        val urlKind = Phim4KMediaProbe.mediaKind(candidate.streamUrl)
+        if (urlKind != StreamMediaKind.UNKNOWN) return urlKind
+        return when (candidate.format) {
+            "mp4", "video/mp4" -> StreamMediaKind.MP4
+            "dash", "mpd", "application/dash+xml" -> StreamMediaKind.DASH
+            "mkv", "video/x-matroska" -> StreamMediaKind.MKV
+            else -> StreamMediaKind.HLS
+        }
+    }
+
+    private val wrappedExtensions = listOf(".png", ".jpg", ".jpeg", ".webp", ".f4k")
+
+    private fun probePlayback(cand: MiruroStreamCandidate, client: OkHttpClient): ResolvedPlayback? {
         return try {
             val reqBuilder = Request.Builder()
                 .url(cand.streamUrl)
@@ -424,16 +436,19 @@ object MiruroSourceResolver {
                 reqBuilder.header(k, v)
             }
             client.newCall(reqBuilder.build()).execute().use { resp ->
-                if (!resp.isSuccessful) return false
-                if (cand.format == "hls" || cand.streamUrl.contains(".m3u8", ignoreCase = true)) {
-                    val body = resp.body?.string().orEmpty()
-                    body.contains("#EXTM3U", ignoreCase = true)
-                } else {
-                    true
-                }
+                if (!resp.isSuccessful) return null
+                if (mediaKind(cand) != StreamMediaKind.HLS) return candidateToPlayback(cand)
+
+                val body = resp.body?.string().orEmpty()
+                if (!body.contains("#EXTM3U", ignoreCase = true)) return null
+                val wrapped = body.lineSequence().map(String::trim)
+                    .filter { it.isNotEmpty() && !it.startsWith('#') }
+                    .map { it.substringBefore('?').lowercase(Locale.US) }
+                    .any { path -> wrappedExtensions.any(path::endsWith) }
+                candidateToPlayback(cand, wrappedSegments = wrapped)
             }
-        } catch (_: Throwable) {
-            false
+        } catch (_: Exception) {
+            null
         }
     }
 }

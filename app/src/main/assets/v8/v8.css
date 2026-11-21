@@ -321,3 +321,68 @@ body.app-player .app-shell, body.app-player .tv-main { background:transparent!im
 .load-more { display:flex; justify-content:center; padding:22px }
 html.app-player { background:transparent }
 body.app-player .player-actions .control-btn.active { border-color:var(--accent); background:#743041 }
+
+/* Keep controls inside the viewport at projector and landscape phone sizes. */
+.app-player .preview[data-mode="tv"] .player-header {
+    padding: 10px clamp(16px, 3vw, 36px);
+}
+.app-player .preview[data-mode="tv"] .player-controls {
+    padding: 18px clamp(16px, 3vw, 36px) 12px;
+}
+.app-player .preview[data-mode="tv"] .player-actions,
+.app-player .preview[data-mode="phone"].is-playing .player-actions {
+    flex-wrap: wrap;
+    overflow: visible;
+    gap: 6px;
+    margin-top: 7px;
+    padding: 3px 0;
+}
+.app-player .preview[data-mode="tv"] .control-btn,
+.app-player .preview[data-mode="tv"] .control-btn.transport.play {
+    min-height: 32px;
+    padding: 4px 8px;
+    font-size: 10px;
+}
+.app-player .preview[data-mode="tv"] .control-btn .ico {
+    width: 16px;
+    height: 16px;
+}
+.app-player .preview[data-mode="phone"].is-playing .player-controls {
+    padding: 22px max(12px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+}
+.app-player .preview[data-mode="phone"].is-playing .control-btn,
+.app-player .preview[data-mode="phone"].is-playing .control-btn.transport.play {
+    min-height: 36px;
+}
+.app-player .preview[data-mode="phone"] .player-actions .player-option,
+.app-player .preview[data-mode="tv"] .player-actions .phone-player-menu,
+.app-player .preview[data-mode="phone"] .player-hint {
+    display: none;
+}
+.preview[data-mode="tv"] .tv-home .hero {
+    height: clamp(200px, min(29vw, 49vh), 400px) !important;
+}
+.preview[data-mode="tv"] .tv-home .hero-title {
+    font-size: clamp(24px, min(3.4vw, 6vh), 46px);
+    margin: 7px 0 10px;
+}
+.preview[data-mode="tv"] .tv-home .hero-desc {
+    margin: 7px 0 12px;
+    -webkit-line-clamp: 2;
+}
+.preview[data-mode="tv"] .tv-home .poster {
+    flex-basis: clamp(86px, 10vw, 146px);
+}
+.preview[data-mode="tv"] .overlay {
+    backdrop-filter: none;
+}
+@media (max-height: 420px) {
+    .preview[data-mode="tv"] .tv-home .hero { min-height: 225px !important }
+    .preview[data-mode="tv"] .tv-home .hero-text { top: 61% }
+}
+.app-player .preview[data-mode="tv"] .tv-edge-trigger {
+    display: none;
+}
+.app-player .preview[data-mode="phone"].is-playing .overlay {
+    backdrop-filter: none;
+}
