@@ -26,7 +26,7 @@ import androidx.recyclerview.widget.GridLayoutManager
 object Phim4KUi {
 
     fun accentFor(source: ContentSource): Int =
-        if (source.isMovie) UiHelper.COLOR_RED else UiHelper.COLOR_ACCENT
+        if (source.isMovie) UiHelper.COLOR_RED else UiHelper.COLOR_BLUE
 
     fun gridSpanCount(context: Context): Int =
         if (UiHelper.isCompactPortrait(context)) 3 else 6
@@ -74,126 +74,51 @@ object Phim4KUi {
         onOpenSources: () -> Unit,
         onOpenSearch: () -> Unit
     ): View {
-        val wrapper = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(UiHelper.COLOR_SIDEBAR)
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            )
-        }
-
         val row = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(UiHelper.dp(context, 14), UiHelper.dp(context, 10), UiHelper.dp(context, 14), UiHelper.dp(context, 10))
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            )
+            setBackgroundColor(UiHelper.COLOR_BG)
+            setPadding(UiHelper.dp(context, 16), 0, UiHelper.dp(context, 14), 0)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, UiHelper.dp(context, 62))
         }
-
-        val logo = ImageView(context).apply {
-            UiHelper.setSourceLogo(this, currentSource.isMovie)
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            background = UiHelper.roundedBg(UiHelper.COLOR_CARD, 9, context, UiHelper.COLOR_BORDER, 1)
-            outlineProvider = ViewOutlineProvider.BACKGROUND
-            clipToOutline = true
-            layoutParams = LinearLayout.LayoutParams(UiHelper.dp(context, 34), UiHelper.dp(context, 34)).apply {
-                rightMargin = UiHelper.dp(context, 10)
-            }
-        }
-        onLogoCreated(logo)
-        row.addView(logo)
-
-        val brandCol = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
+        // MainActivity keeps the source image up to date for its TV header.
+        onLogoCreated(ImageView(context))
+        val brand = TextView(context).apply {
+            val word = android.text.SpannableString("AnPinime")
+            word.setSpan(android.text.style.ForegroundColorSpan(UiHelper.COLOR_RED), 0, 4, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            word.setSpan(android.text.style.ForegroundColorSpan(Color.WHITE), 4, word.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            text = word
+            textSize = 21f
+            typeface = Typeface.DEFAULT_BOLD
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-
-        val brandTitleRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        brandTitleRow.addView(TextView(context).apply {
-            text = "AnPinime"
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16.5f)
-            typeface = Typeface.DEFAULT_BOLD
-        })
-        brandTitleRow.addView(TextView(context).apply {
-            text = "4K"
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(UiHelper.dp(context, 5), UiHelper.dp(context, 1), UiHelper.dp(context, 5), UiHelper.dp(context, 1))
-            background = UiHelper.roundedBg(UiHelper.COLOR_RED, 5, context)
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { leftMargin = UiHelper.dp(context, 6) }
-        })
-        brandCol.addView(brandTitleRow)
-
-        val sourcePill = TextView(context).apply {
+        row.addView(brand)
+        val source = TextView(context).apply {
             text = "${currentSource.subtitle} ▾"
-            setTextColor(Color.parseColor("#E5E7EB"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            setTextColor(Color.WHITE)
+            textSize = 11f
             typeface = Typeface.DEFAULT_BOLD
-            setSingleLine(true)
+            maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
-            setPadding(0, UiHelper.dp(context, 1), 0, 0)
-            isClickable = true
-            setOnClickListener { onOpenSources() }
+            setPadding(UiHelper.dp(context, 11), UiHelper.dp(context, 9), UiHelper.dp(context, 11), UiHelper.dp(context, 9))
+            layoutParams = LinearLayout.LayoutParams(UiHelper.dp(context, 125), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                rightMargin = UiHelper.dp(context, 8)
+            }
         }
-        onSourceTextCreated(sourcePill)
-        brandCol.addView(sourcePill)
-        row.addView(brandCol)
-
-        val srcChipBtn = TextView(context).apply {
-            text = "Nguồn ▾"
+        UiHelper.makeFocusableButton(source, UiHelper.COLOR_CARD, UiHelper.COLOR_RED, Color.WHITE, 999) { onOpenSources() }
+        onSourceTextCreated(source)
+        row.addView(source)
+        val search = TextView(context).apply {
+            text = "⌕"
+            textSize = 27f
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(UiHelper.dp(context, 12), UiHelper.dp(context, 7), UiHelper.dp(context, 12), UiHelper.dp(context, 7))
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { rightMargin = UiHelper.dp(context, 8) }
-        }
-        UiHelper.makeFocusableButton(
-            view = srcChipBtn,
-            normalBgColor = UiHelper.COLOR_CARD,
-            focusedBgColor = accentFor(currentSource),
-            focusedStrokeColor = Color.WHITE,
-            radiusDp = 999,
-            scaleOnFocus = 1.03f
-        ) { onOpenSources() }
-        row.addView(srcChipBtn)
-
-        val searchBtn = TextView(context).apply {
-            text = "🔍"
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             gravity = Gravity.CENTER
-            setPadding(UiHelper.dp(context, 11), UiHelper.dp(context, 6), UiHelper.dp(context, 11), UiHelper.dp(context, 6))
+            contentDescription = "Tìm kiếm"
+            layoutParams = LinearLayout.LayoutParams(UiHelper.dp(context, 40), UiHelper.dp(context, 40))
         }
-        UiHelper.makeFocusableButton(
-            view = searchBtn,
-            normalBgColor = UiHelper.COLOR_CARD,
-            focusedBgColor = UiHelper.COLOR_RED,
-            focusedStrokeColor = Color.WHITE,
-            radiusDp = 999,
-            scaleOnFocus = 1.03f
-        ) { onOpenSearch() }
-        row.addView(searchBtn)
-
-        wrapper.addView(row)
-        wrapper.addView(View(context).apply {
-            setBackgroundColor(UiHelper.COLOR_BORDER)
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, UiHelper.dp(context, 1))
-        })
-        return wrapper
+        UiHelper.makeFocusableButton(search, Color.TRANSPARENT, UiHelper.COLOR_CARD, Color.WHITE, 999) { onOpenSearch() }
+        row.addView(search)
+        return row
     }
 
     fun createMobileBottomNav(
@@ -226,12 +151,12 @@ object Phim4KUi {
             )
         }
 
-        data class NavItem(val key: String, val icon: String, val label: String)
+        data class NavItem(val key: String, val icon: Int, val label: String)
         val navItems = listOf(
-            NavItem("home", "🏠", "Trang chủ"),
-            NavItem("search", "🔍", "Tìm kiếm"),
-            NavItem("browse", "📂", "Thể loại"),
-            NavItem("sources", "⚡", "Nguồn")
+            NavItem("home", R.drawable.nav_home, "Trang chủ"),
+            NavItem("search", R.drawable.nav_search, "Tìm kiếm"),
+            NavItem("browse", R.drawable.nav_grid, "Thể loại"),
+            NavItem("sources", R.drawable.nav_tv, "Nguồn")
         )
 
         val accent = accentFor(currentSource)
@@ -261,10 +186,10 @@ object Phim4KUi {
                 }
             }
 
-            btn.addView(TextView(context).apply {
-                text = item.icon
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                gravity = Gravity.CENTER
+            btn.addView(ImageView(context).apply {
+                setImageResource(item.icon)
+                setColorFilter(if (active) accent else UiHelper.COLOR_TEXT_SECONDARY)
+                layoutParams = LinearLayout.LayoutParams(UiHelper.dp(context, 21), UiHelper.dp(context, 21))
             })
             btn.addView(TextView(context).apply {
                 text = item.label
@@ -402,7 +327,7 @@ object Phim4KUi {
         val heroFrame = FrameLayout(context).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                UiHelper.dp(context, if (isCompact) 244 else 214)
+                UiHelper.dp(context, if (isCompact) 380 else 330)
             ).apply {
                 bottomMargin = UiHelper.dp(context, if (isCompact) 14 else 16)
             }
@@ -413,7 +338,7 @@ object Phim4KUi {
 
         val backdropImage = ImageView(context).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
-            alpha = if (isCompact) 0.68f else 0.48f
+            alpha = 0.74f
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -501,33 +426,18 @@ object Phim4KUi {
             )
         }
 
-        val posterCard = ImageView(context).apply {
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            background = UiHelper.roundedBg(UiHelper.COLOR_SIDEBAR, 10, context, Color.parseColor("#44FFFFFF"), 1)
-            outlineProvider = ViewOutlineProvider.BACKGROUND
-            clipToOutline = true
-            layoutParams = LinearLayout.LayoutParams(
-                UiHelper.dp(context, if (isCompact) 78 else 110),
-                UiHelper.dp(context, if (isCompact) 114 else 160)
-            ).apply {
-                rightMargin = UiHelper.dp(context, if (isCompact) 12 else 18)
-            }
-        }
-        ImageLoader.load(posterCard, current.imageUrl, maxWidth = 220, maxHeight = 320)
-        contentRow.addView(posterCard)
-
         val infoStack = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = if (isCompact) Gravity.START else Gravity.CENTER_HORIZONTAL
+            gravity = Gravity.START
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
 
         val titleView = TextView(context).apply {
             text = current.title
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, if (isCompact) 16.5f else 19.5f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, if (isCompact) 28f else 32f)
             typeface = Typeface.DEFAULT_BOLD
-            gravity = if (isCompact) Gravity.START else Gravity.CENTER
+            gravity = Gravity.START
             maxLines = 2
             ellipsize = TextUtils.TruncateAt.END
         }
@@ -539,7 +449,7 @@ object Phim4KUi {
                 text = subText
                 setTextColor(Color.parseColor("#D0D5E4"))
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                gravity = Gravity.CENTER
+                gravity = Gravity.START
                 setSingleLine(true)
                 ellipsize = TextUtils.TruncateAt.END
                 setPadding(0, UiHelper.dp(context, 4), 0, 0)
@@ -548,13 +458,12 @@ object Phim4KUi {
 
         val badgeRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = if (isCompact) Gravity.START else Gravity.CENTER
+            gravity = Gravity.START
             setPadding(0, UiHelper.dp(context, if (isCompact) 6 else 8), 0, UiHelper.dp(context, if (isCompact) 9 else 11))
         }
 
         val yearMatch = Regex("""\b(19|20)\d{2}\b""").find(current.info)?.value
-            ?: if (current.source.isMovie) "2026" else "Mới"
-        badgeRow.addView(
+        if (yearMatch != null) badgeRow.addView(
             UiHelper.createBadge(context, yearMatch, Color.parseColor("#2BFFFFFF"), Color.WHITE).apply {
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -579,9 +488,20 @@ object Phim4KUi {
         )
         infoStack.addView(badgeRow)
 
+        if (current.summary.isNotBlank()) {
+            infoStack.addView(TextView(context).apply {
+                text = current.summary
+                setTextColor(UiHelper.COLOR_TEXT_SECONDARY)
+                textSize = 12f
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+                setPadding(0, 0, 0, UiHelper.dp(context, 12))
+            })
+        }
+
         val actionRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = if (isCompact) Gravity.START else Gravity.CENTER
+            gravity = Gravity.START
         }
 
         val detailBtn = TextView(context).apply {

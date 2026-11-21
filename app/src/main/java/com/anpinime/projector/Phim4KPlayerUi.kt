@@ -30,12 +30,12 @@ import androidx.annotation.DrawableRes
  */
 object Phim4KPlayerUi {
 
-    const val COLOR_PHIM4K_RED = 0xFFE50914.toInt()
-    const val COLOR_PHIM4K_RED_PRESSED = 0xFFB80710.toInt()
-    const val COLOR_PHIM4K_BLUE = 0xFFE50914.toInt()
-    const val COLOR_ACCENT_CYAN = 0xFFFF4D5A.toInt()
-    const val COLOR_GLASS_DARK = 0xEC060608.toInt()
-    const val COLOR_GLASS_SURFACE = 0xF5141216.toInt()
+    const val COLOR_PHIM4K_RED = 0xFFFF4355.toInt()
+    const val COLOR_PHIM4K_RED_PRESSED = 0xFFD8273F.toInt()
+    const val COLOR_PHIM4K_BLUE = 0xFFAC88FF.toInt()
+    const val COLOR_ACCENT_CYAN = 0xFFFF4355.toInt()
+    const val COLOR_GLASS_DARK = 0xEC07090D.toInt()
+    const val COLOR_GLASS_SURFACE = 0xF511141C.toInt()
 
     enum class AspectMode(val label: String) {
         FIT("Vừa màn hình"),

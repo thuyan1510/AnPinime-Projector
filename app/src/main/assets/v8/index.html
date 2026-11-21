@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src https: http:; media-src 'self'; base-uri 'none'; form-action 'none'">
+  <title>AnPinime</title>
+  <link rel="stylesheet" href="v8.css">
+</head>
+<body>
+
+<svg aria-hidden="true" style="width:0;height:0;position:absolute;overflow:hidden"><defs>
+<symbol id="i-home" viewbox="0 0 24 24"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z"></path></symbol>
+<symbol id="i-search" viewbox="0 0 24 24"><circle cx="10.8" cy="10.8" r="7"></circle><path d="m16 16 5 5"></path></symbol>
+<symbol id="i-grid" viewbox="0 0 24 24"><rect height="7" rx="1" width="7" x="3" y="3"></rect><rect height="7" rx="1" width="7" x="14" y="3"></rect><rect height="7" rx="1" width="7" x="3" y="14"></rect><rect height="7" rx="1" width="7" x="14" y="14"></rect></symbol>
+<symbol id="i-tv" viewbox="0 0 24 24"><rect height="14" rx="2" width="18" x="3" y="4"></rect><path d="M8 22h8m-4-4v4"></path></symbol>
+<symbol id="i-settings" viewbox="0 0 24 24"><path d="M12 3v2m0 14v2M3 12h2m14 0h2M5.6 5.6 7 7m10 10 1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"></path><circle cx="12" cy="12" r="4"></circle></symbol>
+<symbol id="i-play" viewbox="0 0 24 24"><path d="M8 4.5 20 12 8 19.5z"></path></symbol>
+<symbol id="i-pause" viewbox="0 0 24 24"><path d="M8 5v14M16 5v14"></path></symbol>
+<symbol id="i-plus" viewbox="0 0 24 24"><path d="M12 4v16M4 12h16"></path></symbol>
+<symbol id="i-check" viewbox="0 0 24 24"><path d="m4 12 5 5L20 6"></path></symbol>
+<symbol id="i-info" viewbox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v6m0-10v.5"></path></symbol>
+<symbol id="i-back" viewbox="0 0 24 24"><path d="m15 5-7 7 7 7M8 12h13"></path></symbol>
+<symbol id="i-next" viewbox="0 0 24 24"><path d="m5 5 10 7-10 7zm12 0v14"></path></symbol>
+<symbol id="i-rewind" viewbox="0 0 24 24"><path d="M12 5 4 12l8 7zM21 5l-8 7 8 7z"></path></symbol>
+<symbol id="i-forward" viewbox="0 0 24 24"><path d="m12 5 8 7-8 7zM3 5l8 7-8 7z"></path></symbol>
+<symbol id="i-chevron" viewbox="0 0 24 24"><path d="m9 6 6 6-6 6"></path></symbol>
+<symbol id="i-down" viewbox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></symbol>
+<symbol id="i-close" viewbox="0 0 24 24"><path d="M5 5 19 19M19 5 5 19"></path></symbol>
+<symbol id="i-list" viewbox="0 0 24 24"><path d="M9 6h12M9 12h12M9 18h12M3 6h2M3 12h2M3 18h2"></path></symbol>
+<symbol id="i-audio" viewbox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9zM17 9a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12"></path></symbol>
+<symbol id="i-sub" viewbox="0 0 24 24"><rect height="16" rx="3" width="20" x="2" y="4"></rect><path d="M6 13h5M6 16h8M14 13h4"></path></symbol>
+<symbol id="i-spark" viewbox="0 0 24 24"><path d="m12 2 2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z"></path></symbol>
+<symbol id="i-expand" viewbox="0 0 24 24"><path d="M4 10V4h6m4 0h6v6M4 14v6h6m4 0h6v-6"></path></symbol>
+<symbol id="i-refresh" viewbox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14-5L3 9m0-5v5h5M4 13a8 8 0 0 0 14 5l3-3m0 5v-5h-5"></path></symbol>
+</defs></svg>
+
+<div class="preview" data-mode="tv" id="preview"><div class="device" id="device"><div class="app-shell"><button class="tv-edge-trigger" id="tvEdge" type="button" aria-label="Mở menu TV" title="Di chuyển tới mép trái để mở menu"><span></span></button><aside class="tv-rail" id="tvRail"><div class="tv-brand-mark"><span class="wordmark-red">A</span><span class="wordmark-white">P</span></div><nav aria-label="Điều hướng TV" class="tv-nav" id="tvNav"></nav><div class="tv-source-caption">NGUỒN PHIM</div><div id="tvSourceNav" class="tv-source-nav" aria-label="Nguồn nội dung TV"></div><div class="tv-spacer"></div><button class="icon-only" data-act="settings" title="Cài đặt"><svg class="ico lg"><use href="#i-settings"></use></svg></button></aside><main class="tv-main"><div class="tv-header" id="tvHeader"></div><div class="mobile-top" id="mobileTop"></div><div class="mobile-body" id="mobileBody"></div><div class="tv-page" id="tvPage"></div><nav class="mobile-bottom" id="mobileBottom"></nav></main></div><div class="overlay hidden" id="overlay"></div><div aria-live="polite" class="toast" id="toast" role="status"></div><div id="splash" class="splash hidden" role="status" aria-live="polite" aria-label="Đang khởi động AnPinime">
+  <video id="splashTvVideo" class="splash-video splash-tv-video" muted playsinline preload="none" aria-label="Intro TV AnPinime">
+    <source src="intro-tv.mp4" type="video/mp4"/>
+  </video>
+  <video id="splashPhoneVideo" class="splash-video splash-phone-video" muted playsinline preload="none" aria-label="Intro điện thoại AnPinime">
+    <source src="intro-phone.mp4" type="video/mp4"/>
+  </video>
+</div></div></div></div>
+<script src="v8.js"></script>
+</body>
+</html>

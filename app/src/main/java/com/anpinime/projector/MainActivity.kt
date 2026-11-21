@@ -21,6 +21,8 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.VideoView
+import android.net.Uri
 import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -126,6 +128,7 @@ class MainActivity : AppCompatActivity() {
 
         fullScreenCol.addView(topHeaderBar)
         fullScreenCol.addView(contentContainer)
+        if (!isCompactPortrait) fullScreenCol.setPadding(UiHelper.dp(this, 62), 0, 0, 0)
         if (isCompactPortrait) {
             val navHost = FrameLayout(this).apply {
                 layoutParams = LinearLayout.LayoutParams(
@@ -139,6 +142,35 @@ class MainActivity : AppCompatActivity() {
         root.addView(fullScreenCol)
 
         if (!isCompactPortrait) {
+            val rail = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                setBackgroundColor(UiHelper.COLOR_SIDEBAR)
+                setPadding(0, UiHelper.dp(context, 14), 0, 0)
+                layoutParams = FrameLayout.LayoutParams(UiHelper.dp(context, 62), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.START)
+            }
+            rail.addView(TextView(this).apply {
+                text = "AP"
+                setTextColor(UiHelper.COLOR_RED)
+                textSize = 19f
+                typeface = Typeface.DEFAULT_BOLD
+                gravity = Gravity.CENTER
+                layoutParams = LinearLayout.LayoutParams(UiHelper.dp(context, 46), UiHelper.dp(context, 50))
+            })
+            listOf(Triple(R.drawable.nav_home, "Trang chủ", "home"), Triple(R.drawable.nav_search, "Tìm kiếm", "search"), Triple(R.drawable.nav_grid, "Danh mục", "browse"), Triple(R.drawable.nav_tv, "Nguồn phim", "sources")).forEach { (icon, label, tab) ->
+                val button = ImageView(this).apply {
+                    setImageResource(icon)
+                    setColorFilter(Color.WHITE)
+                    contentDescription = label
+                    setPadding(UiHelper.dp(context, 12), UiHelper.dp(context, 12), UiHelper.dp(context, 12), UiHelper.dp(context, 12))
+                    layoutParams = LinearLayout.LayoutParams(UiHelper.dp(context, 48), UiHelper.dp(context, 48))
+                }
+                UiHelper.makeFocusableButton(button, Color.TRANSPARENT, UiHelper.COLOR_CARD, Color.WHITE, 10) {
+                    if (tab == "sources") openSidebar() else navigateToTab(tab)
+                }
+                rail.addView(button)
+            }
+            root.addView(rail)
             // Left Edge Thin Hint Strip (3dp) so TV/Projector user knows left edge opens Sidebar
             val leftEdgeHint = View(this).apply {
                 background = GradientDrawable(
@@ -180,6 +212,8 @@ class MainActivity : AppCompatActivity() {
 
         setContentView(root)
 
+        if (savedInstanceState == null) showIntro(root)
+
         updateSidebarState()
         loadHomeData()
 
@@ -191,6 +225,34 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    private fun showIntro(root: FrameLayout) {
+        val overlay = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+            isClickable = true
+            isFocusable = true
+        }
+        val video = VideoView(this)
+        overlay.addView(video, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER
+        ))
+        root.addView(overlay, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        var finished = false
+        fun finishIntro() {
+            if (finished) return
+            finished = true
+            video.stopPlayback()
+            root.removeView(overlay)
+        }
+        video.setOnCompletionListener { finishIntro() }
+        video.setOnErrorListener { _, _, _ -> finishIntro(); true }
+        overlay.postDelayed({ finishIntro() }, 4650L)
+        val resource = if (BuildConfig.IS_PHONE_FLAVOR) R.raw.intro_phone else R.raw.intro_tv
+        video.setVideoURI(Uri.parse("android.resource://$packageName/$resource"))
+        video.setOnPreparedListener { player -> player.setVolume(0f, 0f); video.start() }
     }
 
     override fun onResume() {
@@ -827,12 +889,6 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
-        Phim4KUi.createQuickCategoryStrip(this, homeSections, currentSource) { cat ->
-            currentTab = "browse"
-            updateSidebarState()
-            openCategoryBrowse(cat)
-        }?.let { mainCol.addView(it) }
-
         for (section in homeSections) {
             mainCol.addView(buildSectionRow(section))
         }
@@ -859,21 +915,25 @@ class MainActivity : AppCompatActivity() {
             setPadding(UiHelper.dp(context, 4), 0, UiHelper.dp(context, 4), UiHelper.dp(context, 8))
         }
 
-        headerRow.addView(View(this).apply {
-            background = UiHelper.roundedBg(accent, 4, context)
-            layoutParams = LinearLayout.LayoutParams(UiHelper.dp(context, 4), UiHelper.dp(context, 16)).apply {
-                rightMargin = UiHelper.dp(context, 8)
-            }
+        val heading = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        heading.addView(TextView(this).apply {
+            text = "KHÁM PHÁ"
+            setTextColor(accent)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+            typeface = Typeface.DEFAULT_BOLD
+            letterSpacing = 0.12f
         })
-
         val titleView = TextView(this).apply {
             text = section.title
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, if (isCompactPortrait) 16f else 17.5f)
             typeface = Typeface.DEFAULT_BOLD
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-        headerRow.addView(titleView)
+        heading.addView(titleView)
+        headerRow.addView(heading)
 
         if (!section.categoryPath.isNullOrBlank()) {
             val moreBtn = TextView(this).apply {
@@ -971,6 +1031,21 @@ class MainActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         }
+
+        mainCol.addView(TextView(this).apply {
+            text = "TÌM KIẾM / ${currentSource.title.uppercase()}"
+            setTextColor(Phim4KUi.accentFor(currentSource))
+            textSize = 10f
+            letterSpacing = 0.12f
+            typeface = Typeface.DEFAULT_BOLD
+        })
+        mainCol.addView(TextView(this).apply {
+            text = "Tìm phim và anime"
+            setTextColor(Color.WHITE)
+            textSize = 25f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, UiHelper.dp(context, 5), 0, UiHelper.dp(context, 12))
+        })
 
         val searchBarRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL

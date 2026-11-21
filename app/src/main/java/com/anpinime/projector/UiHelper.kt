@@ -19,16 +19,16 @@ import android.widget.ProgressBar
 import android.widget.TextView
 
 object UiHelper {
-    val COLOR_BG = Color.parseColor("#060608")
-    val COLOR_SIDEBAR = Color.parseColor("#0C0B0E")
-    val COLOR_CARD = Color.parseColor("#141216")
-    val COLOR_SURFACE_HIGH = Color.parseColor("#241418")
-    val COLOR_BORDER = Color.parseColor("#28FF2A36")
-    val COLOR_ACCENT = Color.parseColor("#E50914")
-    val COLOR_BLUE = Color.parseColor("#FF2A36")
+    val COLOR_BG = Color.parseColor("#07090D")
+    val COLOR_SIDEBAR = Color.parseColor("#11141C")
+    val COLOR_CARD = Color.parseColor("#191D27")
+    val COLOR_SURFACE_HIGH = Color.parseColor("#191D27")
+    val COLOR_BORDER = Color.parseColor("#15FFFFFF")
+    val COLOR_ACCENT = Color.parseColor("#FF4355")
+    val COLOR_BLUE = Color.parseColor("#AC88FF")
     val COLOR_YELLOW = Color.parseColor("#F5C518")
-    val COLOR_RED = Color.parseColor("#E50914")
-    val COLOR_TEXT_SECONDARY = Color.parseColor("#B5ACB0")
+    val COLOR_RED = Color.parseColor("#FF4355")
+    val COLOR_TEXT_SECONDARY = Color.parseColor("#9BA4B6")
 
     fun isCompactPortrait(context: Context): Boolean =
         BuildConfig.IS_PHONE_FLAVOR ||
