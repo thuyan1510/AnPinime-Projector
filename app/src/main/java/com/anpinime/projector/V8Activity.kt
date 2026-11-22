@@ -128,36 +128,28 @@ class V8Activity : AppCompatActivity() {
                                 JSONObject().put("index", index).put("title", episode.title)
                                     .put("group", episode.season).put("number", episode.number)
                             }))
-                            .put("servers", JSONArray(
-                                if (anime.source == ContentSource.AETHER) AetherSourceResolver.SERVERS.map {
-                                    JSONObject().put("id", it.id).put("label", it.name)
-                                } else emptyList()
-                            ))
                     }
                     "play" -> {
                         val (anime, loaded) = requireNotNull(detail)
                         require(anime.url == request.optString("url") && anime.source == source)
                         val selected = loaded.episodes[request.getInt("index")]
-                        val provider = request.optString("server", "auto")
-                        val chosen = if (anime.source == ContentSource.AETHER) {
-                            AetherSourceResolver.SERVERS.firstOrNull { it.id == provider }
-                                ?.let { selected.copy(episodeKey = it.id, serverName = it.name) } ?: selected
-                        } else selected
                         ImageLoader.trimMemory()
                         startActivity(Intent(this@V8Activity, PlayerActivity::class.java).apply {
                             putExtra("movie_title", loaded.title.ifBlank { anime.title })
-                            putExtra("episode_json", chosen.toJsonObject().toString())
+                            putExtra("episode_json", selected.toJsonObject().toString())
                             putExtra("all_episodes_json", Episode.toJsonArray(loaded.episodes))
-                            putExtra("v8", true)
+                            putExtra("catalog_preferences", true)
                         })
                         null
                     }
                     "openMiruro" -> {
                         require(source == ContentSource.MIRURO)
-                        val url = MiruroCatalog.watchPageUrl(request.getString("url"))
-                            ?: error("Không tìm thấy trang xem Miruro.")
+                        val (id, slug) = MiruroCatalog.extractWatchIdAndSlug(request.getString("url"))
+                        require(id.isNotBlank())
+                        val url = Uri.parse(MiruroCatalog.DEFAULT_BASE_URL).buildUpon()
+                            .appendPath("watch").appendPath(id).appendPath(slug).build()
                         try {
-                            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                            startActivity(Intent(Intent.ACTION_VIEW, url))
                         } catch (_: ActivityNotFoundException) {
                             error("Thiết bị chưa có trình duyệt để mở trang xem.")
                         }

@@ -386,3 +386,59 @@ body.app-player .player-actions .control-btn.active { border-color:var(--accent)
 .app-player .preview[data-mode="phone"].is-playing .overlay {
     backdrop-filter: none;
 }
+
+/* The TV WebView lays out a 1024-wide canvas and fits it to the display. */
+.preview[data-mode="tv"] .tv-home .hero { height: 46vh !important; min-height: 212px }
+.preview[data-mode="tv"] .tv-home .hero-fog { display: none }
+.preview[data-mode="tv"] .tv-home .hero-title {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.preview[data-mode="tv"] .poster-row {
+    gap: 12px; align-items: flex-start; padding: 6px 4px 12px; scroll-snap-type: none;
+}
+.preview[data-mode="tv"] .tv-home .poster { flex: 0 0 calc((100% - 72px) / 7) }
+.preview[data-mode="tv"] .grid-cards { grid-template-columns: repeat(7, minmax(0, 1fr)); align-items: start }
+.preview[data-mode="tv"] .poster-art {
+    width: 100%; height: 0; padding-top: 148%; aspect-ratio: auto; box-shadow: none;
+}
+.preview[data-mode="tv"] .poster-art img { transform: none; transition: none }
+.preview[data-mode="tv"] .poster-note, .preview[data-mode="tv"] .poster-title {
+    display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.preview[data-mode="tv"] button:focus { outline: 3px solid white; outline-offset: 1px; box-shadow: none }
+.preview[data-mode="tv"] .poster:hover .poster-art { border-color: white }
+.preview[data-mode="tv"] .tv-rail[aria-hidden="true"] { visibility: hidden }
+.preview[data-mode="tv"] .tv-rail { overflow-y: auto; transition: none }
+.preview[data-mode="tv"] .detail-banner { position: absolute; inset: 0 0 auto; height: 63vh; pointer-events: none }
+.preview[data-mode="tv"] .detail-layout { margin: 0; padding: max(66px, 13vh) 4% 28px }
+.preview[data-mode="tv"] .detail-top { align-items: center; gap: 28px }
+.preview[data-mode="tv"] .detail-cover {
+    width: 28vh; height: 41vh; border-radius: 10px; box-shadow: none;
+}
+.preview[data-mode="tv"] .detail-summary { min-width: 0; padding: 0; flex: 1 }
+.preview[data-mode="tv"] .detail-summary h1,
+.preview[data-mode="tv"] .detail-summary p {
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+}
+.preview[data-mode="tv"] .detail-summary h1 { font-size: 34px; line-height: 1.08; margin: 8px 0 }
+.preview[data-mode="tv"] .detail-summary p { font-size: 14px; line-height: 1.45; margin: 10px 0 14px }
+.preview[data-mode="tv"] .detail-summary .hero-sub { max-height: 34px; overflow: hidden }
+.preview[data-mode="tv"] .block-panel { margin-top: 18px; padding: 15px 20px }
+.preview[data-mode="tv"] .block-title { margin: 0 0 6px; font-size: 17px }
+.preview[data-mode="tv"] .block-panel .tag-row { flex-wrap: nowrap; padding: 3px 3px 8px }
+.preview[data-mode="tv"] .episode-grid { grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 8px }
+.preview[data-mode="tv"] .ep-btn { white-space: nowrap; text-overflow: ellipsis; overflow: hidden }
+.preview[data-mode="tv"] .splash { transition: none }
+.splash-mark { display: none }
+.preview[data-mode="tv"] .splash-mark {
+    display: block; font-size: 40px; font-weight: 900; letter-spacing: -.06em; color: white;
+}
+.preview[data-mode="phone"] .splash-phone-video { inset: 15%; width: 70%; height: 70% }
+.preview[data-mode="phone"] .mobile-detail-desc {
+    display: -webkit-box !important; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.cta[aria-disabled="true"] { opacity: .65 }
+.preview[data-mode="tv"] .poster:hover { outline: 2px solid #fff; outline-offset: 1px }
+.preview[data-mode="tv"] .using-mouse button:focus:not(:hover) { box-shadow: none; outline: none }
+.preview[data-mode="tv"] .using-mouse .tv-nav-row:hover,
+.preview[data-mode="tv"] .using-mouse .tv-source-row:hover { background: #39222b }

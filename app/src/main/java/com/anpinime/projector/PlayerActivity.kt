@@ -2,8 +2,6 @@ package com.anpinime.projector
 
 import android.annotation.SuppressLint
 import android.app.Dialog
-import android.content.ActivityNotFoundException
-import android.content.Intent
 import android.content.res.ColorStateList
 import java.io.File
 import android.graphics.Color
@@ -29,7 +27,6 @@ import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.JsResult
 import android.webkit.WebChromeClient
-import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
@@ -231,17 +228,6 @@ class PlayerActivity : AppCompatActivity() {
     private var currentFocusedHint: String = ""
     private var osdVisible = true
     private var selectionDialog: Dialog? = null
-    private var v8Hud: V8WebView? = null
-    private var v8Choice: ((Int) -> Unit)? = null
-    private var v8ChoiceCount = 0
-    private var v8SelectionOpen = false
-    private var v8Ready = false
-    private lateinit var gestureLayer: View
-    private lateinit var webControlsButton: TextView
-    private var webNeedsInput = false
-    private var lastV8State: String? = null
-    private var lastSentHudVisible = true
-    private var miruroDirectStream: ResolvedPlayback? = null
 
     private fun isAetherEpisode(ep: Episode = currentEpisode): Boolean {
         return ep.source == ContentSource.AETHER || ep.playbackKind.startsWith("aether", ignoreCase = true)
@@ -270,7 +256,7 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private val hideOsdRunnable = Runnable {
-        if (selectionDialog == null && !v8SelectionOpen && !scrubbing && pendingSeekTargetMs < 0L &&
+        if (selectionDialog == null && !scrubbing && pendingSeekTargetMs < 0L &&
             !sidePanelVisible &&
             (exoPlayer?.isPlaying == true || fallbackWebView != null)) {
             hideOsd()
@@ -361,14 +347,12 @@ class PlayerActivity : AppCompatActivity() {
         allEpisodes = Episode.fromJsonArray(allRaw)
             .filter { it.source == currentEpisode.source }.ifEmpty { listOf(currentEpisode) }
 
-        if (intent.getBooleanExtra("v8", false)) {
+        if (intent.getBooleanExtra("catalog_preferences", false)) {
             val prefs = getSharedPreferences("anpinime_v8_playback", MODE_PRIVATE)
-            currentQualityMode = prefs.getInt("quality", 0).coerceIn(0, 2)
-            subtitleScaleMode = prefs.getInt("subtitleSize", 2).coerceIn(0, 3)
-            currentAspectMode = Phim4KPlayerUi.AspectMode.entries.getOrElse(prefs.getInt("aspect", 0)) {
-                Phim4KPlayerUi.AspectMode.FIT
-            }
-            currentPlaybackSpeed = listOf(0.75f, 1f, 1.25f, 1.5f, 2f).getOrElse(prefs.getInt("speed", 1)) { 1f }
+            currentQualityMode = prefs.getInt("quality", currentQualityMode).coerceIn(0, 2)
+            subtitleScaleMode = prefs.getInt("subtitleSize", subtitleScaleMode).coerceIn(0, 3)
+            currentAspectMode = Phim4KPlayerUi.AspectMode.entries.getOrElse(prefs.getInt("aspect", 0)) { currentAspectMode }
+            currentPlaybackSpeed = listOf(0.75f, 1f, 1.25f, 1.5f, 2f).getOrElse(prefs.getInt("speed", 1)) { currentPlaybackSpeed }
         }
         buildUi()
         applySubtitleScale()
@@ -398,7 +382,6 @@ class PlayerActivity : AppCompatActivity() {
         applyImmersiveFullscreen()
         WebViewHelper.registerActivity(this)
         fallbackWebView?.onResume()
-        v8Hud?.onResume()
     }
 
     override fun onStop() {
@@ -406,7 +389,6 @@ class PlayerActivity : AppCompatActivity() {
         exoPlayer?.pause()
         sendWebCommand("pause")
         fallbackWebView?.onPause()
-        v8Hud?.onPause()
     }
 
     override fun onDestroy() {
@@ -416,11 +398,6 @@ class PlayerActivity : AppCompatActivity() {
         translateSubJob?.cancel()
         uiScope.cancel()
         selectionDialog?.dismiss()
-        v8Hud?.let {
-            (it.parent as? ViewGroup)?.removeView(it)
-            it.destroy()
-        }
-        v8Hud = null
         releasePlayer()
         destroyWebPlayer()
     }
@@ -458,7 +435,6 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun findWebFallbackUrl(ep: Episode, preferredWebUrl: String = lastWebUrl): String {
         val candidates = listOf(preferredWebUrl, ep.refererUrl, ep.url)
-            .filterNot { it == ep.detailUrl || (it == ep.url && ep.playbackKind == "catalog_episode") }
         for (cand in candidates) {
             if (!cand.startsWith("http", ignoreCase = true)) continue
             if (cand.contains("embed", ignoreCase = true) ||
@@ -476,8 +452,6 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun setWebSurfaceVisible(visible: Boolean, focusable: Boolean = false) {
-        webNeedsInput = visible && focusable
-        refreshWebInteraction()
         if (visible) {
             if (::surfaceView.isInitialized) {
                 surfaceView.visibility = View.GONE
@@ -514,25 +488,6 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
-    private fun refreshWebInteraction() {
-        val pageHasInput = webNeedsInput || aetherMenuOpen
-        if (::gestureLayer.isInitialized) gestureLayer.visibility = if (pageHasInput) View.GONE else View.VISIBLE
-        if (::webControlsButton.isInitialized) {
-            webControlsButton.visibility = if (webNeedsInput && !aetherMenuOpen) View.VISIBLE else View.GONE
-        }
-        v8Hud?.visibility = if (pageHasInput) View.INVISIBLE else View.VISIBLE
-        if (::osdContainer.isInitialized) {
-            osdContainer.visibility = if (pageHasInput || v8Ready || !osdVisible) View.GONE else View.VISIBLE
-        }
-    }
-
-    private fun restorePlaybackControls() {
-        if (fallbackWebView == null) return
-        setWebSurfaceVisible(true)
-        showOsd(focusPlayButton = true)
-        if (v8Ready) v8Hud?.requestFocus()
-    }
-
     private fun destroyWebPlayer(force: Boolean = true) {
         if (!force && isAetherEpisode() && fallbackWebView != null) {
             // Keep the hidden WebView running in background for AI subtitle translation and fast failover
@@ -543,10 +498,7 @@ class PlayerActivity : AppCompatActivity() {
             )
             return
         }
-        if (aetherMenuOpen) {
-            aetherMenuOpen = false
-            v8Hud?.visibility = View.VISIBLE
-        }
+        aetherMenuOpen = false
         val wv = fallbackWebView
         fallbackWebView = null
         setWebSurfaceVisible(false)
@@ -635,31 +587,6 @@ class PlayerActivity : AppCompatActivity() {
             }
         }
 
-        if (webNeedsInput && !aetherMenuOpen && selectionDialog == null) {
-            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                when (keyCode) {
-                    KeyEvent.KEYCODE_MENU -> { restorePlaybackControls(); return true }
-                    KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_ESCAPE -> { finish(); return true }
-                }
-            }
-            return super.dispatchKeyEvent(event)
-        }
-        if (v8Ready && selectionDialog == null) {
-            val hud = v8Hud
-            val action = event.action == KeyEvent.ACTION_DOWN
-            if (keyCode == KeyEvent.KEYCODE_BACK || keyCode == KeyEvent.KEYCODE_ESCAPE) {
-                if (action && event.repeatCount == 0) hud?.emit("back")
-                return true
-            }
-            if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER && hud?.hasFocus() == true) {
-                if (action && event.repeatCount == 0) hud.emit("activate")
-                return true
-            }
-            if (keyCode in KeyEvent.KEYCODE_DPAD_UP..KeyEvent.KEYCODE_DPAD_RIGHT) {
-                if (action) scheduleHideOsd()
-                return super.dispatchKeyEvent(event)
-            }
-        }
         if (event.action == KeyEvent.ACTION_UP && keyCode == seekGestureKey) {
             seekGestureKey = -1
             return true
@@ -943,7 +870,7 @@ class PlayerActivity : AppCompatActivity() {
                 }
             }
         )
-        gestureLayer = View(this).apply {
+        val gestureLayer = View(this).apply {
             isFocusable = false
             isFocusableInTouchMode = false
             isClickable = true
@@ -1548,120 +1475,7 @@ class PlayerActivity : AppCompatActivity() {
         updateSourceSpecificOsdButtons()
         updateTopStatusBadges()
         playPauseBtn.requestFocus()
-        if (intent.getBooleanExtra("v8", false) && V8WebView.supported()) {
-            val hud = V8WebView(this, media = true, receive = ::handleV8Player)
-            v8Hud = hud
-            root.addView(hud, FrameLayout.LayoutParams(-1, -1))
-            hud.open("player")
-        }
-        webControlsButton = TextView(this).apply {
-            text = "Điều khiển"
-            textSize = 12f
-            setTextColor(Color.WHITE)
-            setPadding(UiHelper.dp(context, 12), UiHelper.dp(context, 8), UiHelper.dp(context, 12), UiHelper.dp(context, 8))
-            layoutParams = FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).apply {
-                topMargin = UiHelper.dp(context, 8)
-                marginEnd = UiHelper.dp(context, 10)
-            }
-            visibility = View.GONE
-        }
-        UiHelper.makeFocusableButton(webControlsButton, radiusDp = 10, onClick = ::restorePlaybackControls)
-        root.addView(webControlsButton)
         scheduleHideOsd()
-    }
-
-    private fun handleV8Player(request: JSONObject, reply: (JSONObject) -> Unit) {
-        if (isFinishing || isDestroyed) return
-        val action = request.optString("action")
-        if (action != "menuOpened" && action != "choice" && v8Choice == null) clearV8Selection()
-        when (action) {
-            "ready" -> {
-                v8Ready = true
-                refreshWebInteraction()
-                if (!webNeedsInput) v8Hud?.requestFocus()
-            }
-            "exit" -> finish()
-            "back" -> if (osdVisible && isCurrentlyPlaying()) hideOsd() else finish()
-            "toggleHud" -> if (osdVisible) hideOsd() else showOsd()
-            "togglePlay" -> togglePlayPause()
-            "rewind" -> { seekRelative(-10_000L); showOsd() }
-            "forward" -> { seekRelative(10_000L); showOsd() }
-            "seek" -> {
-                val duration = exoPlayer?.duration?.takeIf { it > 0L } ?: webDurationMs
-                if (duration > 0L) {
-                    pendingSeekTargetMs = request.optLong("seconds").coerceIn(0L, duration / 1_000L) * 1_000L
-                    commitPendingSeek()
-                }
-            }
-            "next" -> playNextEpisode()
-            "episodes" -> {
-                val episodes = allEpisodes.filter { it.season == currentEpisode.season }
-                val selected = episodes.indexOfFirst { it.number == currentEpisode.number && it.title == currentEpisode.title }
-                showSelection("Danh sách tập", episodes.map { it.title }, selected) { index ->
-                    episodes.getOrNull(index)?.let { startEpisodePlayback(it, resetPosition = true) }
-                }
-            }
-            "server" -> showServerPicker()
-            "subtitle" -> showTrackPicker(C.TRACK_TYPE_TEXT)
-            "translate" -> triggerAetherVietnameseTranslation()
-            "audio" -> showTrackPicker(C.TRACK_TYPE_AUDIO)
-            "aspect" -> showAspectModePicker()
-            "settings" -> showSettingsMenu()
-            "menuOpened" -> v8SelectionOpen = true
-            "choice" -> {
-                val index = request.optInt("index", -1)
-                val callback = v8Choice
-                val valid = index in 0 until v8ChoiceCount
-                clearV8Selection()
-                if (valid) callback?.invoke(index)
-            }
-            "dismiss" -> clearV8Selection()
-            else -> {
-                reply(JSONObject().put("error", "Thao tác không hỗ trợ."))
-                return
-            }
-        }
-        scheduleHideOsd()
-        sendV8State()
-        reply(JSONObject().put("data", if (action == "ready") v8PlayerState() else JSONObject.NULL))
-    }
-
-    private fun sendV8State() {
-        val hud = v8Hud ?: return
-        if (!v8Ready || hud.visibility != View.VISIBLE) return
-        if (!osdVisible && !lastSentHudVisible) return
-        lastSentHudVisible = osdVisible
-        val state = v8PlayerState()
-        val serialized = state.toString()
-        if (serialized == lastV8State) return
-        lastV8State = serialized
-        hud.emit("player", state)
-    }
-
-    private fun v8PlayerState(): JSONObject {
-        val player = exoPlayer
-        val duration = player?.duration?.takeIf { it > 0L } ?: webDurationMs
-        val position = pendingSeekTargetMs.takeIf { it >= 0L } ?: player?.currentPosition ?: webPositionMs
-        val episodes = allEpisodes.filter { it.season == currentEpisode.season }
-        val index = episodes.indexOfFirst { it.number == currentEpisode.number && it.title == currentEpisode.title }
-        return JSONObject()
-            .put("title", movieTitle)
-            .put("episode", currentEpisode.title)
-            .put("source", currentEpisode.source.id)
-            .put("server", currentEpisode.serverName.ifBlank { currentEpisode.season })
-            .put("quality", topQualityBadge.text.toString().substringBefore(" · "))
-            .put("playing", isCurrentlyPlaying())
-            .put("translated", viLiveSubActive)
-            .put("next", index in 0 until episodes.lastIndex)
-            .put("position", position)
-            .put("duration", duration)
-            .put("hud", osdVisible)
-    }
-
-    private fun clearV8Selection() {
-        v8Choice = null
-        v8ChoiceCount = 0
-        v8SelectionOpen = false
     }
 
     private fun isCurrentlyPlaying(): Boolean {
@@ -2039,8 +1853,6 @@ class PlayerActivity : AppCompatActivity() {
         releasePlayer()
         preferSoftwareAudio = false
         currentEpisode = episode
-        lastWebUrl = ""
-        miruroDirectStream = null
         visitedFrames.clear()
         webPositionMs = 0L
         webDurationMs = 0L
@@ -2135,13 +1947,10 @@ class PlayerActivity : AppCompatActivity() {
                         topServerText.text = "${episode.title} • Nguồn $pName"
                     }
                 }
-                lastWebUrl = resolved.webUrl
+                lastWebUrl = resolved.webUrl.ifBlank { episode.url }
                 attemptedStreamUrls.add(resolved.url)
                 if (resolved.isWeb && !aetherMode && !miruroMode) {
                     val resumeSeekMs = if (resetPosition) 0L else initialPositionMs
-                    if (episode.source == ContentSource.KKPHIM && episode.directUrl != resolved.url) {
-                        attemptedStreamUrls.add(episode.directUrl)
-                    }
                     startWebFallback(resolved.url, resolved.headers["Referer"] ?: episode.url, resumeSeekMs)
                     return@launch
                 }
@@ -2180,7 +1989,6 @@ class PlayerActivity : AppCompatActivity() {
                 if (resolved.mediaKind == StreamMediaKind.MKV || playUrl.lowercase().contains(".mkv")) {
                     preferSoftwareAudio = true
                 }
-                if (miruroMode && !needsRelay && hlsHint) miruroDirectStream = resolved
                 prepareExoPlayer(
                     streamUrl = playUrl,
                     headers = if (needsRelay) emptyMap() else resolved.headers,
@@ -2197,8 +2005,6 @@ class PlayerActivity : AppCompatActivity() {
                         val ref = episode.detailUrl.takeIf { it.startsWith("http", ignoreCase = true) }
                             ?: episode.url
                         startWebFallback(fallbackUrl, ref, allowNativeHandoff = false)
-                    } else if (isMiruroEpisode(episode)) {
-                        showMiruroPlaybackOptions()
                     } else {
                         loadingOverlay.visibility = View.VISIBLE
                         loadingText.text = "Không tải được luồng phát: ${t.message ?: "Nguồn tạm thời không phản hồi"}\nBấm phím Lên/Xuống -> Đổi Server khác."
@@ -2481,23 +2287,6 @@ class PlayerActivity : AppCompatActivity() {
             override fun onPlayerError(error: PlaybackException) {
                 if (exoPlayer !== player) return
                 val lastPos = player.currentPosition.coerceAtLeast(0L)
-                val directMiruro = miruroDirectStream
-                if (directMiruro != null && error.errorCode in 3000..3999) {
-                    miruroDirectStream = null
-                    mainHandler.post {
-                        if (exoPlayer !== player) return@post
-                        val relay = FilmMediaRelay(directMiruro.headers, MiruroSourceResolver.USER_AGENT)
-                        val proxy = runCatching { relay.start(directMiruro.url, isHlsHint = true) }.getOrNull()
-                        if (proxy == null) {
-                            relay.stop()
-                            if (!trySwitchToBackupServer(lastPos)) showMiruroPlaybackOptions()
-                        } else {
-                            filmRelay = relay
-                            prepareExoPlayer(proxy, emptyMap(), lastPos, directMiruro.mediaKind, directMiruro.subtitles)
-                        }
-                    }
-                    return
-                }
                 if (error.errorCode in 5000..5999) {
                     mainHandler.post { if (exoPlayer === player) startCompatibilityPlayback(lastPos) }
                     return
@@ -2506,15 +2295,6 @@ class PlayerActivity : AppCompatActivity() {
                     mainHandler.post {
                         if (exoPlayer !== player) return@post
                         if (!trySwitchToBackupServer(lastPos)) {
-                            if (isMiruroEpisode()) {
-                                showMiruroPlaybackOptions()
-                                return@post
-                            }
-                            val fallbackUrl = findWebFallbackUrl(currentEpisode)
-                            if (currentEpisode.source == ContentSource.KKPHIM && fallbackUrl.isNotBlank()) {
-                                startWebFallback(fallbackUrl, MovieSourceDirectory.DEFAULT_KKPHIM_BASE_URL, lastPos, false)
-                                return@post
-                            }
                             loadingText.text = "Máy không giải mã được luồng này. Hãy chọn server khác."
                             loadingOverlay.visibility = View.VISIBLE
                             showOsd(true)
@@ -2534,13 +2314,10 @@ class PlayerActivity : AppCompatActivity() {
                         if (exoPlayer !== player) return@post
                         if (isAetherEpisode() || isMiruroEpisode()) {
                             if (!trySwitchToBackupServer(lastPos)) {
-                                if (isMiruroEpisode()) {
-                                    showMiruroPlaybackOptions()
-                                } else {
-                                    loadingOverlay.visibility = View.VISIBLE
-                                    loadingText.text = "Các máy chủ Thúy An tạm thời gián đoạn.\nHãy chọn [Đổi Server] ở thanh bên dưới."
-                                    showOsd(focusPlayButton = true)
-                                }
+                                loadingOverlay.visibility = View.VISIBLE
+                                val srcLabel = if (isMiruroEpisode()) "Anime Miruro" else "Thúy An"
+                                loadingText.text = "Các máy chủ $srcLabel tạm thời gián đoạn.\nHãy chọn [Đổi Server] ở thanh bên dưới."
+                                showOsd(focusPlayButton = true)
                             }
                             return@post
                         }
@@ -2586,28 +2363,6 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun showMiruroPlaybackOptions() {
-        loadingProviderBadge.visibility = View.GONE
-        loadingProgressBar.visibility = View.GONE
-        loadingOverlay.visibility = View.VISIBLE
-        loadingText.text = "Miruro chưa trả luồng phát khả dụng."
-        showOsd(focusPlayButton = true)
-        val watch = MiruroCatalog.watchPageUrl(currentEpisode.url, currentEpisode.number)
-        val actions = if (watch == null) listOf("Thử lại") else listOf("Thử lại", "Mở trang xem Miruro")
-        showSelection("Chưa phát được tập Miruro", actions, -1) { option ->
-            if (option == 0) {
-                currentMiruroServerKey = "auto"
-                startEpisodePlayback(currentEpisode.copy(episodeKey = "auto"), resetPosition = true)
-            } else if (watch != null) {
-                try {
-                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(watch)))
-                } catch (_: ActivityNotFoundException) {
-                    showPlayerMessage("Miruro", "Thiết bị chưa có trình duyệt để mở trang xem.")
-                }
-            }
-        }
-    }
-
     private fun startWebFallback(
         webUrl: String,
         referer: String,
@@ -2837,7 +2592,7 @@ class PlayerActivity : AppCompatActivity() {
                 mainHandler.post {
                     if (fallbackWebView !== wv) return@post
                     if (exoPlayer == null) {
-                        // A web page may still need an explicit Play click even after its video element exists.
+                        setWebSurfaceVisible(true)
                         loadingOverlay.visibility = View.GONE
                     }
                     applySubtitleScale()
@@ -2888,11 +2643,10 @@ class PlayerActivity : AppCompatActivity() {
                 mainHandler.post {
                     if (fallbackWebView !== wv) return@post
                     if (exoPlayer == null && duration > 0.5 && position > 0.0 &&
-                        (webNeedsInput || loadingOverlay.visibility == View.VISIBLE || headlessWebContainer.visibility != View.VISIBLE || wv.visibility != View.VISIBLE)
+                        (loadingOverlay.visibility == View.VISIBLE || headlessWebContainer.visibility != View.VISIBLE || wv.visibility != View.VISIBLE)
                     ) {
                         setWebSurfaceVisible(true)
                         loadingOverlay.visibility = View.GONE
-                        if (v8Ready) v8Hud?.requestFocus()
                     }
                     webPositionMs = (position * 1000).toLong().coerceAtLeast(0)
                     webDurationMs = (duration * 1000).toLong().coerceAtLeast(0)
@@ -2908,8 +2662,6 @@ class PlayerActivity : AppCompatActivity() {
                     if (fallbackWebView !== wv) return@post
                     val wasOpen = aetherMenuOpen
                     aetherMenuOpen = isOpen
-                    refreshWebInteraction()
-                    if (!isOpen && v8Ready && !webNeedsInput) v8Hud?.requestFocus()
                     if (isOpen) {
                         setWebSurfaceVisible(true)
                         loadingOverlay.visibility = View.GONE
@@ -3540,23 +3292,6 @@ class PlayerActivity : AppCompatActivity() {
                 return null
             }
 
-            private fun reportWebFailure(view: WebView?, code: Int) {
-                if (aetherMode || fallbackWebView !== view) return
-                restorePlaybackControls()
-                loadingOverlay.visibility = View.VISIBLE
-                loadingText.text = "Không tải được trình phát web ($code). Hãy thử lại hoặc chọn server khác."
-            }
-
-            override fun onReceivedHttpError(view: WebView?, request: WebResourceRequest?, response: WebResourceResponse?) {
-                super.onReceivedHttpError(view, request, response)
-                if (request?.isForMainFrame == true) reportWebFailure(view, response?.statusCode ?: 0)
-            }
-
-            override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
-                super.onReceivedError(view, request, error)
-                if (request?.isForMainFrame == true) reportWebFailure(view, error?.errorCode ?: 0)
-            }
-
             override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                 super.onPageStarted(view, url, favicon)
                 view?.evaluateJavascript(activeScript, null)
@@ -3599,9 +3334,7 @@ class PlayerActivity : AppCompatActivity() {
         headlessWebContainer.removeAllViews()
         headlessWebContainer.addView(wv)
         if (!aetherMode) {
-            loadingOverlay.visibility = View.GONE
             setWebSurfaceVisible(true, focusable = true)
-            wv.requestFocus()
         }
         if (aetherMode) {
             wv.loadUrl(webUrl)
@@ -4923,14 +4656,6 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun showSelection(title: String, labels: List<String>, selected: Int, choose: (Int) -> Unit) {
-        if (v8Ready) {
-            v8Choice = choose
-            v8ChoiceCount = labels.size
-            v8SelectionOpen = true
-            mainHandler.removeCallbacks(hideOsdRunnable)
-            v8Hud?.emit("selection", JSONObject().put("title", title).put("labels", org.json.JSONArray(labels)).put("selected", selected))
-            return
-        }
         selectionDialog?.dismiss()
         mainHandler.removeCallbacks(hideOsdRunnable)
         selectionDialog = Phim4KPlayerUi.showGlassListDialog(
@@ -4948,14 +4673,6 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun showPlayerMessage(title: String, message: String) {
-        if (v8Ready) {
-            v8Choice = null
-            v8ChoiceCount = 0
-            v8SelectionOpen = true
-            mainHandler.removeCallbacks(hideOsdRunnable)
-            v8Hud?.emit("selection", JSONObject().put("title", title).put("message", message).put("labels", org.json.JSONArray()).put("selected", -1))
-            return
-        }
         selectionDialog?.dismiss()
         mainHandler.removeCallbacks(hideOsdRunnable)
         selectionDialog = Phim4KPlayerUi.showGlassMessageDialog(
@@ -5912,9 +5629,8 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun showOsd(focusPlayButton: Boolean = false) {
         osdVisible = true
-        refreshWebInteraction()
-        sendV8State()
-        if (focusPlayButton && !v8Ready) {
+        osdContainer.visibility = View.VISIBLE
+        if (focusPlayButton) {
             playPauseBtn.requestFocus()
         }
         scheduleHideOsd()
@@ -5928,12 +5644,11 @@ class PlayerActivity : AppCompatActivity() {
             sidePanelContainer.visibility = View.GONE
         }
         osdContainer.visibility = View.GONE
-        sendV8State()
     }
 
     private fun scheduleHideOsd() {
         mainHandler.removeCallbacks(hideOsdRunnable)
-        if (selectionDialog == null && !v8SelectionOpen && !scrubbing && !sidePanelVisible) {
+        if (selectionDialog == null && !scrubbing && !sidePanelVisible) {
             mainHandler.postDelayed(hideOsdRunnable, 6000L)
         }
     }
@@ -5946,7 +5661,6 @@ class PlayerActivity : AppCompatActivity() {
         } else {
             player?.currentPosition?.coerceAtLeast(0L) ?: webPositionMs
         }
-        sendV8State()
         timeCurrentText.text = formatTime(pos)
         timeTotalText.text = formatTime(dur)
         if (dur > 0L && !scrubbing && pendingSeekTargetMs < 0L) {

@@ -21,8 +21,6 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import android.widget.VideoView
-import android.net.Uri
 import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -233,26 +231,16 @@ class MainActivity : AppCompatActivity() {
             isClickable = true
             isFocusable = true
         }
-        val video = VideoView(this)
-        overlay.addView(video, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER
-        ))
-        root.addView(overlay, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
-        ))
-        var finished = false
-        fun finishIntro() {
-            if (finished) return
-            finished = true
-            video.stopPlayback()
-            root.removeView(overlay)
+        val mark = TextView(this).apply {
+            text = "AnPinime"
+            typeface = Typeface.DEFAULT_BOLD
+            textSize = 28f
+            setTextColor(UiHelper.COLOR_RED)
+            gravity = Gravity.CENTER
         }
-        video.setOnCompletionListener { finishIntro() }
-        video.setOnErrorListener { _, _, _ -> finishIntro(); true }
-        overlay.postDelayed({ finishIntro() }, 4650L)
-        val resource = if (BuildConfig.IS_PHONE_FLAVOR) R.raw.intro_phone else R.raw.intro_tv
-        video.setVideoURI(Uri.parse("android.resource://$packageName/$resource"))
-        video.setOnPreparedListener { player -> player.setVolume(0f, 0f); video.start() }
+        overlay.addView(mark, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
+        root.addView(overlay, FrameLayout.LayoutParams(-1, -1))
+        overlay.postDelayed({ root.removeView(overlay) }, 550L)
     }
 
     override fun onResume() {

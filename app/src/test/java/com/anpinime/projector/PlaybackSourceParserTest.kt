@@ -6,23 +6,6 @@ import org.junit.Test
 class PlaybackSourceParserTest {
     private val base = "https://example.test/watch/episode"
 
-    @Test
-    fun kkPhimNestedEpisodesWithNullManifestKeepThePlayableEmbed() {
-        val raw = """
-            {"data":{"item":{"name":"Test movie"},"episodes":[{"server_name":"Vietsub","server_data":[
-                {"name":"Full","slug":"full","link_m3u8":null,"link_embed":"//player.test.invalid/film"}
-            ]}]}}
-        """.trimIndent()
-        val detailUrl = "https://api.test.invalid/phim/test-movie"
-        val detail = MovieCatalog.parseDetail(raw, detailUrl, "https://api.test.invalid", source = ContentSource.KKPHIM)
-        val episode = checkNotNull(detail).episodes.single()
-        assertEquals("https://player.test.invalid/film", episode.directUrl)
-        assertEquals(episode.directUrl, episode.refererUrl)
-        val stream = checkNotNull(MovieCatalog.extractStreamFromDetail(raw, episode))
-        assertEquals(episode.directUrl, stream.primaryUrl)
-        assertFalse(stream.isDirectM3u8)
-    }
-
     @Test fun nestedRelativeManifest() {
         val source = PlaybackSourceParser.parse("""{"player":{"sources":[{"file":"/stream/hls?id=1"}]}}""", base)!!
         assertEquals("https://example.test/stream/hls?id=1", source.url)

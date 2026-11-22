@@ -50,8 +50,11 @@ v.pause = () => {paused = true; v.dispatchEvent(new Event('pause'));};
         };
         await command('pause');
         await page.waitForFunction(() => document.querySelector('video').paused);
-        await command('seekBy', 10); await command('seekBy', 10); await command('seekBy', -10);
-        await page.waitForFunction(() => document.querySelector('video').currentTime === 10);
+        // PlayerActivity.commitPendingSeek sends the absolute target in seconds.
+        for (const position of [10, 20, 10]) {
+            await command('seek', position);
+            await page.waitForFunction(expected => document.querySelector('video').currentTime === expected, position);
+        }
         assert.equal(await page.locator('video').evaluate(v => v.controls), false);
         await command('seek', 90);
         await page.waitForFunction(() => document.querySelector('video').currentTime === 90);
@@ -64,7 +67,7 @@ v.pause = () => {paused = true; v.dispatchEvent(new Event('pause'));};
         await page.goto('https://fixture.test/frame');
         const frame = page.frames().find(f => f.url().startsWith('https://frame.test'));
         await frame.waitForFunction(() => !document.querySelector('video').paused);
-        await command('pause'); await command('seekBy', 30);
+        await command('pause'); await command('seek', 30);
         await frame.waitForFunction(() => document.querySelector('video').paused && document.querySelector('video').currentTime === 30);
         assert(await page.evaluate(() => events.some(e => e[0] === 'frame')));
         console.log('PASS cross-origin iframe discovery and app commands');

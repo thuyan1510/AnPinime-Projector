@@ -29,6 +29,14 @@ internal class V8WebView(
         setBackgroundColor(if (media) Color.TRANSPARENT else UiHelper.COLOR_BG)
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
+        if (!BuildConfig.IS_PHONE_FLAVOR) {
+            settings.useWideViewPort = true
+            settings.loadWithOverviewMode = true
+            settings.setSupportZoom(false)
+            settings.textZoom = 100
+            isHorizontalScrollBarEnabled = false
+            isVerticalScrollBarEnabled = false
+        }
         settings.allowFileAccess = false
         settings.allowContentAccess = false
         settings.mediaPlaybackRequiresUserGesture = false

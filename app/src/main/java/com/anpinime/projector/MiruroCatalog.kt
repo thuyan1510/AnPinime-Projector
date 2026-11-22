@@ -25,9 +25,13 @@ data class MiruroWatchDetailResult(
  * /api/search/browse JSON, and /api/sources payloads.
  */
 object MiruroCatalog {
-    const val DEFAULT_BASE_URL = "https://www.miruro.cx"
+    const val DEFAULT_BASE_URL = "https://miruro.cx"
 
-    val MIRROR_HOSTS = listOf(DEFAULT_BASE_URL, "https://miruro.cx")
+    val MIRROR_HOSTS = listOf(
+        "https://miruro.cx",
+        "https://miruro.tv",
+        "https://miruro.to"
+    )
 
     private val HTML_TAG_REGEX = Regex("""<[^>]+>""")
     private val MULTI_SPACE_REGEX = Regex("""\s+""")
@@ -101,13 +105,6 @@ object MiruroCatalog {
     fun buildWatchDataPath(mediaId: String, slug: String, episodeNumber: Int = 1): String {
         val safeSlug = slug.trim().ifBlank { "anime" }
         return "/watch/${mediaId.trim()}/$safeSlug/__data.json?ep=${episodeNumber.coerceAtLeast(1)}&x-sveltekit-invalidated=01"
-    }
-
-    fun watchPageUrl(raw: String, episode: Int = 1): String? {
-        val (id, slug) = extractWatchIdAndSlug(raw)
-        if (id.isBlank() || !id.all(Char::isDigit)) return null
-        val safeSlug = slugify(slug)
-        return "$DEFAULT_BASE_URL/watch/$id/$safeSlug?ep=${episode.coerceAtLeast(1)}"
     }
 
     fun slugify(title: String): String {

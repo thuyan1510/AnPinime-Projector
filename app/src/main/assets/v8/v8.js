@@ -98,14 +98,6 @@ function renderHeader() {
 function sourceOption(s) {
     return `<button class="source-choice ${s.id === state.source ? 'active' : ''}" data-act="changeSource" data-id="${s.id}">${sourceLogo(s.id)}<span><div class="source-name">${esc(s.name)}</div><div class="source-caption">${esc(s.desc)}</div></span>${s.id === state.source ? `<span class="check">${ico('check')}</span>` : ''}</button>`;
 }
-function fmt(s) {
-    const h = Math.floor(s / 3600),
-        m = Math.floor((s % 3600) / 60),
-        ss = s % 60;
-    return h
-        ? `${h}:${String(m).padStart(2, '0')}:${String(ss).padStart(2, '0')}`
-        : `${String(m).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
-}
 function toast(msg) {
     const el = $('#toast');
     el.textContent = msg;
@@ -117,14 +109,17 @@ function sheet(title, subtitle, body) {
     return `<div class="sheet" role="dialog" aria-modal="true" aria-label="${esc(title)}"><div class="sheet-top"><div><h2>${esc(title)}</h2><p>${esc(subtitle)}</p></div><button class="sheet-close" data-act="close" aria-label="Đóng">${ico('close')}</button></div>${body}</div>`;
 }
 let tvMenuOpen = false,
+    menuReturnFocus,
     menuHideTimer;
 function openTvMenu(focus = false) {
-    if (state.mode !== 'tv' || state.page === 'player' || state.overlay) return;
+    if (state.mode !== 'tv' || state.overlay) return;
     clearTimeout(menuHideTimer);
+    if (!tvMenuOpen) menuReturnFocus = document.activeElement;
     tvMenuOpen = true;
     device.classList.add('tv-menu-open');
     const rail = $('#tvRail');
     rail.inert = false;
+    rail.setAttribute('aria-hidden', 'false');
     $('#tvEdge').setAttribute('aria-expanded', 'true');
     if (focus) {
         requestAnimationFrame(() => {
@@ -133,14 +128,22 @@ function openTvMenu(focus = false) {
         });
     }
 }
-function closeTvMenu() {
+function closeTvMenu(restore = false) {
     clearTimeout(menuHideTimer);
     tvMenuOpen = false;
     device.classList.remove('tv-menu-open');
     const rail = $('#tvRail');
-    if (rail) rail.inert = true;
+    if (rail) {
+        rail.inert = true;
+        rail.setAttribute('aria-hidden', 'true');
+    }
     const edge = $('#tvEdge');
     if (edge) edge.setAttribute('aria-expanded', 'false');
+    if (restore) {
+        const target = menuReturnFocus?.isConnected && container().contains(menuReturnFocus)
+            ? menuReturnFocus : container().querySelector('button:not(:disabled), input');
+        target?.focus({ preventScroll: true });
+    }
 }
 $('#tvEdge').addEventListener('mouseenter', () => openTvMenu());
 $('#tvEdge').addEventListener('focus', () => openTvMenu());
@@ -148,7 +151,7 @@ $('#tvEdge').addEventListener('click', () => openTvMenu(true));
 $('#tvRail').addEventListener('mouseenter', () => clearTimeout(menuHideTimer));
 $('#tvRail').addEventListener('mouseleave', () => {
     menuHideTimer = setTimeout(() => {
-        if (!$('#tvRail').contains(document.activeElement)) closeTvMenu();
+        if (device.classList.contains('using-mouse') || !$('#tvRail').contains(document.activeElement)) closeTvMenu(true);
     }, 180);
 });
 document.addEventListener('pointerdown', (e) => {
@@ -159,11 +162,15 @@ document.addEventListener('focusin', (e) => {
         closeTvMenu();
 });
 function moveFocus(direction) {
+    if (tvMenuOpen && direction === 'right') {
+        closeTvMenu(true);
+        return;
+    }
     const root = state.overlay ? $('#overlay') : tvMenuOpen ? $('#tvRail') : container();
     const active = document.activeElement;
-    const browseTv = state.mode === 'tv' && !state.overlay && !playerScreen && !tvMenuOpen;
+    const browseTv = state.mode === 'tv' && !state.overlay && !tvMenuOpen;
     const bounds = active?.getBoundingClientRect();
-    if (browseTv && direction === 'left' && bounds?.left < device.clientWidth * 0.075) {
+    if (browseTv && direction === 'left' && !active?.closest('.poster-row') && bounds?.left < device.clientWidth * 0.075) {
         openTvMenu(true);
         return;
     }
@@ -171,13 +178,34 @@ function moveFocus(direction) {
         $('#tvHeader button')?.focus();
         return;
     }
+    const row = active?.closest('.poster-row');
+    if (browseTv && row && (direction === 'left' || direction === 'right')) {
+        const next = direction === 'right' ? active.nextElementSibling : active.previousElementSibling;
+        if (next) {
+            next.focus({ preventScroll: true });
+            next.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        } else if (direction === 'left') openTvMenu(true);
+        return;
+    }
+    if (browseTv && row && direction === 'down') {
+        const section = row.closest('.section');
+        const adjacent = section.nextElementSibling;
+        const adjacentRow = adjacent?.querySelector('.poster-row');
+        if (adjacentRow) {
+            const column = Array.prototype.indexOf.call(row.children, active);
+            const next = adjacentRow.children[Math.min(column, adjacentRow.children.length - 1)];
+            next?.focus({ preventScroll: true });
+            next?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+            return;
+        }
+    }
     const buttons = [
         ...root.querySelectorAll('button:not(:disabled),input:not(:disabled),select:not(:disabled)'),
     ].filter(
         (element) => element.getClientRects().length && getComputedStyle(element).visibility === 'visible',
     );
     if (!buttons.includes(active) && !(active?.closest('#tvHeader') && state.mode === 'tv')) {
-        if (direction === 'left' && state.mode === 'tv' && !state.overlay && !playerScreen && !tvMenuOpen) {
+        if (direction === 'left' && state.mode === 'tv' && !state.overlay && !tvMenuOpen) {
             openTvMenu(true);
         } else {
             (buttons.find((element) => element.classList.contains('active')) || buttons[0])?.focus();
@@ -210,24 +238,23 @@ function moveFocus(direction) {
             bestScore = score;
         }
     }
-    if (tvMenuOpen && direction === 'right' && !best) {
-        closeTvMenu();
-        container().querySelector('button:not(:disabled),input')?.focus();
-    } else if (best) {
+    if (best) {
         best.focus({ preventScroll: true });
         best.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-    } else if (direction === 'left' && state.mode === 'tv' && !state.overlay && !playerScreen) {
+    } else if (direction === 'left' && state.mode === 'tv' && !state.overlay) {
         openTvMenu(true);
     }
 }
 
 const params = new URLSearchParams(location.search);
-const playerScreen = params.get('screen') === 'player';
+if (params.get('mode') === 'tv') {
+    document.querySelector('meta[name="viewport"]').content = 'width=1024, user-scalable=no';
+}
 const preview = $('#preview'),
     device = $('#device');
 const state = {
     mode: params.get('mode') === 'phone' ? 'phone' : 'tv',
-    page: playerScreen ? 'player' : 'home',
+    page: 'home',
     source: 'aether',
     hero: 0,
     origin: 'home',
@@ -247,7 +274,6 @@ const state = {
     overlay: null,
     favorites: read('anpinime_v8_favorites', []),
     preferences: {},
-    player: null,
 };
 const source = (id) => sourceDefs.find((item) => item.id === id) || sourceDefs[1];
 const items = new Map();
@@ -326,7 +352,6 @@ function register(raw) {
         info: raw.info,
         kind: source(raw.source).kind,
     };
-    items.set(id, item);
     return item;
 }
 
@@ -341,12 +366,27 @@ function meta(item) {
         .join('');
 }
 
+const thumbnailObserver = window.IntersectionObserver && new IntersectionObserver((entries, observer) => {
+    for (const { target, isIntersecting } of entries) {
+        if (isIntersecting && target.isConnected && target.dataset.src) {
+            target.src = target.dataset.src;
+            target.removeAttribute('data-src');
+            observer.unobserve(target);
+        }
+    }
+}, { rootMargin: '120px' });
+
+function observePosters(root) {
+    root.querySelectorAll('img[data-src]').forEach((img) => thumbnailObserver.observe(img));
+}
+
 function poster(item) {
-    const image = mediaUrl(item.poster);
+    items.set(item.id, item);
+    const image = mediaUrl(item.poster).replace('https://image.tmdb.org/t/p/w500/', 'https://image.tmdb.org/t/p/w185/');
     return `<button type="button" class="poster" data-act="detail" data-id="${esc(item.id)}" title="Chi tiết ${esc(item.title)}">
         <div class="poster-art" style="--fallback:#51263c">
             <div class="poster-fallback">${esc(item.title)}</div>
-            ${image ? `<img src="${esc(image)}" loading="lazy" alt="">` : ''}
+            ${image ? `<img ${thumbnailObserver ? 'data-src' : 'src'}="${esc(image)}" width="185" height="278" decoding="async" loading="lazy" alt="">` : ''}
             ${item.quality ? `<span class="poster-top-badge">${esc(item.quality)}</span>` : ''}
             ${item.rating ? `<span class="poster-bottom-badge">★ ${esc(item.rating)}</span>` : ''}
         </div>
@@ -368,6 +408,7 @@ function section(title, movies, tag, index = null) {
 const saved = (item) =>
     state.favorites.some((favorite) => favorite.source === item.raw.source && favorite.url === item.raw.url);
 function movieAction(action, item, label, icon, className) {
+    items.set(item.id, item);
     return `<button class="cta ${className}" data-act="${action}" data-id="${esc(item.id)}" aria-label="${esc(label)}">${ico(icon)}${className.includes('circle') ? '' : ' ' + esc(label)}</button>`;
 }
 
@@ -395,7 +436,7 @@ function homePage() {
         return `<div class="content-area">${status(state.error || (state.busy ? 'Đang tải phim…' : 'Nguồn chưa trả dữ liệu.'), !state.busy)}</div>`;
     const favorites = state.favorites.filter((item) => item.source === state.source).map(register);
     const rows = state.home.map((row, index) =>
-        section(row.title, row.items, index === 0 ? 'DÀNH CHO BẠN' : 'KHÁM PHÁ', index),
+        section(row.title, state.mode === 'tv' ? row.items.slice(0, 12) : row.items, index === 0 ? 'DÀNH CHO BẠN' : 'KHÁM PHÁ', index),
     );
     return `<div class="tv-home"><div class="content-area">${hero()}
         ${favorites.length ? section('Phim đã lưu', favorites, 'DANH SÁCH CỦA BẠN') : ''}${rows.join('')}</div></div>`;
@@ -437,7 +478,12 @@ function searchPage() {
 
 function updateResults() {
     const results = $('#resultsGrid');
-    if (results) results.innerHTML = grid(state.results);
+    if (results) {
+        items.clear();
+        thumbnailObserver?.disconnect();
+        results.innerHTML = grid(state.results);
+        observePosters(results);
+    }
     const title = $('#resultTitle');
     if (title) title.textContent = state.query.trim() ? 'Kết quả trong ' + sourceName() : 'Gợi ý cho bạn';
 }
@@ -445,20 +491,16 @@ function updateResults() {
 function detailPage() {
     const item = { ...state.selected, ...state.detail };
     // Some sources supply only the catalog artwork.
-    const cover = mediaUrl(item.poster || state.selected.poster);
+    const cover = mediaUrl(item.poster) || mediaUrl(state.selected.poster) || mediaUrl(state.selected.backdrop);
     const backdrop = item.backdrop || state.selected.backdrop;
-    const actions = `<button class="cta primary" data-act="play" ${state.episode === null ? 'disabled' : ''}>${ico('play')} Xem ngay</button>
+    const actions = `<button class="cta primary" data-act="play" aria-disabled="${state.episode === null}">${ico('play')} Xem ngay</button>
         ${movieAction('favorite', state.selected, saved(state.selected) ? 'Đã lưu' : 'Lưu phim', saved(state.selected) ? 'check' : 'plus', 'ghost')}
         <button class="cta ghost" data-act="back">${ico('back')} Quay lại</button>`;
     const episodes = state.detail?.episodes || [];
     const groups = [...new Set(episodes.map((ep) => ep.group))];
-    const servers = state.detail?.servers?.length
-        ? state.detail.servers
-        : groups.filter(Boolean).map((group) => ({ id: group, label: group }));
-    const visible =
-        servers.length && !state.detail?.servers?.length
-            ? episodes.filter((ep) => ep.group === state.server)
-            : episodes;
+    const servers = groups.map((group) => ({ id: group, label: group }));
+    const visible = episodes.filter((ep) => ep.group === state.server);
+    const seasonLabel = groups.some((group) => /^Mùa\s/i.test(group)) ? 'Chọn mùa' : 'Chọn nguồn phát';
     const miruroLink = state.source === 'miruro' && state.error
         ? '<button class="cta ghost" data-act="openMiruro">Mở trang xem Miruro</button>'
         : '';
@@ -466,8 +508,8 @@ function detailPage() {
         ? status(state.error || 'Đang tải danh sách tập…', !!state.error)
         : `<div class="block-panel">
         ${
-            servers.length
-                ? `<h3 class="block-title">Chọn nguồn phát</h3><div class="tag-row">${servers
+            servers.length > 1
+                ? `<h3 class="block-title">${seasonLabel}</h3><div class="tag-row">${servers
                       .map(
                           ({ id, label }) =>
                               `<button class="tag ${state.server === id ? 'active' : ''}" data-act="server" data-value="${esc(id)}">${esc(label)}</button>`,
@@ -476,7 +518,8 @@ function detailPage() {
                 : ''
         }
         <h3 class="block-title">Danh sách tập${visible.length ? ' (' + visible.length + ' tập)' : ''}</h3>
-        <div class="episode-grid">${visible.map((ep) => `<button class="ep-btn ${state.episode === ep.index ? 'active' : ''}" data-act="episode" data-index="${ep.index}">${esc(ep.title)}</button>`).join('')}</div>
+        <div class="episode-grid">${visible.slice(0, state.episodeLimit).map((ep) => `<button class="ep-btn ${state.episode === ep.index ? 'active' : ''}" data-act="episode" data-index="${ep.index}">${esc(ep.title)}</button>`).join('')}</div>
+        ${visible.length > state.episodeLimit ? '<button class="cta ghost" data-act="moreEpisodes">Hiện thêm tập</button>' : ''}
         ${visible.length ? '' : status('Nguồn chưa cung cấp tập phát.')}</div>`;
     return `<div class="detail-banner"><div class="detail-img" style="${imgBg(backdrop)}"></div></div>
         <div class="detail-layout"><div class="detail-top">
@@ -513,89 +556,6 @@ function settingsPage() {
       <button class="cta ghost" data-act="update">Kiểm tra cập nhật</button></section></div></div>`;
 }
 
-const playerOptions = [
-    ['server', 'tv', 'Server'],
-    ['subtitle', 'sub', 'Phụ đề'],
-    ['translate', 'spark', 'Dịch AI'],
-    ['audio', 'audio', 'Âm thanh'],
-    ['aspect', 'expand', 'Tỉ lệ'],
-    ['settings', 'settings', 'Cài đặt'],
-];
-
-function showPhonePlayerMenu() {
-    const options = playerOptions
-        .filter(([action]) => action !== 'translate' || ['aether', 'miruro'].includes(state.player?.source))
-        .map(([action, icon, label]) =>
-            `<button class="sheet-option" data-act="${action}">${ico(icon)} <b>${label}</b></button>`);
-    openOverlay('Điều khiển phát', '', `<div class="sheet-options">${options.join('')}</div>`);
-    native('menuOpened').catch((error) => toast(error.message));
-}
-
-function playerPage() {
-    return `<div class="player-shell" data-act="toggleHud">
-        <div class="player-header"><button class="icon-only" data-act="exit" aria-label="Quay lại">${ico('back', 'lg')}</button>
-        <div><div class="play-heading"></div><small id="playerSource"></small></div>
-        <div class="player-header-spacer"></div><span id="playerQuality" class="pill color"></span></div>
-        <div class="player-controls"><div class="player-timeline"><span id="nowTime">00:00</span>
-        <input id="seekRange" type="range" value="0" min="0" max="0" aria-label="Tua video" disabled>
-        <span id="endTime">00:00</span></div>
-        <div class="player-actions">
-            <button class="control-btn transport" data-act="rewind">${ico('rewind')} <span>-10s</span></button>
-            <button class="control-btn transport play" data-act="togglePlay">${ico('play', 'lg')} <span>Phát</span></button>
-            <button class="control-btn transport" data-act="forward">${ico('forward')} <span>+10s</span></button>
-            <button class="control-btn transport" data-act="next">${ico('next')} <span>Tập tiếp</span></button>
-            <button class="control-btn" data-act="episodes">${ico('list')} Tập</button>
-            <button class="control-btn phone-player-menu" data-act="playerMenu">${ico('settings')} Tùy chọn</button>
-            ${playerOptions
-                .map(
-                    ([action, icon, label]) =>
-                        `<button class="control-btn player-option" data-act="${action}">${ico(icon)} ${label}</button>`,
-                )
-                .join('')}
-        </div><div class="player-hint">${state.mode === 'tv' ? 'D-pad: ← / → để chuyển focus hoặc tua · OK để chọn' : 'Chạm để mở điều khiển · Kéo thanh thời lượng để tua'}</div></div></div>`;
-}
-
-function updatePlayer(data) {
-    const previous = state.player;
-    state.player = data;
-    if (previous?.source !== data.source) {
-        device.classList.toggle('miruro', data.source === 'miruro');
-        $('.player-actions [data-act="translate"]').hidden = !['aether', 'miruro'].includes(data.source);
-    }
-    if (previous?.title !== data.title) $('.play-heading').textContent = data.title;
-    if (previous?.episode !== data.episode || previous?.source !== data.source || previous?.server !== data.server) {
-        $('#playerSource').textContent = [data.episode, source(data.source).name, data.server]
-            .filter(Boolean).join(' · ');
-    }
-    if (previous?.quality !== data.quality) $('#playerQuality').textContent = data.quality;
-    if (previous?.hud !== data.hud) {
-        $('.player-header').classList.toggle('hidden', !data.hud);
-        $('.player-controls').classList.toggle('hidden', !data.hud);
-    }
-    if (previous?.next !== data.next) $('[data-act="next"]').hidden = !data.next;
-    if (previous?.translated !== data.translated) $('.player-actions [data-act="translate"]').classList.toggle('active', !!data.translated);
-    const play = $('[data-act="togglePlay"]');
-    if (previous?.playing !== data.playing) {
-        play.innerHTML = `${ico(data.playing ? 'pause' : 'play', 'lg')} <span>${data.playing ? 'Dừng' : 'Phát'}</span>`;
-    }
-    const seek = $('#seekRange');
-    const duration = Math.max(0, Math.floor(data.duration / 1000));
-    if (!seek.matches(':active')) {
-        seek.max = duration;
-        seek.value = Math.floor(data.position / 1000);
-        $('#nowTime').textContent = fmt(Number(seek.value));
-    }
-    seek.disabled = !duration;
-    $('#endTime').textContent = fmt(duration);
-    if (
-        data.hud &&
-        state.mode === 'tv' &&
-        !state.overlay &&
-        (!previous?.hud || !device.contains(document.activeElement))
-    )
-        play.focus();
-}
-
 function openOverlay(title, caption, body) {
     if (!state.overlay) restoreFocus = document.activeElement;
     state.overlay = true;
@@ -607,7 +567,7 @@ function openOverlay(title, caption, body) {
 function closeOverlay() {
     state.overlay = null;
     $('#overlay').classList.add('hidden');
-    $('#overlay').replaceChildren();
+    $('#overlay').textContent = '';
     if (restoreFocus?.isConnected) restoreFocus.focus({ preventScroll: true });
 }
 
@@ -620,17 +580,7 @@ function showSources() {
     );
 }
 
-function showPlayerOptions(data) {
-    const choices = data.labels
-        .map(
-            (label, index) =>
-                `<button class="sheet-option ${index === data.selected ? 'active' : ''}" data-act="choice" data-index="${index}">
-        <span style="flex:1"><b>${esc(label)}</b></span>${index === data.selected ? `<span class="check">${ico('check')}</span>` : ''}</button>`,
-        )
-        .join('');
-    openOverlay(data.title, data.message || '', `<div class="sheet-options">${choices}</div>`);
-}
-
+let lastChromeKey = '';
 const container = () => (state.mode === 'phone' ? $('#mobileBody') : $('#tvPage'));
 function render(reset = false) {
     const content = container();
@@ -639,33 +589,39 @@ function render(reset = false) {
     const key = focused?.dataset ? { ...focused.dataset } : {};
     preview.dataset.page = state.page;
     preview.dataset.mode = state.mode;
-    preview.classList.toggle('is-playing', playerScreen);
     device.classList.toggle('miruro', state.source === 'miruro');
-    if (!playerScreen) {
+    const chromeKey = state.mode + '/' + state.source + '/' + state.page;
+    if (chromeKey !== lastChromeKey) {
         renderNav();
         renderHeader();
+        lastChromeKey = chromeKey;
     }
-    $('#mobileBottom').classList.toggle('hidden', playerScreen);
-    $('#tvHeader').classList.toggle('hidden', playerScreen);
-    $('#mobileTop').classList.toggle('hidden', playerScreen);
+    items.clear();
+    thumbnailObserver?.disconnect();
     content.innerHTML = {
         home: homePage,
         browse: browsePage,
         search: searchPage,
         detail: detailPage,
         settings: settingsPage,
-        player: playerPage,
     }[state.page]();
+    observePosters(content);
     content.scrollTop = oldScroll;
     if (state.page === 'search') updateResults();
-    if (state.mode === 'tv' && !state.overlay && !playerScreen) {
+    if (state.mode === 'tv' && !state.overlay) {
         const buttons = [...content.querySelectorAll('button:not(:disabled),input')];
         const match =
             key.act &&
             buttons.find((button) =>
                 ['act', 'id', 'value', 'index'].every((k) => key[k] === button.dataset[k]),
             );
-        (match || (reset ? buttons[0] : null))?.focus({ preventScroll: true });
+        const playButton = state.page === 'detail' && content.querySelector('.detail-summary [data-act="play"]:enabled');
+        const first = buttons.find((button) => button.getClientRects().length);
+        const target = !reset && match ? match : playButton || first;
+        if (reset || match || !content.contains(document.activeElement) && focused === document.body) {
+            target?.focus({ preventScroll: true });
+        }
+        if (reset) content.scrollTop = 0;
     }
 }
 
@@ -787,16 +743,20 @@ function openList(page, path = '', sectionItems = null) {
     loadResults();
 }
 
-async function openDetail(item) {
+async function openDetail(item, trigger) {
     if (!item) return;
     if (state.page !== 'detail') {
         state.origin = state.page;
         state.returnScroll = container().scrollTop;
         state.returnItem = item.id;
+        const row = trigger?.closest('.poster-row');
+        state.returnRow = row ? [...container().querySelectorAll('.poster-row')].indexOf(row) : -1;
+        state.returnLeft = row?.scrollLeft || 0;
     }
     state.selected = item;
     state.detail = null;
     state.episode = null;
+    state.episodeLimit = 40;
     state.server = 'auto';
     route('detail');
     const token = epoch;
@@ -805,7 +765,7 @@ async function openDetail(item) {
         if (token !== epoch) return;
         state.detail = result;
         state.episode = result.episodes[0]?.index ?? null;
-        state.server = result.servers[0]?.id ?? result.episodes[0]?.group ?? 'auto';
+        state.server = result.episodes[0]?.group ?? 'auto';
     } catch (error) {
         if (token === epoch) state.error = error.message;
     }
@@ -816,7 +776,7 @@ async function play() {
     if (pendingPlay || state.episode === null) return;
     pendingPlay = true;
     try {
-        await native('play', { url: state.selected.raw.url, index: state.episode, server: state.server });
+        await native('play', { url: state.selected.raw.url, index: state.episode });
     } catch (error) {
         toast(error.message);
     } finally {
@@ -843,23 +803,19 @@ function back() {
     }
     if (state.overlay) {
         closeOverlay();
-        if (playerScreen) native('dismiss').catch((error) => toast(error.message));
-        return;
-    }
-    if (playerScreen) {
-        native('back').catch((error) => toast(error.message));
         return;
     }
     if (tvMenuOpen) {
-        closeTvMenu();
-        container().querySelector('button')?.focus();
+        closeTvMenu(true);
         return;
     }
     if (state.page === 'detail') {
         route(state.origin, false);
         container().scrollTop = state.returnScroll;
+        const row = container().querySelectorAll('.poster-row')[state.returnRow];
+        if (row) row.scrollLeft = state.returnLeft;
         if (state.mode === 'tv')
-            [...container().querySelectorAll('button')]
+            [...(row || container()).querySelectorAll('button')]
                 .find((button) => button.dataset.id === state.returnItem)
                 ?.focus({ preventScroll: true });
         return;
@@ -874,19 +830,6 @@ function back() {
 
 function clickAction(button) {
     const { act, id, index, value } = button.dataset;
-    if (playerScreen) {
-        if (act === 'playerMenu') {
-            showPhonePlayerMenu();
-            return;
-        }
-        if (act === 'close') {
-            back();
-            return;
-        }
-        if (act === 'choice' || button.closest('#overlay')) closeOverlay();
-        native(act, { index: Number(index) }).catch((error) => toast(error.message));
-        return;
-    }
     switch (act) {
         case 'home':
             route('home');
@@ -907,11 +850,12 @@ function clickAction(button) {
             break;
         case 'hero':
             state.hero = Number(index);
-            render();
+            container().querySelector('.hero').outerHTML = hero();
+            container().querySelector('.hero-slides .active')?.focus({ preventScroll: true });
             break;
         case 'detail':
         case 'watch':
-            openDetail(items.get(id));
+            openDetail(items.get(id), button);
             break;
         case 'favorite': {
             const item = items.get(id);
@@ -944,10 +888,17 @@ function clickAction(button) {
             else if (state.page === 'home') loadHome(true);
             else loadResults();
             break;
+        case 'moreEpisodes': {
+            const previous = state.episodeLimit;
+            state.episodeLimit += 40;
+            render();
+            container().querySelectorAll('.ep-btn')[previous]?.focus();
+            break;
+        }
         case 'server':
+            state.episodeLimit = 40;
             state.server = value;
-            if (!state.detail.servers.length)
-                state.episode = state.detail.episodes.find((ep) => ep.group === value)?.index ?? null;
+            state.episode = state.detail.episodes.find((ep) => ep.group === value)?.index ?? null;
             render();
             break;
         case 'episode':
@@ -992,7 +943,12 @@ function startIntro() {
     clearTimeout(introTimer);
     clearTimeout(introHide);
     $('#splash').classList.remove('hidden', 'finished');
-    const video = state.mode === 'phone' ? $('#splashPhoneVideo') : $('#splashTvVideo');
+    if (state.mode === 'tv') {
+        introTimer = setTimeout(finishIntro, 550);
+        return;
+    }
+    const video = $('#splashPhoneVideo');
+    if (!video.hasAttribute('src')) video.src = 'intro-phone.mp4';
     video.currentTime = 0;
     video.onended = finishIntro;
     video.play().catch(finishIntro);
@@ -1007,16 +963,15 @@ function activate() {
     const focus = document.activeElement;
     if (focus?.matches('button')) focus.click();
     else if (focus?.matches('input,select')) focus.click();
-    else if (playerScreen) native('toggleHud').catch((error) => toast(error.message));
     else (container().querySelector('button,input') || $('#tvEdge')).focus();
 }
 
 window.anpinimeEvent = (event, data) => {
     if (event === 'back') back();
-    else if (event === 'activate') activate();
-    else if (event === 'player') updatePlayer(data);
-    else if (event === 'selection') showPlayerOptions(data);
-    else if (event === 'direction') moveFocus(data.direction);
+    else if (event === 'activate') {
+        device.classList.remove('using-mouse');
+        activate();
+    }
 };
 
 document.addEventListener('click', (event) => {
@@ -1028,7 +983,10 @@ document.addEventListener(
     'error',
     (event) => {
         if (event.target instanceof HTMLImageElement) {
-            if (event.target.classList.contains('detail-cover')) event.target.style.opacity = '0.25';
+            if (event.target.classList.contains('detail-cover')) {
+                const backup = mediaUrl(state.selected?.poster);
+                if (backup && event.target.src !== backup) event.target.src = backup;
+            }
             else event.target.hidden = true;
         }
     },
@@ -1041,7 +999,6 @@ document.addEventListener('input', (event) => {
         clearTimeout(searchTimer);
         searchTimer = setTimeout(loadResults, 300);
     }
-    if (event.target.id === 'seekRange') $('#nowTime').textContent = fmt(Number(event.target.value));
 });
 document.addEventListener('change', (event) => {
     const key = event.target.dataset.setting;
@@ -1055,10 +1012,13 @@ document.addEventListener('change', (event) => {
             toast(error.message);
         });
     }
-    if (event.target.id === 'seekRange')
-        native('seek', { seconds: Number(event.target.value) }).catch((error) => toast(error.message));
+
+});
+document.addEventListener('pointerover', (event) => {
+    if (state.mode === 'tv' && event.pointerType === 'mouse') device.classList.add('using-mouse');
 });
 document.addEventListener('keydown', (event) => {
+    device.classList.remove('using-mouse');
     const element = document.activeElement;
     const text = element?.matches('input:not([type=range]), select');
     if (event.key === 'Escape' || (event.key === 'Backspace' && !text)) {
@@ -1079,28 +1039,20 @@ document.addEventListener('keydown', (event) => {
         return;
     }
     if (!event.key.startsWith('Arrow') || text) return;
-    if (element?.id === 'seekRange' && ['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
     event.preventDefault();
-    if (playerScreen && !state.player?.hud) {
-        const action = { ArrowLeft: 'rewind', ArrowRight: 'forward' }[event.key] || 'toggleHud';
-        native(action).catch((error) => toast(error.message));
-    } else moveFocus(event.key.slice(5).toLowerCase());
+    moveFocus(event.key.slice(5).toLowerCase());
+
 });
 
-document.body.classList.toggle('app-player', playerScreen);
-document.documentElement.classList.toggle('app-player', playerScreen);
-state.busy = !playerScreen;
+state.busy = true;
 render(true);
 closeTvMenu();
-if (!playerScreen && params.get('intro') === '1') startIntro();
+if (params.get('intro') === '1') startIntro();
 native('ready')
     .then((data) => {
-        if (playerScreen) updatePlayer(data);
-        else {
-            state.source = data.source;
-            state.preferences = data.preferences;
-            loadHome();
-        }
+        state.source = data.source;
+        state.preferences = data.preferences;
+        loadHome();
     })
     .catch((error) => {
         state.busy = false;

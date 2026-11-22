@@ -174,7 +174,6 @@ object MovieCatalog {
             if (categories.isNotEmpty()) infoParts.add("Thể loại: ${categories.joinToString(", ")}")
 
             val episodesArr = root.optJSONArray("episodes")
-                ?: dataObj?.optJSONArray("episodes")
                 ?: dataObj?.optJSONObject("item")?.optJSONArray("episodes")
                 ?: movie.optJSONArray("episodes")
                 ?: JSONArray()
@@ -201,7 +200,10 @@ object MovieCatalog {
                         epObj.optString("name").ifEmpty { epObj.optString("slug") }.trim()
                     ).ifEmpty { "${eIdx + 1}" }
                     val epSlug = epObj.optString("slug").trim()
-                    val stream = buildMatch(epObj) ?: continue
+                    val m3u8 = epObj.optString("link_m3u8").ifEmpty { epObj.optString("m3u8") }.trim()
+                    val embed = epObj.optString("link_embed").ifEmpty { epObj.optString("embed") }.trim()
+                    val streamLink = m3u8.ifEmpty { embed }
+                    if (streamLink.isEmpty()) continue
 
                     val epNum = Regex("""\d+""").find(epName)?.value?.toIntOrNull() ?: (eIdx + 1)
                     val displayTitle = if (epName.all { it.isDigit() }) "Tập $epName" else epName
@@ -218,8 +220,8 @@ object MovieCatalog {
                             playbackKind = "catalog_episode",
                             serverIndex = sIdx,
                             episodeIndex = eIdx,
-                            directUrl = stream.primaryUrl,
-                            refererUrl = stream.embedFallbackUrl,
+                            directUrl = streamLink,
+                            refererUrl = embed.ifEmpty { detailUrl },
                             detailUrl = detailUrl,
                             serverName = serverName,
                             episodeKey = epKey,
@@ -257,7 +259,6 @@ object MovieCatalog {
                 ?: dataObj?.optJSONObject("item")
                 ?: root
             val episodesArr = root.optJSONArray("episodes")
-                ?: dataObj?.optJSONArray("episodes")
                 ?: dataObj?.optJSONObject("item")?.optJSONArray("episodes")
                 ?: movie.optJSONArray("episodes")
                 ?: return fallbackFromEpisode(episode)
@@ -329,34 +330,20 @@ object MovieCatalog {
     }
 
     private fun buildMatch(epObj: JSONObject): CatalogStreamMatch? {
-        val hls = streamField(epObj, "link_m3u8", "m3u8")
-        val embed = streamField(epObj, "link_embed", "embed")
+        val m3u8 = epObj.optString("link_m3u8").ifEmpty { epObj.optString("m3u8") }.trim()
+        val embed = epObj.optString("link_embed").ifEmpty { epObj.optString("embed") }.trim()
         return when {
-            hls.isNotEmpty() -> CatalogStreamMatch(hls, isDirectM3u8 = true, embedFallbackUrl = embed)
-            embed.isNotEmpty() -> CatalogStreamMatch(embed, isDirectM3u8 = false, embedFallbackUrl = embed)
+            m3u8.startsWith("http") -> CatalogStreamMatch(m3u8, isDirectM3u8 = true, embedFallbackUrl = embed)
+            embed.startsWith("http") -> CatalogStreamMatch(embed, isDirectM3u8 = false, embedFallbackUrl = embed)
             else -> null
         }
-    }
-
-    private fun streamField(item: JSONObject, vararg keys: String): String {
-        return keys.firstNotNullOfOrNull { key ->
-            val url = item.optString(key).trim()
-            when {
-                url.startsWith("//") -> "https:$url"
-                url.startsWith("https://", true) || url.startsWith("http://", true) -> url
-                else -> null
-            }
-        }.orEmpty()
     }
 
     private fun fallbackFromEpisode(episode: Episode): CatalogStreamMatch? {
         val direct = episode.directUrl.trim()
         if (direct.startsWith("http")) {
             val isM3u8 = direct.contains(".m3u8", ignoreCase = true) || direct.contains(".mp4", ignoreCase = true)
-            return CatalogStreamMatch(
-                direct, isDirectM3u8 = isM3u8,
-                embedFallbackUrl = episode.refererUrl.takeUnless { it == episode.detailUrl || it == episode.url }.orEmpty()
-            )
+            return CatalogStreamMatch(direct, isDirectM3u8 = isM3u8, embedFallbackUrl = episode.refererUrl)
         }
         return null
     }
