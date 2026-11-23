@@ -451,7 +451,7 @@ body.app-player .player-actions .control-btn.active { border-color:var(--accent)
 .tv-exit { background: #29161b; color: white; border: 1px solid #6b303b; border-radius: 10px; min-height: 32px }
 .preview[data-mode="tv"] .tv-rail button:focus { outline-offset: -3px }
 .preview[data-mode="tv"] .poster:focus { outline: none; box-shadow: none }
-.preview[data-mode="tv"] .poster:focus .poster-art::after {
+.preview[data-mode="tv"] .poster:focus .poster-art::before {
     content: ""; position: absolute; inset: 0; border: 3px solid white; border-radius: inherit;
     z-index: 3; pointer-events: none;
 }

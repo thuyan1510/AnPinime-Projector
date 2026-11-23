@@ -57,7 +57,7 @@ async function checkLayout(browser, width, height, density) {
         await posters.nth(1).hover();
         assert.ok(await posters.nth(1).evaluate(el => el === document.activeElement &&
             getComputedStyle(el).outlineStyle === 'none' &&
-            getComputedStyle(el.querySelector('.poster-art'), '::after').borderTopWidth === '3px'));
+            getComputedStyle(el.querySelector('.poster-art'), '::before').borderTopWidth === '3px'));
         await posters.first().focus();
         await page.keyboard.press('ArrowLeft');
         await page.locator('.tv-menu-open').waitFor();
