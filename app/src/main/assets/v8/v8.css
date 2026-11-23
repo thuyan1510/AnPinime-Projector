@@ -406,7 +406,7 @@ body.app-player .player-actions .control-btn.active { border-color:var(--accent)
     display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .preview[data-mode="tv"] button:focus { outline: 3px solid white; outline-offset: 1px; box-shadow: none }
-.preview[data-mode="tv"] .poster:hover .poster-art { border-color: white }
+
 .preview[data-mode="tv"] .tv-rail[aria-hidden="true"] { visibility: hidden }
 .preview[data-mode="tv"] .tv-rail { overflow-y: auto; transition: none }
 .preview[data-mode="tv"] .detail-banner { position: absolute; inset: 0 0 auto; height: 63vh; pointer-events: none }
@@ -429,16 +429,40 @@ body.app-player .player-actions .control-btn.active { border-color:var(--accent)
 .preview[data-mode="tv"] .episode-grid { grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 8px }
 .preview[data-mode="tv"] .ep-btn { white-space: nowrap; text-overflow: ellipsis; overflow: hidden }
 .preview[data-mode="tv"] .splash { transition: none }
-.splash-mark { display: none }
-.preview[data-mode="tv"] .splash-mark {
-    display: block; font-size: 40px; font-weight: 900; letter-spacing: -.06em; color: white;
-}
-.preview[data-mode="phone"] .splash-phone-video { inset: 15%; width: 70%; height: 70% }
+/* The logo occupies about two thirds of the supplied 16:9 video frame. */
+.splash .splash-video { inset: 0; margin: auto; height: auto; width: 28%; max-height: 100% }
+.preview[data-mode="phone"] .splash-video { width: 78% }
 .preview[data-mode="phone"] .mobile-detail-desc {
     display: -webkit-box !important; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
 }
 .cta[aria-disabled="true"] { opacity: .65 }
-.preview[data-mode="tv"] .poster:hover { outline: 2px solid #fff; outline-offset: 1px }
-.preview[data-mode="tv"] .using-mouse button:focus:not(:hover) { box-shadow: none; outline: none }
+
+
 .preview[data-mode="tv"] .using-mouse .tv-nav-row:hover,
 .preview[data-mode="tv"] .using-mouse .tv-source-row:hover { background: #39222b }
+
+.preview[data-mode="tv"] .tv-brand-mark {
+    display: flex; align-items: center; justify-content: center; width: auto; background: none; border: 0;
+    font-size: 24px; margin: 0 auto; box-shadow: none;
+}
+.preview[data-mode="tv"] .tv-rail { gap: 6px !important; padding-block: 12px !important }
+.preview[data-mode="tv"] .tv-source-nav { flex: 0 0 auto; overflow: visible }
+.tv-rail-footer { display: flex; flex-direction: column; gap: 4px }
+.tv-exit { background: #29161b; color: white; border: 1px solid #6b303b; border-radius: 10px; min-height: 32px }
+.preview[data-mode="tv"] .tv-rail button:focus { outline-offset: -3px }
+.preview[data-mode="tv"] .poster:focus { outline: none; box-shadow: none }
+.preview[data-mode="tv"] .poster:focus .poster-art::after {
+    content: ""; position: absolute; inset: 0; border: 3px solid white; border-radius: inherit;
+    z-index: 3; pointer-events: none;
+}
+.source-loading {
+    position: absolute; left: 50%; top: 50%; width: 36px; height: 36px; margin: -18px 0 0 -18px;
+    border-radius: 50%; border: 4px solid #fff; border-top-color: #ed3049; border-right-color: #ed3049;
+    animation: source-spin .8s linear infinite; z-index: 28; pointer-events: none;
+}
+@keyframes source-spin { to { transform: rotate(360deg) } }
+
+.preview[data-mode="tv"] .tv-page { scroll-padding-top: 64px }
+.preview[data-mode="tv"] .poster:hover:not(:focus) .poster-title { color: inherit }
+.preview[data-mode="tv"] .poster:focus .poster-title { color: var(--accent) }
+#categoryFilters + #resultsGrid { margin-top: 14px }

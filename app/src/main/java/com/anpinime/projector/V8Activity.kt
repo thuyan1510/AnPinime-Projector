@@ -1,5 +1,6 @@
 package com.anpinime.projector
 
+import androidx.activity.result.contract.ActivityResultContracts
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
@@ -24,6 +25,10 @@ class V8Activity : AppCompatActivity() {
     private val settings by lazy { getSharedPreferences("anpinime_v8_playback", MODE_PRIVATE) }
     private var detail: Pair<Anime, AnimeDetail>? = null
     private var detailGeneration = 0
+
+    private val player = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (!BuildConfig.IS_PHONE_FLAVOR && result.resultCode == RESULT_OK) ui?.emit("menu")
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -113,7 +118,15 @@ class V8Activity : AppCompatActivity() {
                         })
                     }
                     "browse" -> withContext(Dispatchers.IO) {
-                        movieArray(CatalogService.loadList(source, request.getString("path"), page))
+                        val path = request.getString("path").ifBlank {
+                            when (source) {
+                                ContentSource.AETHER -> AetherCatalog.defaultCategories().first().path
+                                ContentSource.MIRURO -> MiruroCatalog.defaultCategories().first().path
+                                ContentSource.FILM4K -> MovieCatalog.homeSectionsConfig(MovieCatalogFormat.FREE2).first().second
+                                ContentSource.KKPHIM -> MovieCatalog.homeSectionsConfig(MovieCatalogFormat.FREE1).first().second
+                            }
+                        }
+                        movieArray(CatalogService.loadList(source, path, page))
                     }
                     "search" -> withContext(Dispatchers.IO) {
                         movieArray(CatalogService.search(source, request.getString("query").take(200), page))
@@ -134,7 +147,7 @@ class V8Activity : AppCompatActivity() {
                         require(anime.url == request.optString("url") && anime.source == source)
                         val selected = loaded.episodes[request.getInt("index")]
                         ImageLoader.trimMemory()
-                        startActivity(Intent(this@V8Activity, PlayerActivity::class.java).apply {
+                        player.launch(Intent(this@V8Activity, PlayerActivity::class.java).apply {
                             putExtra("movie_title", loaded.title.ifBlank { anime.title })
                             putExtra("episode_json", selected.toJsonObject().toString())
                             putExtra("all_episodes_json", Episode.toJsonArray(loaded.episodes))

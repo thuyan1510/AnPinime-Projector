@@ -149,9 +149,7 @@ object Phim4KPlayerUi {
             isFocusable = true
             isClickable = true
             layoutParams = LinearLayout.LayoutParams(sizePx, sizePx)
-            setOnFocusChangeListener { v, hasFocus ->
-                val targetScale = if (hasFocus) 1.08f else 1.0f
-                v.animate().scaleX(targetScale).scaleY(targetScale).setDuration(110).start()
+            setOnFocusChangeListener { _, hasFocus ->
                 onFocused?.invoke(hasFocus)
             }
         }
@@ -364,8 +362,6 @@ object Phim4KPlayerUi {
                         else -> Color.WHITE
                     }
                 )
-                val s = if (hasFocus) 1.05f else 1.0f
-                v.animate().scaleX(s).scaleY(s).setDuration(90).start()
             }
             setOnClickListener { onClick() }
         }
@@ -472,10 +468,6 @@ object Phim4KPlayerUi {
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply {
                     bottomMargin = dp(activity, 7)
-                }
-                setOnFocusChangeListener { v, hasFocus ->
-                    val s = if (hasFocus) 1.015f else 1.0f
-                    v.animate().scaleX(s).scaleY(s).setDuration(80).start()
                 }
                 setOnClickListener {
                     dialog.dismiss()

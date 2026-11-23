@@ -587,6 +587,17 @@ class PlayerActivity : AppCompatActivity() {
             }
         }
 
+        if (!BuildConfig.IS_PHONE_FLAVOR && intent.getBooleanExtra("catalog_preferences", false) &&
+            (keyCode == KeyEvent.KEYCODE_BACK || keyCode == KeyEvent.KEYCODE_ESCAPE)) {
+            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                if (sidePanelVisible) closeSidePanel() else {
+                    setResult(RESULT_OK)
+                    finish()
+                }
+            }
+            return true
+        }
+
         if (event.action == KeyEvent.ACTION_UP && keyCode == seekGestureKey) {
             seekGestureKey = -1
             return true
@@ -1714,10 +1725,6 @@ class PlayerActivity : AppCompatActivity() {
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply { bottomMargin = Phim4KPlayerUi.dp(this@PlayerActivity, 8) }
-                setOnFocusChangeListener { v, hasFocus ->
-                    val s = if (hasFocus) 1.015f else 1.0f
-                    v.animate().scaleX(s).scaleY(s).setDuration(80).start()
-                }
                 setOnClickListener {
                     closeSidePanel()
                     startEpisodePlayback(ep, resetPosition = true)
